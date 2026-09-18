@@ -1,0 +1,654 @@
+"""dikgames.com scraping.
+
+Two kinds of page, each giving different things:
+
+  list page  /tag/<tag>/page/<N>/   ~20 games each, with tags, cover, and a
+                                    <a title="Name [vX] [Dev]"> that carries
+                                    the version for free
+  detail page /<slug>/              the site rating, the full overview, and an
+                                    explicit Version: line
+
+The list page is cheap and the detail page is not, so sync walks tags and only
+fetches detail pages for games that are missing a rating.
+
+robots.txt is `Disallow:` with a pointer at sitemap_index.xml, so crawling is
+explicitly fine. Requests still go out one at a time with a delay - the whole
+site is ~1000 games and there is no reason to hammer it.
+"""
+
+import gzip
+import html
+import os
+import queue
+import re
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+import zlib
+from datetime import datetime
+
+import slg_db
+
+BASE = "https://dikgames.com"
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) slgking/0.1 "
+      "(personal library tool)")
+DELAY = 1.0
+TIMEOUT = 30
+
+# The theme registers one thumbnail size and uses it everywhere; the sitemap
+# only ever links the full-size original. Cover downloads ask for the sized one
+# - 18KB against 177KB, and the original is pure waste at 112x69 on screen.
+THUMB_SUFFIX = "-576x356"
+
+# post-sitemap3.xml answers HTTP 500 as of 2026-09-18. The other three carry
+# 2066 posts between them. A missing shard costs coverage, not correctness: the
+# slugs it holds are old games that the tag walk still backstops.
+SITEMAPS = ("post-sitemap.xml", "post-sitemap2.xml", "post-sitemap4.xml")
+
+# The sitemap lists the whole site, and the library holds barely half of it -
+# the tag walk only ever visited netorare/corruption/cheating, so ~1200 games
+# have never been seen. Ingesting those is a one-off 20-minute job, so it is
+# rationed per run and the rest rolls into the next sync.
+NEW_PER_RUN = 200
+
+_SECTION = re.compile(r'<section class="gp-post-item[^"]*".*?</section>', re.S)
+_TAG_URL = re.compile(r'href="%s/tag/([a-z0-9-]+)/"' % re.escape(BASE))
+_PLATFORM = re.compile(r'\bplatform-([a-z0-9-]+)')
+_TITLE_LINK = re.compile(
+    r'<a href="(https://dikgames\.com/[^"]+)"\s+title="([^"]*)"')
+_COVER = re.compile(r'data-src="(https://dikgames\.com/wp-content/uploads/[^"]+)"')
+_PUBDATE = re.compile(r'itemprop="datePublished"\s+datetime="([^"]+)"')
+_RATING = re.compile(r'"ratingValue":\s*"?([\d.]+)')
+_VERSION_LINE = re.compile(r'Version:\s*([^<\n]{0,24})')
+_DEV_LINE = re.compile(r'Developer:\s*([^<\n]{0,40})')
+_OVERVIEW = re.compile(r'id="elementor-tab-content-1601"[^>]*>(.*?)(?:</div>\s*</div>)', re.S)
+_OG_IMAGE = re.compile(r'property="og:image"\s+content="([^"]+)"')
+_OG_TITLE = re.compile(r'property="og:title"\s+content="([^"]*)"')
+_BRACKET = re.compile(r"\[([^\]]*)\]")
+_VERSIONISH = re.compile(r"^(?:v|ver|r|ep|ch|chapter|part|act|season)?\.?\s*\d", re.I)
+_STATUS_WORDS = {"final", "complete", "completed", "finished", "full release"}
+
+
+def http_get(url, timeout=TIMEOUT):
+    """One request, entity-decoded, raw bytes back. Raises on failure.
+
+    Module level so the threaded cover pool can use it without going through
+    Fetcher, whose whole job is to serialise requests.
+    """
+    req = urllib.request.Request(url, headers={
+        "User-Agent": UA,
+        "Accept-Encoding": "gzip, deflate",
+        "Accept-Language": "en-US,en;q=0.9",
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+        enc = (resp.headers.get("Content-Encoding") or "").lower()
+    if enc == "gzip" or raw[:2] == b"\x1f\x8b":
+        return gzip.decompress(raw)
+    if enc == "deflate":
+        return zlib.decompress(raw, -zlib.MAX_WBITS)
+    return raw
+
+
+class Fetcher:
+    """One request at a time, with a gap between them."""
+
+    def __init__(self, delay=DELAY, log=None):
+        self.delay = delay
+        self.log = log or (lambda *a: None)
+        self.count = 0
+        self._last = 0.0
+
+    def get(self, url, retries=1, binary=False):
+        for attempt in range(retries + 1):
+            wait = self.delay - (time.time() - self._last)
+            if wait > 0:
+                time.sleep(wait)
+            try:
+                raw = http_get(url)
+                self._last = time.time()
+                self.count += 1
+                return raw if binary else raw.decode("utf-8", "replace")
+            except (urllib.error.URLError, OSError, gzip.BadGzipFile) as exc:
+                self.log("  ! %s (%s)" % (url, exc))
+                if attempt == retries:
+                    return None
+                time.sleep(self.delay * 2)
+        return None
+
+
+def _strip_style(html):
+    """Drop <style> so its CSS cannot be mistaken for markup.
+
+    Leaving <script> alone on purpose - the JSON-LD with ratingValue lives in
+    one.
+    """
+    return re.sub(r"<style[^>]*>.*?</style>", "", html, flags=re.S | re.I)
+
+
+def _clean(text):
+    """Strip tags and decode entities.
+
+    Entities matter more than they look: several titles carry &#8211; (an
+    en-dash), and leaving it encoded breaks the local-folder matcher, which
+    compares normalised titles.
+    """
+    if not text:
+        return None
+    text = html.unescape(text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip() or None
+
+
+def parse_title(raw):
+    """'Name [v1.4.2 Beta][Final] [aura-dev]' -> name, version, developer, complete.
+
+    Not a fixed two-bracket split: the site glues the status bracket straight
+    onto the version one with no space ('[v1.4.2 Beta][Final]'), and some
+    entries carry malformed brackets ('[Ep.7 Free]]'). The last group is
+    reliably the developer, so the version is whichever earlier group actually
+    reads like one.
+
+    A lone bracket is the exception - with nothing after it, 'the last group is
+    the developer' would file 'Game [v1.0]' as written by v1.0. Read that one by
+    its shape instead.
+    """
+    # Titles reach here straight from the title attribute and still carry
+    # entities ('Horton Bay Stories &#8211; Jake'); the name column and the
+    # local-folder matcher both need them decoded.
+    raw = html.unescape(raw or "")
+    raw = re.sub(r"[\xa0\u200b]", " ", raw).strip()
+    if not raw:
+        return raw, None, None, 0
+
+    groups = [g.strip() for g in _BRACKET.findall(raw)]
+    name = _BRACKET.sub(" ", raw)
+    name = re.sub(r"[\[\]]", " ", name)
+    name = re.sub(r"\s+", " ", name).strip()
+
+    if len(groups) == 1 and _VERSIONISH.match(groups[0]):
+        developer, body = None, groups
+    else:
+        developer, body = (groups[-1] if groups else None), groups[:-1]
+    version = next((g for g in body if _VERSIONISH.match(g)), None)
+    complete = any(g.lower() in _STATUS_WORDS for g in body)
+    if version:
+        version = re.sub(r"^v(?:er)?\.?\s*", "", version, flags=re.I).strip() or None
+    return name or raw, version, developer or None, int(complete)
+
+
+def parse_list_page(page):
+    """Every game on one listing page.
+
+    The parameter is 'page', not 'html' - naming it 'html' shadows the html
+    module, and html.unescape() then dies with "str has no attribute
+    unescape". parse_title does the decoding, so there is nothing to unescape
+    here.
+    """
+    page = _strip_style(page)
+    out = []
+    for section in _SECTION.findall(page):
+        link = _TITLE_LINK.search(section)
+        if not link:
+            continue
+        url, raw_title = link.group(1), link.group(2)
+        slug = url.rstrip("/").rsplit("/", 1)[-1]
+        name, version, developer, complete = parse_title(raw_title)
+
+        classes = re.search(r'<section class="([^"]*)"', section)
+        classes = classes.group(1) if classes else ""
+        tags = sorted(set(_TAG_URL.findall(section))
+                      or set(re.findall(r"\btag-([a-z0-9-]+)", classes)))
+        platform = _PLATFORM.search(classes)
+        published = _PUBDATE.search(section)
+        cover = _COVER.search(section)
+
+        out.append({
+            "slug": slug, "url": url, "title": name, "version": version,
+            "developer": developer, "tags": tags, "complete": complete,
+            "engine": platform.group(1) if platform else None,
+            "last_updated": published.group(1)[:10] if published else None,
+            "cover_url": cover.group(1) if cover else None,
+        })
+    return out
+
+
+def parse_detail_page(page):
+    """Everything one detail page knows, which turns out to be everything.
+
+    Measured on /the-copycat/: 26 tag links, og:image matching the listing
+    page's thumbnail, ratingValue 7.3, 'Version: v1.3.0', 'Developer: ...',
+    datePublished and the overview. That is the whole row, so an incremental
+    sync never has to touch a listing page at all.
+    """
+    page = _strip_style(page)
+    rating = _RATING.search(page)
+    version = _VERSION_LINE.search(page)
+    developer = _DEV_LINE.search(page)
+    overview = _OVERVIEW.search(page)
+    cover = _OG_IMAGE.search(page)
+    title = _OG_TITLE.search(page)
+    published = _PUBDATE.search(page)
+    return {
+        "rating": float(rating.group(1)) if rating else None,
+        "version": (_clean(version.group(1)) or "").lstrip("vV") or None
+        if version else None,
+        "developer": _clean(developer.group(1)) if developer else None,
+        "overview": _clean(overview.group(1))[:2000] if overview else None,
+        "tags": sorted(set(_TAG_URL.findall(page))),
+        "cover_url": _sized_cover(cover.group(1)) if cover else None,
+        "title": _clean(title.group(1)) if title else None,
+        "last_updated": published.group(1)[:10] if published else None,
+    }
+
+
+def _sized_cover(url):
+    """Swap a full-size upload for the theme's 576x356 crop.
+
+    Only mainscreen* files have the crop registered; the sitemap's other
+    images are already 768x432 and stay as they are.
+    """
+    if not url:
+        return url
+    stem, ext = os.path.splitext(url)
+    if stem.rsplit("/", 1)[-1].startswith("mainscreen") and not stem.endswith(THUMB_SUFFIX):
+        return stem + THUMB_SUFFIX + ext
+    return url
+
+
+_URL_BLOCK = re.compile(r"<url>(.*?)</url>", re.S)
+
+
+def fetch_sitemap(fetcher, log=print):
+    """{slug: {'lastmod': date, 'cover': url}} for the whole site, 3 requests.
+
+    Way cheaper than walking tag listings, which visited 2859 game slots for
+    1274 games (2.24x) and re-read ~600 pages per re-sync for nothing.
+    """
+    out = {}
+    for name in SITEMAPS:
+        xml = fetcher.get("%s/%s" % (BASE, name))
+        if not xml:
+            log("  ! %s 取不到，跳过" % name)
+            continue
+        for block in _URL_BLOCK.findall(xml):
+            loc = re.search(r"<loc>([^<]+)</loc>", block)
+            if not loc:
+                continue
+            slug = loc.group(1).rstrip("/").rsplit("/", 1)[-1]
+            if not slug:
+                continue
+            mod = re.search(r"<lastmod>([^<]+)</lastmod>", block)
+            img = re.search(r"<image:loc>([^<]+)</image:loc>", block)
+            out[slug] = {
+                "lastmod": mod.group(1)[:10] if mod else None,
+                "cover": _sized_cover(img.group(1)) if img else None,
+            }
+    return out
+
+
+def tag_names(fetcher):
+    """All 130 tag slugs, from the Yoast tag sitemap."""
+    xml = fetcher.get("%s/post_tag-sitemap.xml" % BASE)
+    if not xml:
+        return []
+    return sorted({u.rstrip("/").rsplit("/", 1)[-1]
+                   for u in re.findall(r"<loc>([^<]+)</loc>", xml)})
+
+
+def walk_tag(fetcher, tag, max_pages=None, on_progress=None):
+    """Yield every game under one tag, page by page, stopping when a page is empty."""
+    page, seen = 1, 0
+    while True:
+        url = ("%s/tag/%s/" % (BASE, tag) if page == 1
+               else "%s/tag/%s/page/%d/" % (BASE, tag, page))
+        html = fetcher.get(url)
+        if not html:
+            break
+        games = parse_list_page(html)
+        if not games:
+            break
+        yield games
+        seen += len(games)
+        if on_progress:
+            on_progress(tag, page, seen)
+        if max_pages and page >= max_pages:
+            break
+        page += 1
+
+
+def sync_tags(conn, fetcher, tags, max_pages=None, on_progress=None, log=print):
+    """Walk tag listings and upsert. Returns a summary dict."""
+    seen, created = set(), 0
+    for tag in tags:
+        log("抓取标签 %s ..." % tag)
+        page_no = 0
+        for page_no, games in enumerate(walk_tag(fetcher, tag, max_pages, on_progress), 1):
+            for game in games:
+                cover_url = game.pop("cover_url", None)
+                game_id, is_new = slg_db.upsert_game(conn, **game)
+                if is_new:
+                    created += 1
+                if cover_url:
+                    _note_cover(conn, game_id, cover_url)
+                seen.add(game_id)
+            conn.commit()
+            log("  page %d · 累计 %d 款" % (page_no, len(seen)))
+        slg_db.log_sync(conn, tag, page_no, len(seen), created)
+    return {"games": len(seen), "new": created, "requests": fetcher.count}
+
+
+def _note_cover(conn, game_id, url):
+    """Record the cover URL; the download happens in a later, separate pass."""
+    row = conn.execute("SELECT cover_file FROM games WHERE id = ?", (game_id,)).fetchone()
+    if row and row["cover_file"]:
+        return
+    conn.execute("UPDATE games SET cover_file = ? WHERE id = ?",
+                 ("pending:" + url, game_id))
+
+
+def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, on_progress=None,
+                     log=print):
+    """Update the catalogue from the sitemaps instead of walking tags.
+
+    Three sitemap requests name every game and the date it last changed, so a
+    detail page is fetched only when the game is new or its <lastmod> moved.
+    Once the backlog is ingested that is normally zero to five pages a run.
+    The tag walk this replaces issued ~100 requests every run, revisited 2.24x
+    as many game slots as there are games, and re-read ~600 pages that could
+    not possibly contain anything new.
+
+    A NULL lastmod means the row predates this column, so it adopts the
+    current value rather than counting as changed: adopting costs one UPDATE,
+    while treating it as changed would mean 1274 detail fetches to learn
+    nothing.
+
+    new_limit rations the first run. The library has never held more than a
+    third of the site, so discovery would otherwise be a 20-minute stall on
+    the user's first click; capped, each sync finishes in minutes and the
+    remainder is simply still there next time.
+    """
+    index = fetch_sitemap(fetcher, log=log)
+    if not index:
+        log("  ! sitemap 全取不到，本次不同步")
+        return {"catalogue": 0, "new": 0, "changed": 0, "deferred": 0,
+                "requests": fetcher.count}
+
+    known = {row["slug"]: row for row in conn.execute(
+        "SELECT id, slug, lastmod FROM games")}
+    todo, adopted = [], 0
+    for slug, meta in sorted(index.items()):
+        row = known.get(slug)
+        if row is None:
+            todo.append((slug, meta, True))
+        elif row["lastmod"] is None:
+            slg_db.set_lastmod(conn, row["id"], meta["lastmod"])
+            adopted += 1
+        elif meta["lastmod"] and meta["lastmod"] != row["lastmod"]:
+            todo.append((slug, meta, False))
+    conn.commit()
+    # Changed first: there are only ever a handful, and they are the ones the
+    # user's own library is already tracking. New games wait their turn.
+    changed_todo = [item for item in todo if not item[2]]
+    new_todo = [item for item in todo if item[2]]
+    deferred = max(0, len(new_todo) - new_limit)
+    todo = changed_todo + new_todo[:new_limit]
+    changed = len(changed_todo)
+    log("sitemap %d 款 · 首次登记 %d · 本次抓 %d（变动 %d / 新增 %d，余 %d 款留到下次）"
+        % (len(index), adopted, len(todo), changed, len(todo) - changed, deferred))
+
+    created = 0
+    for i, (slug, meta, is_new) in enumerate(todo, 1):
+        url = "%s/%s/" % (BASE, slug)
+        page = fetcher.get(url)
+        if not page:
+            continue
+        detail = parse_detail_page(page)
+        title = detail["title"] or slug.replace("-", " ").title()
+        cover = detail["cover_url"] or meta.get("cover")
+        try:
+            slg_db.upsert_game(
+                conn, slug=slug, url=url, title=title,
+                version=detail["version"],
+                # The listing page's bracket is the studio; the detail page's
+                # Developer: line is often the individual. Neither is wrong,
+                # so an existing row keeps whichever it already had.
+                developer=None if not is_new else detail["developer"],
+                tags=detail["tags"],
+                last_updated=detail["last_updated"] or meta["lastmod"],
+                lastmod=meta["lastmod"])
+            game_id = conn.execute("SELECT id FROM games WHERE slug = ?",
+                                   (slug,)).fetchone()["id"]
+            slg_db.upsert_detail(conn, game_id, overview=detail["overview"],
+                                 rating=detail["rating"])
+            if cover:
+                _note_cover(conn, game_id, cover)
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001 - one bad row must not stop the run
+            conn.rollback()
+            log("  ! %s 入库失败：%s" % (slug, exc))
+            continue
+        created += int(is_new)
+        if on_progress:
+            on_progress(i, len(todo), title)
+
+    slg_db.log_sync(conn, "incremental", 1, len(index), created)
+    return {"catalogue": len(index), "new": created, "changed": changed,
+            "deferred": deferred, "requests": fetcher.count}
+
+
+def download_covers(conn, limit=None, workers=3, rate=3.0, log=print,
+                    on_progress=None, should_stop=None):
+    """Fetch the pending thumbnails into data/covers/. Resumable, stoppable.
+
+    A URL is recorded as 'pending:<url>' the moment it is known, so an
+    interrupted run needs no progress file: whatever is still pending is
+    exactly what is left to do.
+
+    The downloads sit on a few threads and the writes stay on this one. sqlite
+    connections cannot cross threads, and the wait is all network - the point
+    of the threads is to overlap that wait, not to write faster.
+    """
+    rows = conn.execute(
+        "SELECT id, slug, cover_file FROM games"
+        " WHERE cover_file LIKE 'pending:%'"
+        + (" LIMIT %d" % int(limit) if limit else "")).fetchall()
+    total = len(rows)
+    if not total:
+        log("没有待下载的封面")
+        return 0
+
+    dest = slg_db.covers_dir()
+    work = queue.Queue()
+    for row in rows:
+        work.put(row)
+    results = queue.Queue()
+
+    gate = threading.Lock()
+    next_at = [0.0]
+
+    def worker():
+        while not (should_stop and should_stop()):
+            try:
+                row = work.get_nowait()
+            except queue.Empty:
+                return
+            # A shared gate, not a per-thread sleep: three threads each
+            # sleeping 0.3s would still put ten requests a second on the wire.
+            with gate:
+                now = time.time()
+                wait = next_at[0] - now
+                next_at[0] = max(now, next_at[0]) + 1.0 / max(rate, 0.1)
+            if wait > 0:
+                time.sleep(wait)
+            url = row["cover_file"][len("pending:"):]
+            try:
+                blob = http_get(url)
+            except Exception:  # noqa: BLE001 - a dead image must not stop the run
+                blob = None
+            results.put((row["id"], row["slug"], url, blob))
+        results.put((None, None, None, None))  # told to stop: unblock the writer
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(workers)]
+    for thread in threads:
+        thread.start()
+
+    done, received, sentinels = 0, 0, 0
+    while received < total:
+        row_id, slug, url, blob = results.get()
+        if row_id is None:
+            sentinels += 1
+            if sentinels >= len(threads):
+                break  # every worker stood down; the rest stays pending
+            continue
+        received += 1
+        if blob:
+            ext = os.path.splitext(url.split("?")[0])[1] or ".jpg"
+            name = slug + ext
+            try:
+                with open(os.path.join(dest, name), "wb") as fh:
+                    fh.write(blob)
+                slg_db.set_cover(conn, row_id, name)
+                conn.commit()
+                done += 1
+            except OSError as exc:
+                log("  ! 写入失败 %s：%s" % (name, exc))
+        else:
+            log("  ! 下载失败 %s" % url)
+        if on_progress:
+            on_progress(done, total)
+    log("封面下载 %d/%d" % (done, total))
+    return done
+
+
+def enrich(conn, fetcher, limit=200, log=print, on_progress=None,
+           should_stop=None):
+    """Fill in rating, overview, tags and cover for games that lack them.
+
+    Capped per run so a first sync is not a 20-minute wall - run it again and
+    it picks up where it stopped.
+
+    The detail page is a superset of the listing page, so this takes the tags
+    and the og:image too. That is what finally clears the 861-cover backlog:
+    the URLs were sitting in the db the whole time, and the pages that carry
+    them are the same ones being fetched for the ratings anyway.
+    """
+    rows = conn.execute(
+        "SELECT id, url FROM games"
+        " WHERE url IS NOT NULL AND (rating IS NULL OR overview IS NULL"
+        "       OR cover_file IS NULL)"
+        # A missing cover is the only gap the user can see, so it outranks a
+        # missing rating. Plain last_updated DESC starved the last 13 coverless
+        # games: they are old, and the missing-rating backlog is ~980 rows.
+        " ORDER BY (cover_file IS NULL) DESC, last_updated DESC LIMIT ?",
+        (limit,)).fetchall()
+    done = 0
+    for row in rows:
+        if should_stop and should_stop():
+            break
+        page = fetcher.get(row["url"])
+        if not page:
+            continue
+        detail = parse_detail_page(page)
+        slg_db.upsert_detail(
+            conn, row["id"], rating=detail["rating"], version=detail["version"],
+            developer=detail["developer"], overview=detail["overview"])
+        if detail["tags"]:
+            slg_db.set_tags(conn, row["id"], detail["tags"])
+        if detail["cover_url"]:
+            _note_cover(conn, row["id"], detail["cover_url"])
+        conn.commit()
+        done += 1
+        if on_progress:
+            on_progress(done, len(rows), row["url"])
+    log("详情补全 %d/%d" % (done, len(rows)))
+    return done
+
+
+# --- CLI -----------------------------------------------------------------------
+
+def _main(argv=None):
+    # The console is cp936 here and every line below is Chinese. slg_main sets
+    # this for the packaged entry point; running this file directly needs it
+    # too.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
+
+    import argparse
+    parser = argparse.ArgumentParser(prog="slgking scrape", description="抓取 dikgames")
+    parser.add_argument("--tag", action="append", default=[],
+                        help="要抓的标签（可重复）")
+    parser.add_argument("--incremental", action="store_true",
+                        help="走 sitemap 增量同步（推荐，约 3 个请求）")
+    parser.add_argument("--sitemap", action="store_true",
+                        help="只打印 sitemap 索引结果，不写库")
+    parser.add_argument("--new-limit", type=int, default=NEW_PER_RUN, metavar="N",
+                        help="单次增量最多纳入多少款新游戏（默认 %d）" % NEW_PER_RUN)
+    parser.add_argument("--max-pages", type=int, default=None)
+    parser.add_argument("--enrich", type=int, default=0, metavar="N",
+                        help="额外补全 N 款游戏的详情（评分/简介）")
+    parser.add_argument("--covers", type=int, default=0, metavar="N",
+                        help="额外下载 N 张封面")
+    parser.add_argument("--list-tags", action="store_true", help="列出全部标签")
+    parser.add_argument("--dry-run", action="store_true", help="只打印，不写库")
+    parser.add_argument("--delay", type=float, default=DELAY)
+    args = parser.parse_args(argv)
+
+    fetcher = Fetcher(delay=args.delay, log=print)
+
+    if args.list_tags:
+        names = tag_names(fetcher)
+        print("共 %d 个标签：" % len(names))
+        for name in names:
+            print(" ", name)
+        return 0
+
+    if args.dry_run:
+        tags = args.tag or ["netorare"]
+        total, slugs = 0, []
+        for tag in tags:
+            for games in walk_tag(fetcher, tag, args.max_pages):
+                total += len(games)
+                for g in games[:2]:
+                    slugs.append((tag, g))
+        print("dry-run：%d 款（%d 次请求）" % (total, fetcher.count))
+        for tag, g in slugs[:6]:
+            print("  [%s] %s v%s · %s" % (tag, g["title"], g["version"],
+                                          ",".join(g["tags"][:5])))
+        return 0
+
+    if args.sitemap:
+        index = fetch_sitemap(fetcher, log=print)
+        print("sitemap：%d 款（%d 个请求）" % (len(index), fetcher.count))
+        for slug in sorted(index)[:6]:
+            print("  %s  %s  %s" % (slug, index[slug]["lastmod"],
+                                    index[slug]["cover"]))
+        return 0
+
+    conn = slg_db.connect()
+    try:
+        if args.incremental:
+            summary = sync_incremental(conn, fetcher, new_limit=args.new_limit,
+                                       log=print)
+            print("全站 %d 款 · 新增 %d · 变动 %d · 余 %d 款 · %d 个请求"
+                  % (summary["catalogue"], summary["new"], summary["changed"],
+                     summary["deferred"], summary["requests"]))
+        if args.tag:
+            summary = sync_tags(conn, fetcher, args.tag, args.max_pages)
+            print("入库 %d 款，新增 %d 款" % (summary["games"], summary["new"]))
+        if args.covers:
+            download_covers(conn, limit=args.covers, log=print)
+        if args.enrich:
+            enrich(conn, fetcher, args.enrich)
+    finally:
+        conn.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_main())

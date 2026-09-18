@@ -1,0 +1,18 @@
+# Built by build_exe.bat
+build/
+dist/
+*.spec.bak
+
+# Runtime state - the catalogue, the cover cache, whatever the user has rated -
+# lives in %LOCALAPPDATA%\slgking, not here, so there is normally nothing to
+# ignore. Kept as a net for the case where slg_db.app_dir() ever falls back to
+# the source tree: that file is personal and must never be committed.
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Throwaway
+*.log
+__pycache__/
+*.pyc

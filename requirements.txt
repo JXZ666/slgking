@@ -1,0 +1,10 @@
+# The window. Ships themes/*.json and fonts/*.otf as package data; the
+# hooks-contrib hook runs collect_data_files so a frozen build picks them up.
+customtkinter>=6.0.0
+
+# customtkinter needs Pillow for CTkImage, which is how the cover thumbnails
+# and the cached 576x356 jpgs get scaled.
+pillow>=10.0.0
+
+# Build only. Pulled in by build_exe.bat if it is not already there.
+# pyinstaller>=6.0
