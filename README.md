@@ -4,7 +4,14 @@
 
 作者：[JXZ666](https://github.com/JXZ666) · 完全免费，没有收费版
 
-<!-- 截图位：主界面 / 详情页 / 翻译设置。放 assets/screenshots/ 下再引用 -->
+![主界面：左侧筛选栏、中间卡片列表、右侧详情面板](assets/screenshots/main-window.png)
+
+| 详情页 | 翻译设置 |
+|---|---|
+| ![详情页：标签云，以及简介的「原文 / 中文」切换](assets/screenshots/detail-panel.png) | ![翻译设置：引擎、服务商、接口地址与 API Key](assets/screenshots/translate-settings.png) |
+
+> 截图里的游戏是编的，封面是画的 —— `python tools/shot_cards.py --demo` 生成的演示库，
+> 不是任何真实条目。
 
 ## English
 
@@ -249,7 +256,7 @@ score(game) = 站内评分 + Σ(该游戏各标签的 weight)
    所以解析「最后一个括号是作者，前面第一个像版本号的才是版本」。
 6. **冻结的 exe 是个快照，不会读旁边的源码** —— 单文件模式下模块都解开在
    `sys._MEIPASS` 里，改完源码不重新打包，双击 exe 跑的还是旧的。
-   左侧栏作者行下面那行 `v0.11.0 · exe · 2026-09-19 02:10` 就是给这个用的：
+   左侧栏作者行下面那行 `v0.12.0 · exe · 2026-09-19 13:01` 就是给这个用的：
    时间没变，就是没重新打包。`--version` 打印同一行。
 7. **别直接写 `ctk.CTkFont()`** —— customtkinter 默认字族是 Roboto，它**一个汉字
    字形都没有**，中文全靠 GDI 字体链接回退，粗体还会走合成加粗糊成一团。统一走

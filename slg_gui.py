@@ -28,7 +28,7 @@ import slg_engines
 import slg_scrape
 import slg_translate
 
-APP_VERSION = "0.11.0"
+APP_VERSION = "0.12.0"
 APP_TITLE = "SLG黄游之王"
 AUTHOR = "菊千代赛高"
 GITHUB_URL = "https://github.com/JXZ666"
@@ -2227,6 +2227,15 @@ class App(ctk.CTk):
         model_entry.insert(0, config.model)
         paint()
         self._refresh_tag_button()
+
+        # The five AI fields wrap to different heights depending on display
+        # scaling, so the 500x580 literal above clips the last row (measured at
+        # 150%: the content needs 624 logical px). Ask the widgets what they
+        # need instead of guessing a bigger number that goes stale again.
+        win.update_idletasks()
+        win.geometry("500x%d" % max(
+            580, int(round(win.winfo_reqheight()
+                           / ctk.ScalingTracker.get_window_scaling(win)))))
 
     def open_help(self):
         win = ctk.CTkToplevel(self)
