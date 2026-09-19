@@ -27,8 +27,9 @@ import slg_db
 import slg_engines
 import slg_scrape
 import slg_translate
+import slg_update
 
-APP_VERSION = "0.13.0"
+APP_VERSION = "0.14.0"
 APP_TITLE = "SLG黄游之王"
 AUTHOR = "菊千代赛高"
 GITHUB_URL = "https://github.com/JXZ666"
@@ -108,6 +109,15 @@ COVER_W, COVER_H = 112, 69          # dikgames thumbs are 576x356, ~1.62:1
 DETAIL_W, DETAIL_H = 300, 185
 PAGE = 80                            # cards rendered per "load more"
 REFRESH_GAP = 5.0                    # seconds between refreshes while syncing
+# What that gap becomes while a job is running. A refresh rebuilds every card
+# on screen, and during a sync the top of the list churns - enrich rewrites
+# tags, tags move the score, the score is the default sort - so the
+# skip-if-unchanged shortcut misses and the rebuild is a multi-second freeze on
+# the tk thread. At 5s that was most of the time the user spent trying to click
+# 停止. The progress line still updates every message; the end-of-job refresh
+# still draws the final list.
+REFRESH_GAP_BUSY = 20.0
+DRAIN_PER_TICK = 200                 # background messages handled per pump pass
 # Detail pages a single sync will backfill. 968 of 1595 rows were still waiting
 # at 150 a run, which is seven syncs before the oldest game on screen gets a
 # blurb; a sync is three sitemap requests plus this, so the cap was the whole
@@ -527,6 +537,10 @@ class App(ctk.CTk):
         # expensive to do once per downloaded cover.
         self._last_refresh = 0.0
         self._stop = threading.Event()
+        # The newer release the last check found, kept so a theme switch can put
+        # the notice back on the sidebar it just rebuilt.
+        self._update_found = None
+        self._update_url = slg_update.RELEASES_URL
 
         self._build()
         self.refresh()
@@ -538,6 +552,10 @@ class App(ctk.CTk):
         # would sit there blocking the mainloop it is meant to be checking.
         if notify and not slg_db.get_pref(self.conn, PREF_FREE_NOTICE):
             self.after(300, self._show_free_notice)
+        # Late enough that it never delays the window appearing, and skipped
+        # entirely by the smoke test, which is not a user session.
+        if notify:
+            self.after(3000, self._start_update_check)
 
     # --- theme ----------------------------------------------------------------
 
@@ -573,6 +591,7 @@ class App(ctk.CTk):
         # downloaded thumbnail, which is the bulk of the work of a repaint.
         self._build()
         self._paint_scan_button()
+        self._repaint_update_notice()
         if self.busy:
             self._start_job(self._job_label)
         self.selected = None
@@ -629,9 +648,9 @@ class App(ctk.CTk):
         # to write through.
         self.view_buttons = {}
         self.stat_label = self.progress_label = None
-        self.update_btn = self.translate_btn = self.covers_btn = None
-        self.sync_btn = self.rebuild_btn = self.search_entry = None
-        self.scan_btn = self.backfill_btn = None
+        self.update_btn = self.translate_btn = self.search_entry = None
+        self.sync_btn = self.maintenance_btn = self.scan_btn = None
+        self.update_label = None
 
     def _poll_system(self):
         """"system" has no callback to hang off, so sample the OS setting.
@@ -730,6 +749,14 @@ class App(ctk.CTk):
                                            wraplength=166, justify="left")
         self.progress_label.pack(pady=(0, 10))
 
+        # Built here, packed only when a check finds something. The sidebar is
+        # the one column that has already been squeezed to zero once, so this
+        # goes in with an explicit after= rather than by re-packing the header.
+        self.update_label = ctk.CTkLabel(
+            header, text="", text_color=ACCENT, font=ui_font(size=11),
+            wraplength=166, justify="left", cursor="hand2")
+        self.update_label.bind("<Button-1>", self._open_update_page)
+
         # Identity and the free-software warning, pinned to the bottom before
         # anything that can grow gets a say.
         footer = ctk.CTkFrame(bar, fg_color="transparent")
@@ -745,34 +772,23 @@ class App(ctk.CTk):
 
         actions = ctk.CTkFrame(bar, fg_color="transparent")
         actions.pack(side="bottom", fill="x")
-        # Demoted to a manual, confirmed action: the tag walk is ~100 requests
-        # and cannot see anything the sitemap pass has not already seen. It
-        # stays because it is the fallback if the sitemaps ever change shape.
-        self.rebuild_btn = ctk.CTkButton(
-            actions, text="全量重建…", height=28, corner_radius=8,
-            fg_color="transparent", text_color=MUTED, hover_color=CARD,
-            font=ui_font(size=12), anchor="w", command=self.do_rebuild)
-        self.rebuild_btn.pack(fill="x", padx=12, pady=(0, 2))
+        # Two buttons, not four. The three chores behind 更多… all reach the
+        # same games as the sitemap sync - two of them at a hundred times the
+        # cost - and as a column of four differently-sized buttons they gave a
+        # new user no way to tell which one they wanted. Sync stays out here
+        # because it is the one that is actually routine.
         self.sync_btn = ctk.CTkButton(actions, text="同步 dikgames", height=38,
                                       corner_radius=8, fg_color=ACCENT,
                                       command=self.do_sync)
         self.sync_btn.pack(fill="x", padx=12, pady=(0, 6))
-        self.covers_btn = ctk.CTkButton(
-            actions, text="下载封面", height=34, corner_radius=8,
+        # Same shape and height as 同步, transparent instead of filled: the
+        # difference between the two is meant to be the only thing that reads
+        # as a difference.
+        self.maintenance_btn = ctk.CTkButton(
+            actions, text="更多…", height=38, corner_radius=8,
             fg_color="transparent", text_color=TEXT, hover_color=CARD,
-            anchor="w", command=self.do_covers)
-        self.covers_btn.pack(fill="x", padx=12, pady=(0, 8))
-        # The site lists 2066 games; the library has ever held about half, and
-        # the never-ingested rest are all years old. Without this the routine
-        # sync spends its whole 200-game budget on back catalogue every time,
-        # which is why the "new games" it reports are never the ones the user
-        # is waiting for. Right-click forgets the cutoff entirely.
-        self.backfill_btn = ctk.CTkButton(
-            actions, text="补齐历史…", height=28, corner_radius=8,
-            fg_color="transparent", text_color=MUTED, hover_color=CARD,
-            font=ui_font(size=12), anchor="w", command=self.do_backfill)
-        self.backfill_btn.pack(fill="x", padx=12, pady=(0, 2))
-        self.backfill_btn.bind("<Button-3>", lambda e: self._forget_sync_since())
+            command=self.open_maintenance)
+        self.maintenance_btn.pack(fill="x", padx=12)
 
         nav = ctk.CTkScrollableFrame(bar, fg_color="transparent")
         nav.pack(side="top", fill="both", expand=True)
@@ -1061,8 +1077,12 @@ class App(ctk.CTk):
         if gaps["overview"]:
             text += "\n简介缺 %d 款（同步补齐）" % gaps["overview"]
         self.stat_label.configure(text=text)
-        self.covers_btn.configure(
-            text="下载封面（%d）" % gaps["covers"] if gaps["covers"] else "封面已齐")
+        # The count rides on the door rather than on the button behind it: the
+        # dialog is rebuilt on every open, so a number cached in a closed window
+        # would be the one place the user cannot read it.
+        self.maintenance_btn.configure(
+            text="更多…  ·  封面待下 %d" % gaps["covers"] if gaps["covers"]
+            else "更多…")
 
     def _scroll_offset(self):
         """Where the list is scrolled to, or None if that cannot be read.
@@ -2118,22 +2138,117 @@ class App(ctk.CTk):
         return win
 
     def open_tag_picker(self):
-        win = self._new_dialog("标签库", "420x600")
-        ctk.CTkLabel(win, text="左键加入筛选 · 右键排除",
-                     text_color=MUTED, font=ui_font(size=12)).pack(pady=10)
+        """Browse and select tags without losing the window on every click.
+
+        Picking a tag used to destroy the dialog, so choosing four meant four
+        round trips. Now the selection applies live and the window stays open.
+        The search box and the two-column grid are for the other half of the
+        complaint: the vocabulary passed 130 tags and a single column of them
+        was a long scroll to a tag whose name the user already knew.
+        """
+        win = self._new_dialog("标签库", "580x620")
+        head = ctk.CTkLabel(win, text="", text_color=MUTED, font=ui_font(size=12))
+        head.pack(pady=(10, 6))
+        entry = ctk.CTkEntry(win, placeholder_text="搜索标签…", height=32,
+                             corner_radius=8, fg_color=CARD, text_color=TEXT,
+                             placeholder_text_color=MUTED, border_width=1,
+                             border_color=CHIP, font=ui_font(size=13))
+        entry.pack(fill="x", padx=12)
         frame = ctk.CTkScrollableFrame(win, fg_color="transparent")
-        frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        for row in slg_db.tag_counts(self.conn):
-            slug = row["name"]
-            state = " √" if slug in self.include else (" ×" if slug in self.exclude else "")
+        frame.pack(fill="both", expand=True, padx=10, pady=(8, 6))
+        footer = ctk.CTkFrame(win, fg_color="transparent")
+        footer.pack(fill="x", padx=12, pady=(0, 10))
+
+        # Read once: the counts cannot change while this window is open, and
+        # re-querying on every keystroke would put a GROUP BY behind the search
+        # box. Matching is case-folded against both the translated name and the
+        # slug, because the user may know either.
+        rows = slg_db.tag_counts(self.conn)
+
+        def redraw(*_):
+            for child in frame.winfo_children():
+                child.destroy()
+            needle = entry.get().strip().lower()
+            shown = [row for row in rows
+                     if not needle
+                     or needle in display_tag(row["name"]).lower()
+                     or needle in row["name"].lower()]
+            for i, row in enumerate(shown):
+                slug = row["name"]
+                state = (" √" if slug in self.include
+                         else " ×" if slug in self.exclude else "")
+                btn = ctk.CTkButton(
+                    frame, text="%s    %d%s" % (display_tag(slug), row["n"], state),
+                    anchor="w", height=30, corner_radius=6, fg_color="transparent",
+                    text_color=TEXT, hover_color=CHIP, font=ui_font(size=13),
+                    command=lambda s=slug: pick(s))
+                btn.bind("<Button-3>", lambda e, s=slug: pick(s, exclude=True))
+                btn.grid(row=i // 2, column=i % 2, sticky="ew", padx=2, pady=1)
+            if not shown:
+                ctk.CTkLabel(frame, text="没有匹配的标签", text_color=MUTED,
+                             font=ui_font(size=12)).grid(row=0, column=0,
+                                                         padx=8, pady=14)
+            head.configure(text="左键加入筛选 · 右键排除　|　已选 %d · 排除 %d"
+                                % (len(self.include), len(self.exclude)))
+
+        def pick(slug, exclude=False):
+            self.toggle_tag(slug, exclude=exclude)
+            redraw()
+
+        frame.grid_columnconfigure(0, weight=1)
+        frame.grid_columnconfigure(1, weight=1)
+        entry.bind("<KeyRelease>", redraw)
+        ctk.CTkButton(footer, text="清空", height=34, corner_radius=8,
+                      fg_color="transparent", text_color=TEXT, hover_color=CARD,
+                      font=ui_font(size=13),
+                      command=lambda: (self.clear_filters(), redraw())
+                      ).pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkButton(footer, text="完成", height=34, corner_radius=8,
+                      fg_color=ACCENT, text_color=ON_ACCENT, hover_color=CARD,
+                      font=ui_font(size=13),
+                      command=win.destroy).pack(side="right", fill="x",
+                                                expand=True, padx=(6, 0))
+        redraw()
+
+    def open_maintenance(self):
+        """The three chores that are not the routine sync.
+
+        One dialog rather than three sidebar buttons: none of them is what a
+        new user is looking for, and each is only safe to click with a sentence
+        of explanation attached. Identical styling on all three, so what tells
+        them apart is the text and nothing else.
+        """
+        win = self._new_dialog("同步与维护", "440x460")
+        gaps = slg_db.data_gaps(self.conn)
+        entries = (
+            ("全量重建…",
+             "按标签把 dikgames 重爬一遍：约 100 个请求、10 分钟。"
+             "拿到的数据和「同步」完全一样，只是慢得多。",
+             self.do_rebuild, None),
+            ("下载封面（%d）" % gaps["covers"] if gaps["covers"] else "封面已齐",
+             "补下缺失的封面缩略图。可随时停止，下次接着下。",
+             self.do_covers, None),
+            ("补齐历史…",
+             "收下日期闸门之前的老游戏。右键这颗按钮 = 取消日期闸门。",
+             self.do_backfill, self._forget_sync_since),
+        )
+        # The dialog cannot normally be opened mid-job - _start_job disables the
+        # button that leads here - but the job may have started from the sync
+        # button while this was already on screen.
+        state = "disabled" if self.busy else "normal"
+        for text, blurb, command, on_right in entries:
             btn = ctk.CTkButton(
-                frame, text="%s    %d%s" % (display_tag(slug), row["n"], state),
-                anchor="w", height=30, corner_radius=6, fg_color="transparent",
-                text_color=TEXT, hover_color=CHIP, font=ui_font(size=13),
-                command=lambda s=slug: (self.toggle_tag(s), win.destroy()))
-            btn.pack(fill="x", pady=1)
-            btn.bind("<Button-3>",
-                     lambda e, s=slug: (self.toggle_tag(s, exclude=True), win.destroy()))
+                win, text=text, height=36, corner_radius=8, anchor="w",
+                fg_color="transparent", text_color=TEXT, hover_color=CARD,
+                font=ui_font(size=13), state=state,
+                command=lambda c=command, w=win: (w.destroy(), c()))
+            if on_right is not None:
+                btn.bind("<Button-3>",
+                         lambda e, c=on_right, w=win: (w.destroy(), c()))
+            btn.pack(fill="x", padx=16, pady=(10, 0))
+            ctk.CTkLabel(win, text=blurb, text_color=MUTED,
+                         font=ui_font(size=11), justify="left",
+                         wraplength=380).pack(fill="x", padx=22, pady=(2, 0))
 
     def open_weights(self):
         win = self._new_dialog("偏好权重", "420x560")
@@ -2357,6 +2472,18 @@ class App(ctk.CTk):
                                              wraplength=450, justify="left")
         self._settings_status.grid(row=6, column=0, sticky="ew", pady=(10, 0))
 
+        # Deliberately not called "检查更新": the sidebar already has a button
+        # by that name, and it means "which of my local games have a newer
+        # build on dikgames". Two different questions, two different words.
+        ctk.CTkLabel(frame, text="软件更新", text_color=TEXT, anchor="w",
+                     font=ui_font(size=13)).grid(row=7, column=0, sticky="ew",
+                                                 pady=(22, 4))
+        ctk.CTkButton(frame, text="检查软件更新", height=34, corner_radius=8,
+                      fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+                      font=ui_font(size=13),
+                      command=lambda: self._start_update_check(force=True)
+                      ).grid(row=8, column=0, sticky="ew")
+
         def paint():
             """Re-apply everything that depends on the engine choice."""
             free = engine_seg.get() == "免费机翻"
@@ -2485,18 +2612,22 @@ class App(ctk.CTk):
              "已经抓到的不会重复抓。站点偶尔抖动，等一会儿再试。")
 
         body("Q：同步跑太久，能停吗？", color=MUTED)
-        body("A：能。任务跑起来之后，左上角那颗按钮会变成「停止」，点一下就停；"
-             "已经抓到的部分会保存，下次接着来。")
+        body("A：能。任务跑起来之后，左下角那颗按钮会变成「停止」，点一下就停；"
+             "已经抓到的部分会保存，下次接着来。正在飞行中的那一个网页请求要等它"
+             "返回，通常不到一秒。")
 
-        body("Q：「补齐历史…」是干什么的？", color=MUTED)
-        body("A：站点有一批好几年前的老游戏，本库一直没收。日常「同步」默认只收"
-             "新出的，老的那些会跳过——否则每次同步都去啃老库，最新的游戏反而要等。\n"
-             "想把老游戏也收进来就点「补齐历史…」，它不设日期限制，一次收一批，"
-             "点几次就把历史补完了。\n"
-             "在「补齐历史…」上点右键可以彻底取消日期限制，之后普通「同步」也会收老游戏。")
+        body("Q：左下角「更多…」里面那三个是干什么的？", color=MUTED)
+        body("A：都是不常用的维护动作，点开每个下面都有一句说明。\n"
+             "「补齐历史…」：站点有一批好几年前的老游戏，本库一直没收。日常「同步」"
+             "默认只收新出的，老的那些会跳过——否则每次同步都去啃老库，最新的游戏"
+             "反而要等。点它不设日期限制，一次收一批，点几次就把历史补完了。"
+             "在它上面点右键可以彻底取消日期限制，之后普通「同步」也会收老游戏。\n"
+             "「下载封面」：补下缺的封面缩略图。\n"
+             "「全量重建」：按标签把站点重爬一遍，慢得多，拿到的数据和「同步」一样，"
+             "只有增量同步明显出问题时才需要跑。")
 
         body("Q：封面显示灰色方块？", color=MUTED)
-        body("A：说明这张封面还没下载。点左下角「下载封面」，让它慢慢跑完。")
+        body("A：说明这张封面还没下载。点左下角「更多…」→「下载封面」，让它慢慢跑完。")
 
         body("Q：「扫描本地目录」扫哪里？", color=MUTED)
         body("A：第一次点它会让你选一个文件夹，选完就记住了，按钮上写着它当前认的路径。"
@@ -2650,6 +2781,63 @@ class App(ctk.CTk):
             if conn is not None:
                 conn.close()
 
+    # --- software updates ------------------------------------------------------
+
+    def _start_update_check(self, force=False):
+        """Ask GitHub whether there is a newer slgking, off the tk thread.
+
+        slg_update.check reads and writes the pref table, so the worker opens
+        the connection it uses - the same rule the sync workers follow, because
+        self.conn belongs to the tk thread and sqlite connections do not cross
+        threads.
+        """
+        threading.Thread(target=self._update_worker, args=(force,),
+                         daemon=True).start()
+
+    def _update_worker(self, force):
+        found = None
+        try:
+            conn = slg_db.connect()
+            try:
+                found = slg_update.check(conn, APP_VERSION, force=force)
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001 - a version check is never fatal
+            self.queue.put(("note", "检查更新失败：%s" % str(exc)[:100]))
+            return
+        if found:
+            self.queue.put(("update", found))
+        elif force:
+            # Only on a manual click. The startup check saying "已是最新" every
+            # launch is noise in the one line that also carries progress.
+            self.queue.put(("note", "已是最新版本 %s" % APP_VERSION))
+
+    def _show_update(self, release):
+        """The sidebar notice, and the settings line if that dialog is open."""
+        self._update_found = release
+        self._update_url = release["url"]
+        label = self.update_label
+        if label is not None and label.winfo_exists():
+            label.configure(text="有新版本 %s，点击查看" % release["version"])
+            if not label.winfo_ismapped():
+                # after=, not a plain pack: the sidebar's pack order is load
+                # bearing, and appending would put this below the footer.
+                label.pack(after=self.progress_label, pady=(0, 10))
+        # The settings dialog's own line only, not _set_settings_status: that
+        # helper falls back to the sidebar's progress line, which this check
+        # runs in the background of and which the notice above already covers.
+        status = self._settings_status
+        if status is not None and status.winfo_exists():
+            status.configure(text="发现新版本 %s" % release["version"])
+
+    def _repaint_update_notice(self):
+        """Put the notice back on a sidebar that was just rebuilt."""
+        if self._update_found is not None:
+            self._show_update(self._update_found)
+
+    def _open_update_page(self, event=None):
+        webbrowser.open(self._update_url)
+
     # --- background work ------------------------------------------------------
 
     def _start_job(self, label):
@@ -2666,8 +2854,7 @@ class App(ctk.CTk):
         # goes.
         self.sync_btn.configure(text="停止", state="normal",
                                 command=self._cancel_job)
-        self.covers_btn.configure(state="disabled")
-        self.rebuild_btn.configure(state="disabled")
+        self.maintenance_btn.configure(state="disabled")
         self.translate_btn.configure(state="disabled")
         self._set_progress(label)
 
@@ -2688,8 +2875,7 @@ class App(ctk.CTk):
         self._job_label = ""
         self.sync_btn.configure(text="同步 dikgames", state="normal",
                                 command=self.do_sync)
-        self.covers_btn.configure(state="normal")
-        self.rebuild_btn.configure(state="normal")
+        self.maintenance_btn.configure(state="normal")
         self.translate_btn.configure(state="normal")
         self._set_progress(message)
         self._refresh_tag_button()
@@ -2737,12 +2923,14 @@ class App(ctk.CTk):
 
     def _sync_worker(self, since, backfill):
         import slg_scrape
-        fetcher = slg_scrape.Fetcher(log=lambda m: self.queue.put(("log", m)))
+        fetcher = slg_scrape.Fetcher(log=lambda m: self.queue.put(("log", m)),
+                                     should_stop=self._stop.is_set)
         post = lambda m: self.queue.put(("log", m))  # noqa: E731
         try:
             conn = slg_db.connect()
             summary = slg_scrape.sync_incremental(
                 conn, fetcher, since=since, log=post,
+                should_stop=self._stop.is_set,
                 on_progress=lambda i, n, title: self.queue.put(
                     ("progress", "抓详情 %d/%d · %s" % (i, n, title))))
             # Games that predate the rating/overview columns get topped up
@@ -2754,6 +2942,13 @@ class App(ctk.CTk):
                 on_progress=lambda d, total, url: self.queue.put(
                     ("progress", "补全详情 %d/%d" % (d, total))))
             conn.close()
+            # Reported before the summary branches: a cancelled run's counts are
+            # partial by definition, and printing them as "同步完成" would claim
+            # a clean sweep the user cut short.
+            if self._stop.is_set():
+                self.queue.put(("done", "已停止 · 新增 %d · 变动 %d · 补全 %d"
+                                % (summary["new"], summary["changed"], filled)))
+                return
             if backfill:
                 tail = ("，还有 %d 款下次接着来" % summary["deferred"]
                         if summary["deferred"] else "")
@@ -2817,18 +3012,20 @@ class App(ctk.CTk):
 
     def _rebuild_worker(self):
         import slg_scrape
-        fetcher = slg_scrape.Fetcher(log=lambda m: self.queue.put(("log", m)))
+        fetcher = slg_scrape.Fetcher(log=lambda m: self.queue.put(("log", m)),
+                                     should_stop=self._stop.is_set)
         try:
             conn = slg_db.connect()
             tags = slg_db.get_pref(conn, "watched_tags")
             tags = tags.split(",") if tags else ["netorare", "corruption", "cheating"]
             summary = slg_scrape.sync_tags(
-                conn, fetcher, tags,
+                conn, fetcher, tags, should_stop=self._stop.is_set,
                 on_progress=lambda t, p, n: self.queue.put(
                     ("progress", "%s 第 %d 页 · %d 款" % (t, p, n))))
             conn.close()
-            self.queue.put(("done", "全量重建完成：%d 款（新增 %d）"
-                            % (summary["games"], summary["new"])))
+            said = ("全量重建已停止：%d 款（新增 %d）"
+                    if self._stop.is_set() else "全量重建完成：%d 款（新增 %d）")
+            self.queue.put(("done", said % (summary["games"], summary["new"])))
         except Exception as exc:  # noqa: BLE001
             self.queue.put(("done", "全量重建失败：%s: %s" % (type(exc).__name__, exc)))
 
@@ -2912,7 +3109,7 @@ class App(ctk.CTk):
                          text_color=MUTED, anchor="w",
                          font=ui_font(size=12)).pack(anchor="w", padx=12, pady=(0, 8))
 
-    def _maybe_refresh(self, gap=REFRESH_GAP):
+    def _maybe_refresh(self, gap=None):
         """Redraw at most once per `gap` seconds.
 
         The sync used to leave the list frozen for its whole run because only
@@ -2920,7 +3117,13 @@ class App(ctk.CTk):
         card, so firing one per downloaded cover would trade a frozen list for
         a stuttering one. Hence both guards: the gap caps how often it can run,
         and skip_if_same drops the runs that would redraw an identical list.
+
+        The gap widens while a job is running: those redraws are exactly the
+        ones the user is clicking through, and the end-of-job refresh draws the
+        same final list a moment later.
         """
+        if gap is None:
+            gap = REFRESH_GAP_BUSY if self.busy else REFRESH_GAP
         now = time.time()
         if now - self._last_refresh < gap:
             return
@@ -2936,12 +3139,17 @@ class App(ctk.CTk):
         later background update was dropped for the rest of the session. The
         user sees that as nothing happening at all, which is exactly what it is.
         """
+        # Bounded per tick: a job that queues a thousand progress lines used to
+        # be drained in one go, and every click that landed mid-drain waited for
+        # the whole backlog. The remainder is a millisecond away.
+        pending = DRAIN_PER_TICK
         try:
-            while True:
+            while pending > 0:
                 try:
                     message = self.queue.get_nowait()
                 except queue.Empty:
                     break
+                pending -= 1
                 # Malformed messages are dropped rather than unpacked: one bad
                 # put() must not cost the user every future update.
                 if not isinstance(message, tuple) or len(message) != 2:
@@ -2952,7 +3160,10 @@ class App(ctk.CTk):
                     traceback.print_exc()
         finally:
             try:
-                self.after(150, self._drain)
+                # Nothing left in the queue means the usual idle poll; a
+                # truncated pass comes straight back for the rest.
+                delay = 1 if pending == 0 else 150
+                self.after(delay, self._drain)
             except tk.TclError:
                 pass  # the window is on its way out
 
@@ -2968,6 +3179,8 @@ class App(ctk.CTk):
             # Separate from "done" only for the refill: covers move a column,
             # not a row, so the list has to be rebuilt rather than re-synced.
             self._end_job(payload, refill=True)
+        elif kind == "update":
+            self._show_update(payload)
         elif kind == "note":
             self._set_settings_status(payload)
         elif kind == "overview":

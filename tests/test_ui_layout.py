@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import tkinter as tk
+import traceback
 import unittest
 from unittest import mock
 
@@ -271,10 +272,27 @@ class SidebarFit(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        # Selecting a game starts a translation worker, and with no engine
+        # configured those workers reached the real translator over the
+        # network: two title calls and two overview calls on every run, each
+        # landing in the shared database a second or two later. That is what
+        # made test_the_box_is_empty_when_nothing_has_been_translated_yet fail
+        # about one run in six - the fake game's Chinese name arrived somewhere
+        # mid-suite. Nothing here needs a real translation, so they only get as
+        # far as an error.
         try:
             cls.app = slg_gui.App(notify=False)
         except Exception as exc:  # noqa: BLE001 - a headless box has no Tk
             raise unittest.SkipTest("需要图形界面：%s" % exc)
+        cls._offline = [
+            mock.patch.object(slg_translate, "translate_title",
+                              side_effect=slg_translate.TranslateError("测试不联网")),
+            mock.patch.object(slg_translate, "translate_overview",
+                              side_effect=slg_translate.TranslateError("测试不联网")),
+        ]
+        for patch in cls._offline:
+            patch.start()
+        cls.app.report_callback_exception = cls._ignore_dead_widget_focus
         cls.app.geometry("940x600")
         # Pinned off "跟随系统" on purpose. The app polls the OS appearance every
         # five seconds and rebuilds the whole window when it changes, which can
@@ -288,6 +306,23 @@ class SidebarFit(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.app.destroy()
+        for patch in cls._offline:
+            patch.stop()
+
+    @staticmethod
+    def _ignore_dead_widget_focus(exc, value, tb):
+        """Drop the one Tk error customtkinter hands us on the way out.
+
+        CTkToplevel schedules a focus restore a few milliseconds after it is
+        shown. A dialog that is focused and then closed inside that window -
+        which is what a test does, immediately - lands the callback on a widget
+        path Tcl has already deleted, and Tk prints a full traceback for it in
+        the middle of an otherwise green run. Every other exception still comes
+        through untouched.
+        """
+        if isinstance(value, tk.TclError) and "bad window path name" in str(value):
+            return
+        traceback.print_exception(exc, value, tb)
 
     def _find(self, needle):
         found = []
@@ -1202,6 +1237,215 @@ class SidebarFit(unittest.TestCase):
             self.app._detail_lang = "原文"
             self.app.selected = None
             self._finish()
+
+
+    # --- the sidebar's action buttons ----------------------------------------
+
+    def _dialog(self, title):
+        for child in self.app.winfo_children():
+            if isinstance(child, ctk.CTkToplevel) and child.title() == title:
+                return child
+        return None
+
+    def _buttons_in(self, widget):
+        found = []
+
+        def walk(node):
+            for child in node.winfo_children():
+                if isinstance(child, ctk.CTkButton):
+                    found.append(child)
+                walk(child)
+
+        walk(widget)
+        return found
+
+    def _tag_buttons(self, win):
+        """The tag cells only, not the 清空/完成 pair below them.
+
+        The scrollable frame is not a direct child of the Toplevel - it lives
+        inside a Canvas the CTk wrapper builds - so this has to walk the whole
+        subtree. Geometry is what separates the two groups: cells are gridded
+        (two per row is the point), the footer pair is packed.
+        """
+        cells = []
+        for button in self._buttons_in(win):
+            try:
+                if button.grid_info():
+                    cells.append(button)
+            except tk.TclError:
+                pass
+        return cells
+
+    def _close(self, title):
+        """Destroy a dialog and let Tk finish the teardown.
+
+        The update() is not optional. customtkinter's appearance-mode tracker
+        holds a callback per widget, and destroying a Toplevel leaves the
+        actual window teardown queued. A theme switch that lands before the
+        queue drains walks those half-dead widgets and takes the whole process
+        down with a segfault - which is what this class's theme tests did until
+        this line was added.
+        """
+        win = self._dialog(title)
+        if win is not None:
+            win.destroy()
+            self.app.update()
+
+    def test_the_sidebar_offers_sync_and_one_more_button(self):
+        # Four buttons in a column - 28/38/34/28 px tall, two muted and one
+        # filled, two left-aligned and one centred - gave a new user no way to
+        # tell which one they wanted. Sync is the routine one and stays out;
+        # the other three are behind 更多….
+        self.assertIsNotNone(self.app.sync_btn)
+        self.assertIsNotNone(self.app.maintenance_btn)
+        self._assert_has_height("同步 dikgames", "同步按钮")
+        self._assert_has_height("更多", "更多按钮")
+        for gone in ("covers_btn", "rebuild_btn", "backfill_btn"):
+            self.assertFalse(hasattr(self.app, gone), gone)
+
+    def test_the_maintenance_dialog_lists_all_three_chores(self):
+        try:
+            with mock.patch.object(slg_db, "data_gaps",
+                                   return_value={"covers": 7, "overview": 3}):
+                self.app.open_maintenance()
+                win = self._dialog("同步与维护")
+                self.assertIsNotNone(win, "维护弹窗没打开")
+                texts = [b.cget("text") for b in self._buttons_in(win)]
+            for label in ("全量重建", "下载封面", "补齐历史"):
+                self.assertTrue(any(t.startswith(label) for t in texts), texts)
+            # Computed when the dialog opens, so a stale number in a window the
+            # user cannot see is not possible.
+            self.assertIn("下载封面（7）", texts)
+        finally:
+            self._close("同步与维护")
+
+    def test_picking_a_tag_leaves_the_picker_open(self):
+        # Choosing a tag used to destroy the dialog, so picking four tags meant
+        # four round trips through 标签库.
+        rows = [{"name": "netorare", "n": 40}, {"name": "cheating", "n": 12}]
+        was = (list(self.app.include), list(self.app.exclude))
+        try:
+            with mock.patch.object(slg_db, "tag_counts", return_value=rows), \
+                    mock.patch.object(slg_db, "find_games", return_value=[]):
+                self.app.open_tag_picker()
+                win = self._dialog("标签库")
+                self.assertIsNotNone(win, "标签库没打开")
+                target = next(b for b in self._tag_buttons(win)
+                              if b.cget("text").startswith("netorare"))
+                target.invoke()
+                self.app.update()
+                self.assertIn("netorare", self.app.include)
+                self.assertTrue(win.winfo_exists(), "选完一个标签后窗口被关掉了")
+                # Still selectable: a second click on the same row toggles off.
+                target = next(b for b in self._tag_buttons(win)
+                              if b.cget("text").startswith("netorare"))
+                target.invoke()
+                self.assertNotIn("netorare", self.app.include)
+                self.assertTrue(win.winfo_exists())
+        finally:
+            self.app.include, self.app.exclude = was
+            self._close("标签库")
+            with mock.patch.object(slg_db, "find_games", return_value=[]):
+                self.app.refresh()
+
+    def test_the_tag_search_box_narrows_the_grid(self):
+        # 130 tags in one column was a long scroll, and the tag the user wants
+        # is usually one whose name they already know.
+        rows = [{"name": "netorare", "n": 40}, {"name": "cheating", "n": 12},
+                {"name": "big-tits", "n": 9}]
+        try:
+            with mock.patch.object(slg_db, "tag_counts", return_value=rows):
+                self.app.open_tag_picker()
+                win = self._dialog("标签库")
+                self.assertEqual(len(self._tag_buttons(win)), 3)
+                entry = next(c for c in self._walk(win)
+                             if isinstance(c, ctk.CTkEntry))
+                self._type(entry, "net")
+                self.assertEqual(len(self._tag_buttons(win)), 1)
+                # Matched on the slug as well as the translated name.
+                self._type(entry, "cheat")
+                self.assertEqual(len(self._tag_buttons(win)), 1)
+        finally:
+            self._close("标签库")
+
+    def _type(self, entry, text):
+        """Replace the search box's contents and fire the keystroke handler.
+
+        Two things make this fiddly. CTkEntry.bind forwards to an inner entry
+        widget, so the event has to be generated there - on the CTkEntry
+        wrapper it dispatches to nothing. And Tk silently drops a generated key
+        event on an unfocused widget, so the whole chain has to be focused
+        first: the app, then the dialog, then the inner entry.
+        """
+        dialog = entry.winfo_toplevel()
+        self.app.focus_set()
+        dialog.lift()
+        dialog.focus_set()
+        self.app.update()
+        entry._entry.focus_set()
+        entry.delete(0, "end")
+        entry.insert(0, text)
+        self.app.update()
+        entry._entry.event_generate("<KeyRelease>", when="now")
+        self.app.update()
+
+    def _walk(self, widget):
+        for child in widget.winfo_children():
+            yield child
+            for deeper in self._walk(child):
+                yield deeper
+
+    def test_the_tag_grid_is_two_columns(self):
+        rows = [{"name": "a", "n": 3}, {"name": "b", "n": 2}, {"name": "c", "n": 1}]
+        try:
+            with mock.patch.object(slg_db, "tag_counts", return_value=rows):
+                self.app.open_tag_picker()
+                win = self._dialog("标签库")
+                cells = self._tag_buttons(win)
+                self.assertEqual(len(cells), 3)
+                # grid_info on the cell's container frame is what pack() would
+                # not give us: two per row is the whole point of the grid.
+                info = [int(c.grid_info()["column"]) for c in cells]
+                self.assertEqual(info, [0, 1, 0])
+        finally:
+            self._close("标签库")
+
+    # --- the update notice ---------------------------------------------------
+
+    def test_the_update_notice_is_hidden_until_there_is_one(self):
+        self.assertFalse(self.app.update_label.winfo_ismapped())
+
+    def test_a_found_release_shows_a_clickable_sidebar_notice(self):
+        try:
+            self.app._show_update({"version": "v99.0.0", "url": "https://x/y"})
+            self.app.update()
+            self.assertEqual(self.app._update_url, "https://x/y")
+            self.assertIn("v99.0.0", self.app.update_label.cget("text"))
+            self.assertTrue(self.app.update_label.winfo_ismapped(),
+                            "新版本提示没有出现在侧栏")
+        finally:
+            self.app._update_found = None
+            self.app.update_label.pack_forget()
+            self.app.update()
+
+    def test_the_notice_survives_a_theme_switch(self):
+        # The sidebar is destroyed and rebuilt on a theme change, and the
+        # notice lives in it.
+        original = self.app.theme_mode
+        try:
+            self.app._show_update({"version": "v99.0.0", "url": "https://x/y"})
+            with mock.patch.object(slg_db, "set_pref"):
+                self.app._apply_theme("dark")
+                self.app.update()
+            self.assertIn("v99.0.0", self.app.update_label.cget("text"))
+            self.assertTrue(self.app.update_label.winfo_ismapped())
+        finally:
+            with mock.patch.object(slg_db, "set_pref"):
+                self.app._apply_theme(original)
+            self.app.update()
+            self.app._update_found = None
+            self.app.update_label.pack_forget()
+            self.app.update()
 
 
 if __name__ == "__main__":

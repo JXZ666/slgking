@@ -11,6 +11,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -514,6 +516,114 @@ class Migration(unittest.TestCase):
         have = {r["name"] for r in conn.execute("PRAGMA table_info(games)")}
         self.assertIn("lastmod", have)
         conn.close()
+
+
+class StoppingTheSync(unittest.TestCase):
+    """The cancel button, which the sitemap sync used to ignore outright.
+
+    sync_incremental had no should_stop parameter at all, so the whole first
+    phase of a sync - up to NEW_PER_RUN detail pages - did not look at the
+    stop flag once. The button changed to "正在停止…" and nothing else happened.
+    """
+
+    def setUp(self):
+        self.conn = slg_db.connect(":memory:")
+        self.pages = {"post-sitemap.xml": SITEMAP,
+                      "the-copycat": DETAIL,
+                      "your-rwby-fantasy": DETAIL}
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _games(self):
+        return self.conn.execute("SELECT COUNT(*) AS n FROM games").fetchone()["n"]
+
+    def test_without_a_stop_both_games_land(self):
+        # The baseline the two tests below are measured against.
+        summary = slg_scrape.sync_incremental(self.conn, FakeFetcher(self.pages),
+                                              log=lambda *a: None)
+        self.assertEqual(summary["new"], 2)
+        self.assertEqual(self._games(), 2)
+
+    def test_the_loop_stops_between_detail_pages(self):
+        # Counting the checks rather than flagging them: the one after the
+        # sitemap and the one at the top of each page are separate, and the
+        # loop has to stop at the *second* page, not before the first.
+        checks = []
+
+        def should_stop():
+            checks.append(1)
+            return len(checks) > 2
+
+        summary = slg_scrape.sync_incremental(self.conn, FakeFetcher(self.pages),
+                                              should_stop=should_stop,
+                                              log=lambda *a: None)
+        self.assertEqual(summary["new"], 1)
+        self.assertEqual(self._games(), 1)
+
+    def test_a_stop_before_the_first_page_touches_nothing(self):
+        summary = slg_scrape.sync_incremental(self.conn, FakeFetcher(self.pages),
+                                              should_stop=lambda: True,
+                                              log=lambda *a: None)
+        self.assertEqual(summary["new"], 0)
+        self.assertEqual(self._games(), 0)
+
+    def test_a_stop_is_not_reported_as_an_unreachable_sitemap(self):
+        # fetch_sitemap returns {} when every shard fails, and a stop cuts the
+        # run short too. Reporting the second as "sitemap 全取不到，本次不同步"
+        # would send the user looking for a network problem they do not have.
+        said = []
+        summary = slg_scrape.sync_incremental(self.conn, FakeFetcher(self.pages),
+                                              should_stop=lambda: True,
+                                              log=said.append)
+        self.assertEqual(summary["catalogue"], 2)
+        self.assertFalse([line for line in said if "全取不到" in line], said)
+
+    def test_sync_tags_stops_before_the_first_tag(self):
+        # 全量重建 shares the button and had the same hole: sync_tags took no
+        # should_stop either.
+        fetcher = FakeFetcher({})
+        slg_scrape.sync_tags(self.conn, fetcher, ["a", "b", "c"],
+                             should_stop=lambda: True, log=lambda *a: None)
+        self.assertEqual(fetcher.count, 0)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) AS n FROM sync_log").fetchone()["n"], 0)
+
+    def test_sync_tags_still_walks_without_a_stop(self):
+        # Guards the check against short-circuiting an ordinary run.
+        fetcher = FakeFetcher({})
+        slg_scrape.sync_tags(self.conn, fetcher, ["a"], log=lambda *a: None)
+        self.assertGreater(fetcher.count, 0)
+
+
+class FetcherHonoursStop(unittest.TestCase):
+    def test_get_returns_none_without_a_request_once_stopped(self):
+        fetcher = slg_scrape.Fetcher(delay=0, should_stop=lambda: True)
+        with mock.patch.object(slg_scrape, "http_get") as get:
+            self.assertIsNone(fetcher.get("https://dikgames.com/x/", retries=0))
+        self.assertEqual(get.call_count, 0)
+
+    def test_the_gap_between_requests_is_interrupted(self):
+        # The gap is where a long sync actually spends its wall clock - a
+        # second between requests, two more before a retry - and time.sleep()
+        # made the cancel button sit out the whole thing. Thirty seconds here
+        # so a plain sleep would be unmistakable.
+        stop = threading.Event()
+        fetcher = slg_scrape.Fetcher(delay=30, should_stop=stop.is_set)
+        with mock.patch.object(slg_scrape, "http_get", return_value=b"ok"):
+            fetcher.get("https://dikgames.com/first/", retries=0)  # sets _last
+
+        timer = threading.Timer(0.2, stop.set)
+        timer.start()
+        started = time.time()
+        try:
+            with mock.patch.object(slg_scrape, "http_get") as second:
+                self.assertIsNone(fetcher.get("https://dikgames.com/second/",
+                                              retries=0))
+        finally:
+            timer.cancel()
+        self.assertLess(time.time() - started, 5)
+        self.assertEqual(second.call_count, 0)
 
 
 if __name__ == "__main__":

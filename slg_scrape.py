@@ -107,17 +107,43 @@ def http_get(url, timeout=TIMEOUT):
 class Fetcher:
     """One request at a time, with a gap between them."""
 
-    def __init__(self, delay=DELAY, log=None):
+    def __init__(self, delay=DELAY, log=None, should_stop=None):
         self.delay = delay
         self.log = log or (lambda *a: None)
         self.count = 0
         self._last = 0.0
+        # A callable rather than an Event: the worker already owns the Event,
+        # and this side only ever reads it.
+        self._stop = should_stop or (lambda: False)
+
+    def stopped(self):
+        return bool(self._stop())
+
+    def _wait(self, seconds):
+        """Sleep in slices, so a stop does not have to outwait the pause.
+
+        The gap between requests is a second and the backoff before a retry is
+        two, but a plain time.sleep() made both uncancellable - and the gaps
+        are where a long sync actually spends its wall clock. Checking between
+        slices is what makes the cancel button land in a fraction of a second
+        instead of at the next request.
+        """
+        deadline = time.time() + seconds
+        while True:
+            if self.stopped():
+                return False
+            left = deadline - time.time()
+            if left <= 0:
+                return True
+            time.sleep(min(left, 0.1))
 
     def get(self, url, retries=1, binary=False):
         for attempt in range(retries + 1):
+            if self.stopped():
+                return None
             wait = self.delay - (time.time() - self._last)
-            if wait > 0:
-                time.sleep(wait)
+            if wait > 0 and not self._wait(wait):
+                return None
             try:
                 raw = http_get(url)
                 self._last = time.time()
@@ -131,7 +157,8 @@ class Fetcher:
                 self.log("  ! %s (%s)" % (url, exc))
                 if attempt == retries:
                     return None
-                time.sleep(self.delay * 2)
+                if not self._wait(self.delay * 2):
+                    return None
         return None
 
 
@@ -364,10 +391,14 @@ def walk_tag(fetcher, tag, max_pages=None, on_progress=None):
         page += 1
 
 
-def sync_tags(conn, fetcher, tags, max_pages=None, on_progress=None, log=print):
+def sync_tags(conn, fetcher, tags, max_pages=None, on_progress=None, log=print,
+              should_stop=None):
     """Walk tag listings and upsert. Returns a summary dict."""
     seen, created = set(), 0
     for tag in tags:
+        if should_stop and should_stop():
+            log("  已停止，剩下的标签下次再来")
+            break
         log("抓取标签 %s ..." % tag)
         page_no = 0
         for page_no, games in enumerate(walk_tag(fetcher, tag, max_pages, on_progress), 1):
@@ -381,6 +412,8 @@ def sync_tags(conn, fetcher, tags, max_pages=None, on_progress=None, log=print):
                 seen.add(game_id)
             conn.commit()
             log("  page %d · 累计 %d 款" % (page_no, len(seen)))
+            if should_stop and should_stop():
+                break
         slg_db.log_sync(conn, tag, page_no, len(seen), created)
     return {"games": len(seen), "new": created, "requests": fetcher.count}
 
@@ -395,7 +428,7 @@ def _note_cover(conn, game_id, url):
 
 
 def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, since=None,
-                     on_progress=None, log=print):
+                     on_progress=None, log=print, should_stop=None):
     """Update the catalogue from the sitemaps instead of walking tags.
 
     Three sitemap requests name every game and the date it last changed, so a
@@ -425,6 +458,13 @@ def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, since=None,
     that deliberately takes them.
     """
     index = fetch_sitemap(fetcher, log=log)
+    if should_stop and should_stop():
+        # Distinguished from "the sitemaps are unreachable": a stop mid-fetch
+        # leaves a partial index, and reporting it as a failed sync would send
+        # the user looking for a network problem they do not have.
+        log("  已停止")
+        return {"catalogue": len(index), "new": 0, "changed": 0, "deferred": 0,
+                "skipped_old": 0, "requests": fetcher.count}
     if not index:
         log("  ! sitemap 全取不到，本次不同步")
         return {"catalogue": 0, "new": 0, "changed": 0, "deferred": 0,
@@ -461,9 +501,19 @@ def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, since=None,
 
     created = 0
     for i, (slug, meta, is_new) in enumerate(todo, 1):
+        if should_stop and should_stop():
+            log("  已停止 · 抓到第 %d/%d 款，剩下的下次接着来"
+                % (i - 1, len(todo)))
+            break
         url = "%s/%s/" % (BASE, slug)
         page = fetcher.get(url)
         if not page:
+            # fetcher.get returns None both for a dead page and for a stop.
+            # Without this the loop would keep spinning through every remaining
+            # slug at one request per second, doing nothing, after the user
+            # already asked it to quit.
+            if should_stop and should_stop():
+                break
             continue
         detail = parse_detail_page(page)
         title = detail["title"] or slug.replace("-", " ").title()
