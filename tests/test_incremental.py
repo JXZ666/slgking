@@ -6,9 +6,13 @@ Run with:
     python -m unittest discover tests
 """
 
+import http.client
 import os
+import shutil
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -49,7 +53,8 @@ DETAIL = """<html><head>
 <a href="https://dikgames.com/tag/horror/">horror</a>
 Version: v1.3.0
 Developer: Mr. PBR
-<div id="elementor-tab-content-1601"><p>A dark story.</p></div>
+<div id="elementor-tab-title-1601" class="elementor-tab-title" aria-controls="elementor-tab-content-1601" role="tab">Overview</div>
+<div id="elementor-tab-content-1601" class="elementor-tab-content"><p>A dark story.</p></div>
 </div></div>
 </body></html>
 """
@@ -194,6 +199,53 @@ class SyncIncremental(unittest.TestCase):
         self.assertEqual(slg_db.game_tags(self.conn, row["id"]),
                          ["cheating", "horror", "netorare"])
 
+    def _summary(self, since):
+        return slg_scrape.sync_incremental(self.conn, FakeFetcher(self.pages),
+                                           since=since, log=lambda *a: None)
+
+    def test_the_gate_drops_back_catalogue_new_games(self):
+        # The site lists 2066 games against a library that has never held more
+        # than half of them. Without a cutoff the routine sync spends its whole
+        # budget on years-old entries and reports a pile of "new" that is not
+        # what the user is waiting for. The fixture's two games are 2025-10-23
+        # and 2025-01-18.
+        summary = self._summary("2025-06-01")
+        self.assertEqual(summary["new"], 1)          # the-copycat only
+        self.assertEqual(summary["skipped_old"], 1)  # your-rwby-fantasy
+        slugs = {r["slug"] for r in self.conn.execute("SELECT slug FROM games")}
+        self.assertEqual(slugs, {"the-copycat"})
+
+    def test_no_gate_takes_the_back_catalogue_too(self):
+        summary = self._summary(None)
+        self.assertEqual(summary["new"], 2)
+        self.assertEqual(summary["skipped_old"], 0)
+
+    def test_the_gate_never_hides_a_change_to_a_game_already_held(self):
+        # The cutoff is about games that have never been seen. Applying it to
+        # rows already in the library would mean an old game the author patched
+        # last week never being noticed - the one thing a sync must not miss.
+        slg_db.upsert_game(self.conn, slug="your-rwby-fantasy",
+                           url="https://dikgames.com/your-rwby-fantasy/",
+                           title="Your RWBY Fantasy", lastmod="2020-01-01")
+        self.conn.commit()
+        summary = self._summary("2030-01-01")
+        self.assertEqual(summary["changed"], 1)
+        self.assertEqual(summary["skipped_old"], 1)  # the-copycat is still new
+
+    def test_an_entry_with_no_lastmod_is_collected_rather_than_guessed_at(self):
+        # Nothing to compare, so the safe direction is to take it: a skipped
+        # game is invisible, a fetched one costs a request.
+        sitemap = SITEMAP.replace("\t<lastmod>2025-01-18T18:01:39+00:00</lastmod>\n",
+                                  "")
+        pages = dict(self.pages, **{"post-sitemap.xml": sitemap})
+        summary = slg_scrape.sync_incremental(
+            self.conn, FakeFetcher(pages), since="2030-01-01",
+            log=lambda *a: None)
+        slugs = {r["slug"] for r in self.conn.execute("SELECT slug FROM games")}
+        self.assertEqual(slugs, {"your-rwby-fantasy"})
+        self.assertEqual(summary["new"], 1)
+        self.assertEqual(summary["skipped_old"], 1)  # the dated one
+
     def test_existing_developer_is_not_overwritten(self):
         # The listing page calls it 'PiggyBackRide Productions', the detail
         # page 'Mr. PBR'. Neither is wrong; a re-sync must not flip it.
@@ -232,6 +284,226 @@ class UpsertNeverBlanks(unittest.TestCase):
         self.assertEqual(row["developer"], "Dev")
         self.assertEqual(row["engine"], "unity")
         self.assertEqual(row["rating"], 8.0)
+
+
+class TheVersionNeverWalksBackwards(unittest.TestCase):
+    """The listing page and the detail page disagree about the version.
+
+    The listing page's '[v0.26.6]' bracket is the site's current version. The
+    detail page carries a 'Version:' line the author often forgets to bump.
+    Both go through COALESCE, and COALESCE takes the first non-null - so the
+    detail page won simply for being written last, and agent17 dropped from
+    0.26.6 to 0.25.3 on an ordinary sync.
+    """
+
+    def setUp(self):
+        self.conn = slg_db.connect(":memory:")
+        self.gid, _ = slg_db.upsert_game(self.conn, slug="g", url="u",
+                                         title="G", version="0.26.6")
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _version(self):
+        return self.conn.execute("SELECT version FROM games WHERE id = ?",
+                                 (self.gid,)).fetchone()["version"]
+
+    def test_the_detail_page_cannot_lower_it(self):
+        slg_db.upsert_detail(self.conn, self.gid, version="0.25.3")
+        self.assertEqual(self._version(), "0.26.6", "详情页把版本号写低了")
+
+    def test_the_listing_page_cannot_lower_it(self):
+        slg_db.upsert_game(self.conn, slug="g", url="u", title="G",
+                           version="0.1")
+        self.assertEqual(self._version(), "0.26.6", "列表页把版本号写低了")
+
+    def test_a_newer_version_still_lands(self):
+        slg_db.upsert_detail(self.conn, self.gid, version="0.27")
+        self.assertEqual(self._version(), "0.27")
+
+    def test_a_version_written_with_a_v_prefix_does_not_lower_it(self):
+        # 'v0.26.6' and '0.26.6' are the same version written two ways, and
+        # both spellings exist in the wild - one on each page. Reading the
+        # prefixed one as an upgrade would let the number flip on every sync.
+        slg_db.upsert_detail(self.conn, self.gid, version="v0.26.6")
+        self.assertEqual(self._version(), "0.26.6")
+
+    def test_an_unreadable_version_leaves_the_stored_one_alone(self):
+        # _version_gt answers False when either side has no digits, so an
+        # empty string refuses to move rather than moving backwards.
+        slg_db.upsert_detail(self.conn, self.gid, version="")
+        self.assertEqual(self._version(), "0.26.6")
+
+
+class DataGaps(unittest.TestCase):
+    def setUp(self):
+        self.conn = slg_db.connect(":memory:")
+        self.tmp = tempfile.mkdtemp()
+        self.patch = mock.patch.object(slg_db, "covers_dir", return_value=self.tmp)
+        self.patch.start()
+        # The cover walk is memoised and the memo is module-level, so one test's
+        # count would otherwise be served to the next.
+        slg_db.invalidate_cover_gaps()
+
+    def tearDown(self):
+        slg_db.invalidate_cover_gaps()
+        self.patch.stop()
+        self.conn.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _game(self, slug):
+        self.gid, _ = slg_db.upsert_game(self.conn, slug=slug, url="u/" + slug,
+                                         title=slug)
+        self.conn.commit()
+
+    def test_a_cover_file_that_is_not_on_disk_is_still_a_gap(self):
+        # load_cover only accepts a file it can actually open, so a stored name
+        # whose file has been deleted left the button saying 封面已齐 over a list
+        # of blank cards - and do_covers then refused to run.
+        self._game("g")
+        self.conn.execute("UPDATE games SET cover_file = 'gone.jpg' WHERE id = ?",
+                          (self.gid,))
+        self.conn.commit()
+        self.assertEqual(slg_db.data_gaps(self.conn)["covers"], 1)
+        with open(os.path.join(self.tmp, "gone.jpg"), "wb"):
+            pass
+        slg_db.invalidate_cover_gaps()
+        self.assertEqual(slg_db.data_gaps(self.conn)["covers"], 0)
+
+    def test_a_pending_cover_is_still_a_gap(self):
+        self._game("g")
+        self.conn.execute("UPDATE games SET cover_file = 'pending:x' WHERE id = ?",
+                          (self.gid,))
+        self.conn.commit()
+        self.assertEqual(slg_db.data_gaps(self.conn)["covers"], 1)
+
+    def test_the_cover_walk_is_memoised_until_it_is_dropped(self):
+        # One os.path.exists per stored cover, ~1500 of them, and _render_stats
+        # asks on every refresh. The memo is what keeps that off the UI thread.
+        self._game("g")
+        self.conn.execute("UPDATE games SET cover_file = 'gone.jpg' WHERE id = ?",
+                          (self.gid,))
+        self.conn.commit()
+        self.assertEqual(slg_db.data_gaps(self.conn)["covers"], 1)
+        with open(os.path.join(self.tmp, "gone.jpg"), "wb"):
+            pass
+        self.assertEqual(slg_db.data_gaps(self.conn)["covers"], 1,
+                         "缓存没有生效，每次都重新扫了封面目录")
+        slg_db.invalidate_cover_gaps()
+        self.assertEqual(slg_db.data_gaps(self.conn)["covers"], 0,
+                         "invalidate 之后还在用旧结果")
+
+    def test_an_overview_of_spaces_counts_as_a_gap(self):
+        # _clean turns an empty blurb into NULL, but rows written before that
+        # exist and hold "". The panel renders the two the same way, and the
+        # sync skipped both, so they could never be filled.
+        self._game("g")
+        self.conn.execute("UPDATE games SET overview = '   ' WHERE id = ?",
+                          (self.gid,))
+        self.conn.commit()
+        self.assertEqual(slg_db.data_gaps(self.conn)["overview"], 1)
+        self.conn.execute("UPDATE games SET overview = 'A story.' WHERE id = ?",
+                          (self.gid,))
+        self.conn.commit()
+        self.assertEqual(slg_db.data_gaps(self.conn)["overview"], 0)
+
+
+class CleanSiteTitle(unittest.TestCase):
+    """og:title carries the site's own name, and the detail walk stored it.
+
+    314 of 1595 rows read 'Something - dikgames' on the card - the site's
+    masthead leaking into a game's name.
+    """
+
+    def test_the_site_name_comes_off_the_end(self):
+        self.assertEqual(slg_db.clean_site_title("The Copycat - dikgames"),
+                         "The Copycat")
+
+    def test_the_separator_variants_all_come_off(self):
+        for text in ("The Copycat \u2013 dikgames", "The Copycat \u2014 dikgames",
+                     "The Copycat-dikgames", "The Copycat - DikGames"):
+            self.assertEqual(slg_db.clean_site_title(text), "The Copycat", text)
+
+    def test_a_name_that_merely_mentions_the_site_is_left_alone(self):
+        # Only a trailing ' - dikgames' is the site signing its own page. A
+        # game actually called that would be mangled by a looser rule.
+        self.assertEqual(slg_db.clean_site_title("Dikgames Tycoon"),
+                         "Dikgames Tycoon")
+        self.assertEqual(slg_db.clean_site_title("dikgames - the game"),
+                         "dikgames - the game")
+
+    def test_nothing_is_returned_for_nothing(self):
+        self.assertIsNone(slg_db.clean_site_title(None))
+        self.assertEqual(slg_db.clean_site_title(""), "")
+
+    def test_the_migration_repairs_the_cached_translation_too(self):
+        # The cards read the translation cache, not the title. Cleaning the
+        # source alone left the card reading '永恒世界 [v0.9.5] - dikgames'
+        # with a clean row underneath - and dropping the row instead would
+        # cost the user the Chinese name entirely.
+        conn = slg_db.connect(":memory:")
+        try:
+            gid, _ = slg_db.upsert_game(conn, slug="g", url="u",
+                                        title="Eternum [v0.9.5] - dikgames")
+            conn.commit()
+            slg_db.set_translation(conn, "title", gid,
+                                   "Eternum [v0.9.5] - dikgames",
+                                   "永恒世界 [v0.9.5] - dikgames", engine="m")
+            slg_db._migrate(conn)
+            self.assertEqual(slg_db.title_translations(conn),
+                             {str(gid): ("永恒世界 [v0.9.5]", "m")})
+        finally:
+            conn.close()
+
+    def test_the_migration_leaves_a_hand_typed_name_alone(self):
+        conn = slg_db.connect(":memory:")
+        try:
+            gid, _ = slg_db.upsert_game(conn, slug="g", url="u",
+                                        title="Eternum - dikgames")
+            conn.commit()
+            slg_db.set_manual_translation(conn, "title", gid, "永恒世界")
+            slg_db._migrate(conn)
+            self.assertEqual(slg_db.title_translations(conn),
+                             {str(gid): ("永恒世界", slg_db.ENGINE_MANUAL)})
+        finally:
+            conn.close()
+
+    def test_the_migration_cleans_rows_written_before_it_existed(self):
+        # The parser fix only helps pages fetched from here on; the rows the
+        # old parser wrote are already in the user's database.
+        conn = slg_db.connect(":memory:")
+        try:
+            slg_db.upsert_game(conn, slug="g", url="u",
+                               title="The Copycat - dikgames")
+            slg_db.upsert_game(conn, slug="h", url="u2", title="Untouched")
+            conn.commit()
+            slg_db._migrate(conn)
+            rows = {r["slug"]: r["title"] for r in
+                    conn.execute("SELECT slug, title FROM games")}
+            self.assertEqual(rows["g"], "The Copycat")
+            self.assertEqual(rows["h"], "Untouched")
+        finally:
+            conn.close()
+
+
+class FetcherSurvivesBadResponses(unittest.TestCase):
+    def test_a_truncated_response_returns_none_instead_of_raising(self):
+        # http.client.IncompleteRead is an HTTPException, not an OSError, so it
+        # slipped past Fetcher's except clause and killed the whole sync - one
+        # flaky page cost every page queued behind it.
+        fetcher = slg_scrape.Fetcher(delay=0, log=lambda *a: None)
+        with mock.patch.object(slg_scrape, "http_get",
+                               side_effect=http.client.IncompleteRead(b"half")):
+            self.assertIsNone(fetcher.get("https://dikgames.com/x/", retries=0))
+
+    def test_the_request_is_logged_when_it_gives_up(self):
+        said = []
+        fetcher = slg_scrape.Fetcher(delay=0, log=said.append)
+        with mock.patch.object(slg_scrape, "http_get",
+                               side_effect=http.client.IncompleteRead(b"half")):
+            fetcher.get("https://dikgames.com/x/", retries=1)
+        self.assertTrue(any("dikgames.com/x" in line for line in said), said)
 
 
 class Migration(unittest.TestCase):

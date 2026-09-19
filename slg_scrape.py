@@ -18,6 +18,7 @@ site is ~1000 games and there is no reason to hammer it.
 
 import gzip
 import html
+import http.client
 import os
 import queue
 import re
@@ -47,6 +48,11 @@ THUMB_SUFFIX = "-576x356"
 # slugs it holds are old games that the tag walk still backstops.
 SITEMAPS = ("post-sitemap.xml", "post-sitemap2.xml", "post-sitemap4.xml")
 
+# A guard, not a policy: the depth walk already stops at the tab's own closing
+# tag, so this only trips if the markup is broken. The old 2000 clipped 73 rows
+# mid-sentence - the longest real blurb in the db was exactly 2000.
+OVERVIEW_MAX = 20000
+
 # The sitemap lists the whole site, and the library holds barely half of it -
 # the tag walk only ever visited netorare/corruption/cheating, so ~1200 games
 # have never been seen. Ingesting those is a one-off 20-minute job, so it is
@@ -63,7 +69,13 @@ _PUBDATE = re.compile(r'itemprop="datePublished"\s+datetime="([^"]+)"')
 _RATING = re.compile(r'"ratingValue":\s*"?([\d.]+)')
 _VERSION_LINE = re.compile(r'Version:\s*([^<\n]{0,24})')
 _DEV_LINE = re.compile(r'Developer:\s*([^<\n]{0,40})')
-_OVERVIEW = re.compile(r'id="elementor-tab-content-1601"[^>]*>(.*?)(?:</div>\s*</div>)', re.S)
+# Elementor numbers its tab instances per page, so the id is not a site-wide
+# constant: agent17 is -1601, cane-and-able is -4591, xxxfiles is -8471. The
+# tab title always carries its content id in aria-controls, so read it there
+# instead of guessing.
+_OVERVIEW_TAB = re.compile(
+    r'aria-controls="elementor-tab-content-(\d+)"[^>]*>\s*Overview\s*<')
+_OVERVIEW_DIV = re.compile(r"</?div\b[^>]*>")
 _OG_IMAGE = re.compile(r'property="og:image"\s+content="([^"]+)"')
 _OG_TITLE = re.compile(r'property="og:title"\s+content="([^"]*)"')
 _BRACKET = re.compile(r"\[([^\]]*)\]")
@@ -111,7 +123,11 @@ class Fetcher:
                 self._last = time.time()
                 self.count += 1
                 return raw if binary else raw.decode("utf-8", "replace")
-            except (urllib.error.URLError, OSError, gzip.BadGzipFile) as exc:
+            # HTTPException is not an OSError, so a truncated chunked response
+            # (IncompleteRead) used to escape this and kill the whole sync
+            # partway through - one flaky page cost every page after it.
+            except (urllib.error.URLError, OSError, gzip.BadGzipFile,
+                    http.client.HTTPException) as exc:
                 self.log("  ! %s (%s)" % (url, exc))
                 if attempt == retries:
                     return None
@@ -140,6 +156,34 @@ def _clean(text):
     text = html.unescape(text)
     text = re.sub(r"<[^>]+>", " ", text)
     return re.sub(r"\s+", " ", text).strip() or None
+
+
+_clean_title = slg_db.clean_site_title
+
+
+def _extract_overview(page):
+    """The body of the detail page's Overview tab.
+
+    Two things the old one-shot regex got wrong. It hardcoded the tab id, so
+    it only matched the minority of pages whose Elementor instance happened to
+    be 1601 - the rest came back NULL and were re-fetched on every sync,
+    forever. And it ended the capture at the first "</div></div>", which cuts
+    a blurb short as soon as the markup nests a div. Closing by div depth
+    costs one pass and fixes both.
+    """
+    tab = _OVERVIEW_TAB.search(page)
+    if not tab:
+        return None
+    open_at = page.find('id="elementor-tab-content-%s"' % tab.group(1))
+    if open_at < 0:
+        return None
+    start = page.find(">", open_at) + 1
+    depth = 1
+    for tag in _OVERVIEW_DIV.finditer(page, start):
+        depth += -1 if tag.group(0).startswith("</") else 1
+        if depth == 0:
+            return page[start:tag.start()]
+    return None
 
 
 def parse_title(raw):
@@ -196,6 +240,7 @@ def parse_list_page(page):
         url, raw_title = link.group(1), link.group(2)
         slug = url.rstrip("/").rsplit("/", 1)[-1]
         name, version, developer, complete = parse_title(raw_title)
+        name = _clean_title(name)
 
         classes = re.search(r'<section class="([^"]*)"', section)
         classes = classes.group(1) if classes else ""
@@ -227,7 +272,7 @@ def parse_detail_page(page):
     rating = _RATING.search(page)
     version = _VERSION_LINE.search(page)
     developer = _DEV_LINE.search(page)
-    overview = _OVERVIEW.search(page)
+    overview = _clean(_extract_overview(page))
     cover = _OG_IMAGE.search(page)
     title = _OG_TITLE.search(page)
     published = _PUBDATE.search(page)
@@ -236,10 +281,10 @@ def parse_detail_page(page):
         "version": (_clean(version.group(1)) or "").lstrip("vV") or None
         if version else None,
         "developer": _clean(developer.group(1)) if developer else None,
-        "overview": _clean(overview.group(1))[:2000] if overview else None,
+        "overview": overview[:OVERVIEW_MAX] if overview else None,
         "tags": sorted(set(_TAG_URL.findall(page))),
         "cover_url": _sized_cover(cover.group(1)) if cover else None,
-        "title": _clean(title.group(1)) if title else None,
+        "title": _clean_title(_clean(title.group(1))) if title else None,
         "last_updated": published.group(1)[:10] if published else None,
     }
 
@@ -349,8 +394,8 @@ def _note_cover(conn, game_id, url):
                  ("pending:" + url, game_id))
 
 
-def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, on_progress=None,
-                     log=print):
+def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, since=None,
+                     on_progress=None, log=print):
     """Update the catalogue from the sitemaps instead of walking tags.
 
     Three sitemap requests name every game and the date it last changed, so a
@@ -369,19 +414,31 @@ def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, on_progress=None,
     third of the site, so discovery would otherwise be a 20-minute stall on
     the user's first click; capped, each sync finishes in minutes and the
     remainder is simply still there next time.
+
+    since, if given as 'YYYY-MM-DD', drops site entries older than that - but
+    only entries the library has never held. Games already in the database are
+    checked for changes regardless of age, because "old" says nothing about
+    whether the author pushed a fix last week. The point is the routine sync:
+    with ~1200 never-ingested back catalogue entries in the sitemap, a plain
+    run spends its whole new_limit on 2019 games and reports a pile of "new"
+    that the user does not care about. Pass since=None for the backfill run
+    that deliberately takes them.
     """
     index = fetch_sitemap(fetcher, log=log)
     if not index:
         log("  ! sitemap 全取不到，本次不同步")
         return {"catalogue": 0, "new": 0, "changed": 0, "deferred": 0,
-                "requests": fetcher.count}
+                "skipped_old": 0, "requests": fetcher.count}
 
     known = {row["slug"]: row for row in conn.execute(
         "SELECT id, slug, lastmod FROM games")}
-    todo, adopted = [], 0
+    todo, adopted, skipped_old = [], 0, 0
     for slug, meta in sorted(index.items()):
         row = known.get(slug)
         if row is None:
+            if since and meta["lastmod"] and meta["lastmod"] < since:
+                skipped_old += 1
+                continue
             todo.append((slug, meta, True))
         elif row["lastmod"] is None:
             slg_db.set_lastmod(conn, row["id"], meta["lastmod"])
@@ -398,6 +455,9 @@ def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, on_progress=None,
     changed = len(changed_todo)
     log("sitemap %d 款 · 首次登记 %d · 本次抓 %d（变动 %d / 新增 %d，余 %d 款留到下次）"
         % (len(index), adopted, len(todo), changed, len(todo) - changed, deferred))
+    if skipped_old:
+        log("  跳过 %d 款早于 %s 的老游戏（点「补齐历史」可以收录）"
+            % (skipped_old, since))
 
     created = 0
     for i, (slug, meta, is_new) in enumerate(todo, 1):
@@ -436,7 +496,8 @@ def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, on_progress=None,
 
     slg_db.log_sync(conn, "incremental", 1, len(index), created)
     return {"catalogue": len(index), "new": created, "changed": changed,
-            "deferred": deferred, "requests": fetcher.count}
+            "deferred": deferred, "skipped_old": skipped_old,
+            "requests": fetcher.count}
 
 
 def download_covers(conn, limit=None, workers=3, rate=3.0, log=print,
@@ -520,6 +581,9 @@ def download_covers(conn, limit=None, workers=3, rate=3.0, log=print,
         if on_progress:
             on_progress(done, total)
     log("封面下载 %d/%d" % (done, total))
+    # The gap count walks the covers directory, and it is memoised because
+    # _render_stats asks for it on every refresh. Files just appeared.
+    slg_db.invalidate_cover_gaps()
     return done
 
 
@@ -589,6 +653,11 @@ def _main(argv=None):
                         help="只打印 sitemap 索引结果，不写库")
     parser.add_argument("--new-limit", type=int, default=NEW_PER_RUN, metavar="N",
                         help="单次增量最多纳入多少款新游戏（默认 %d）" % NEW_PER_RUN)
+    parser.add_argument("--since", metavar="YYYY-MM-DD",
+                        help="增量同步只收录这个日期之后的新游戏，"
+                             "更老的留到「补齐历史」时再收")
+    parser.add_argument("--all-history", action="store_true",
+                        help="忽略 --since，把老游戏也一起收录（补齐历史）")
     parser.add_argument("--max-pages", type=int, default=None)
     parser.add_argument("--enrich", type=int, default=0, metavar="N",
                         help="额外补全 N 款游戏的详情（评分/简介）")
@@ -633,11 +702,14 @@ def _main(argv=None):
     conn = slg_db.connect()
     try:
         if args.incremental:
+            since = None if args.all_history else args.since
             summary = sync_incremental(conn, fetcher, new_limit=args.new_limit,
-                                       log=print)
-            print("全站 %d 款 · 新增 %d · 变动 %d · 余 %d 款 · %d 个请求"
+                                       since=since, log=print)
+            print("全站 %d 款 · 新增 %d · 变动 %d · 余 %d 款 · 跳过老游戏 %d 款"
+                  " · %d 个请求"
                   % (summary["catalogue"], summary["new"], summary["changed"],
-                     summary["deferred"], summary["requests"]))
+                     summary["deferred"], summary["skipped_old"],
+                     summary["requests"]))
         if args.tag:
             summary = sync_tags(conn, fetcher, args.tag, args.max_pages)
             print("入库 %d 款，新增 %d 款" % (summary["games"], summary["new"]))

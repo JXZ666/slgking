@@ -14,7 +14,11 @@ import re
 
 import slg_db
 
-DEFAULT_ROOTS = [r"D:\game&novel\黄油"]
+# The author's own library. It used to be the unconditional default, which made
+# 扫描本地目录 a no-op on every other machine that ran the exe. The GUI now asks
+# for a folder and remembers the answer, and this is only what the CLI falls
+# back to - and only while the directory is actually there.
+DEFAULT_ROOTS = [path for path in (r"D:\game&novel\黄油",) if os.path.isdir(path)]
 
 _VER_PREFIXED = re.compile(r"[vV](\d+(?:\.\d+){1,3}[a-z]?)")
 _VER_BARE = re.compile(r"(\d+(?:\.\d+){1,3}[a-z]?)")
@@ -131,9 +135,13 @@ def inspect(folder):
     return info
 
 
-def scan(conn, roots=None, with_size=False, on_progress=None, log=print):
+def scan(conn, roots=None, with_size=False, on_progress=None, log=print,
+         should_stop=None):
     """Walk the roots and reconcile every game folder against the catalogue."""
     roots = roots or DEFAULT_ROOTS
+    if not roots:
+        log("没有可扫描的目录。在软件里点「扫描本地目录」时会让你选一个文件夹。")
+        return {"matched": 0, "unmatched": []}
     index = _title_index(conn)
     found, unmatched = 0, []
 
@@ -142,6 +150,11 @@ def scan(conn, roots=None, with_size=False, on_progress=None, log=print):
             log("跳过（不存在）：%s" % root)
             continue
         for name in sorted(os.listdir(root)):
+            if should_stop and should_stop():
+                conn.commit()
+                slg_db.invalidate_cover_gaps()
+                log("扫描已停止：%d 个文件夹已登记" % found)
+                return {"matched": found, "unmatched": unmatched}
             folder = os.path.join(root, name)
             if not os.path.isdir(folder):
                 continue
@@ -174,6 +187,10 @@ def scan(conn, roots=None, with_size=False, on_progress=None, log=print):
                 on_progress(name, game_id)
             log("匹配：%s -> #%d %s" % (name, game_id, _title_index_title(index, game_id)))
     conn.commit()
+    # A scan can name games the catalogue had no row for, and those rows bring
+    # their own cover_file with them - so the memoised cover-gap count is now
+    # describing a library that no longer exists.
+    slg_db.invalidate_cover_gaps()
     log("扫描完成：%d 个文件夹匹配上，%d 个没匹配" % (found, len(unmatched)))
     for name in unmatched:
         log("  未匹配：%s" % name)
@@ -212,15 +229,11 @@ def check_updates(conn):
 
 def _compare(left, right):
     """Version compare that does not fall over on '0.5b' or 'Ep.7 Free'."""
-    def parts(text):
-        return [int(n) for n in re.findall(r"\d+", text)[:4]]
-    a, b = parts(left), parts(right)
-    if not a or not b:
-        return 0
-    length = max(len(a), len(b))
-    a += [0] * (length - len(a))
-    b += [0] * (length - len(b))
-    return (a > b) - (a < b)
+    if slg_db._version_gt(left, right):
+        return 1
+    if slg_db._version_gt(right, left):
+        return -1
+    return 0
 
 
 # --- CLI -----------------------------------------------------------------------

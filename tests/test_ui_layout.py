@@ -26,6 +26,8 @@ import slg_db  # noqa: E402
 import slg_gui  # noqa: E402
 import slg_translate  # noqa: E402
 
+import customtkinter as ctk  # noqa: E402
+
 
 class FlowRows(unittest.TestCase):
     def test_wraps_at_the_available_width(self):
@@ -89,6 +91,55 @@ class GameTagsBulk(unittest.TestCase):
         got = slg_db.game_tags_bulk(self.conn, ids)
         self.assertEqual(len(got), 1200)
         self.assertTrue(all(v == ["filler"] for v in got.values()))
+
+
+class FindGamesSort(unittest.TestCase):
+    """Sort direction, which has to live in the SQL rather than a reversed().
+
+    The list is paged, so reversing after the fetch would show the wrong 80.
+    """
+
+    def setUp(self):
+        self.conn = slg_db.connect(":memory:")
+        for slug, rating, updated in (("a", 4.0, "2026-01-01"),
+                                      ("b", 9.0, "2026-03-01"),
+                                      ("c", None, "2026-02-01")):
+            slg_db.upsert_game(self.conn, slug, "u/" + slug, slug,
+                               last_updated=updated)
+        for slug, rating in (("a", 4.0), ("b", 9.0)):
+            gid = self.conn.execute("SELECT id FROM games WHERE slug = ?",
+                                    (slug,)).fetchone()["id"]
+            slg_db.upsert_detail(self.conn, gid, rating=rating)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _titles(self, **kw):
+        return [r["title"] for r in slg_db.find_games(self.conn, **kw)]
+
+    def test_rating_desc_puts_the_best_first(self):
+        self.assertEqual(self._titles(sort="rating", desc=True)[0], "b")
+
+    def test_rating_asc_puts_the_worst_first(self):
+        self.assertEqual(self._titles(sort="rating", desc=False)[0], "a")
+
+    def test_unrated_rows_sink_in_both_directions(self):
+        # 985 rows in the real db have no rating. Plain ASC would open the
+        # list with every one of them, which reads as a broken sort.
+        for desc in (True, False):
+            with self.subTest(desc=desc):
+                self.assertEqual(self._titles(sort="rating", desc=desc)[-1], "c")
+
+    def test_updated_direction(self):
+        self.assertEqual(self._titles(sort="updated", desc=True)[0], "b")
+        self.assertEqual(self._titles(sort="updated", desc=False)[0], "a")
+
+    def test_title_direction(self):
+        self.assertEqual(self._titles(sort="title", desc=False), ["a", "b", "c"])
+        self.assertEqual(self._titles(sort="title", desc=True), ["c", "b", "a"])
+
+    def test_an_unknown_field_still_sorts(self):
+        self.assertEqual(len(slg_db.find_games(self.conn, sort="nonsense")), 3)
 
 
 class CardMetaLine(unittest.TestCase):
@@ -287,6 +338,68 @@ class SidebarFit(unittest.TestCase):
 
     def test_the_game_site_link_is_visible(self):
         self._assert_has_height(slg_gui.SITE_LABEL, "游戏官网按钮")
+
+    # --- sort direction ------------------------------------------------------
+
+    def test_the_sort_direction_button_is_visible(self):
+        # The sort menu used to be the only control, and every field had one
+        # hardcoded direction; there was no way back up the list.
+        self._assert_has_height(slg_gui.SORT_ARROW[True], "反序按钮")
+        self.assertIsNotNone(self.app.sort_dir_btn)
+
+    def test_toggling_reverses_the_arrow_and_the_query(self):
+        original = self.app.sort_desc
+        try:
+            with mock.patch.object(slg_db, "find_games", return_value=[]) as fg:
+                self.app._toggle_sort_dir()
+                self.assertNotEqual(self.app.sort_desc, original)
+                self.assertEqual(self.app.sort_dir_btn.cget("text"),
+                                 slg_gui.SORT_ARROW[self.app.sort_desc])
+                self.assertEqual(fg.call_args.kwargs["desc"], self.app.sort_desc)
+        finally:
+            with mock.patch.object(slg_db, "find_games", return_value=[]):
+                self.app.sort_desc = original
+                self.app.refresh()
+
+    def test_switching_field_returns_to_that_fields_natural_direction(self):
+        # Flipping 名称 to Z→A and then picking 站内评分 should not open the
+        # list on the worst-rated games.
+        original = self.app.sort
+        try:
+            with mock.patch.object(slg_db, "find_games", return_value=[]):
+                self.app._on_sort("名称")
+                self.assertFalse(self.app.sort_desc)   # names open A→Z
+                self.app._toggle_sort_dir()
+                self.assertTrue(self.app.sort_desc)
+                self.app._on_sort("站内评分")
+                self.assertEqual(self.app.sort, "rating")
+                self.assertTrue(self.app.sort_desc)
+        finally:
+            with mock.patch.object(slg_db, "find_games", return_value=[]):
+                self.app.sort = original
+                self.app.sort_desc = slg_gui.SORT_DEFAULT_DESC[original]
+                self.app.refresh()
+
+    def test_changing_sort_resets_the_page_cursor(self):
+        # Every other state-change handler resets shown; _on_sort was the one
+        # that did not, so a sort change kept the old "load more" cursor.
+        try:
+            with mock.patch.object(slg_db, "find_games", return_value=[]):
+                self.app.shown = 10 * slg_gui.PAGE
+                self.app._on_sort("名称")
+                self.assertEqual(self.app.shown, slg_gui.PAGE)
+        finally:
+            with mock.patch.object(slg_db, "find_games", return_value=[]):
+                self.app.sort = "score"
+                self.app.sort_desc = slg_gui.SORT_DEFAULT_DESC["score"]
+                self.app.refresh()
+
+    def test_the_detail_panel_carries_the_no_download_notice(self):
+        # Built into the skeleton and shown unconditionally by _layout_detail,
+        # so it is there for every game rather than the ones with a blurb.
+        self.assertIn("disclaimer", self.app._detail_parts)
+        self.assertIn("不提供下载",
+                      self.app._detail_parts["disclaimer"].cget("text"))
 
     def test_the_vpn_notice_points_at_the_scrapers_own_base_url(self):
         # Two copies of the URL is one copy that goes stale.
@@ -509,6 +622,16 @@ class SidebarFit(unittest.TestCase):
         self.app._rendered_ids = []
         self.app.selected = None
 
+    def _filterbar_texts(self):
+        """Every chip label currently in the filter bar."""
+        texts = []
+        for child in self.app.filterbar.winfo_children():
+            try:
+                texts.append(str(child.cget("text")))
+            except Exception:  # noqa: BLE001 - not every widget has text
+                pass
+        return texts
+
     def _render(self, games):
         """refresh() against a made-up catalogue, showing all of it.
 
@@ -659,23 +782,47 @@ class SidebarFit(unittest.TestCase):
             self.app.selected = None
             self._finish()
 
-    def test_a_game_without_a_description_puts_the_block_away(self):
-        # The two conditional blocks have to come and go *and* come back in the
-        # same order - pack() appends, so a returned block would land last.
+    def test_a_game_without_a_description_keeps_the_block_and_says_so(self):
+        # The description block stays put and pleads ignorance instead of
+        # vanishing. Hiding it made 968 of 1595 games read as "the app lost a
+        # section", with nothing on screen to click to write one by hand.
         self._pool_reset()
         try:
             self._select(self._panel_game(0))
             self.assertIn("ov_box", self.app._detail_shown)
             self.assertIn("url", self.app._detail_shown)
             self.app.select(self._panel_game(1, overview="", url=""))
-            self.assertNotIn("ov_box", self.app._detail_shown)
+            self.assertIn("ov_box", self.app._detail_shown, "简介块被藏起来了")
             self.assertNotIn("url", self.app._detail_shown)
+            self.assertEqual(self.app._detail_parts["ov_label"].cget("text"),
+                             slg_gui.EMPTY_OVERVIEW)
             self.app.select(self._panel_game(0))
+            self.assertNotEqual(self.app._detail_parts["ov_label"].cget("text"),
+                                slg_gui.EMPTY_OVERVIEW)
             order = [w[0] for w in self.app._detail_order
                      if w[0] in self.app._detail_shown]
             self.assertEqual(order, self.app._detail_shown)
-            self.assertLess(order.index("url"), order.index("status"))
             self.assertLess(order.index("status"), order.index("ov_box"))
+        finally:
+            self.app.selected = None
+            self._finish()
+
+    def test_a_game_without_a_description_is_not_sent_to_the_translator(self):
+        # Switching to 中文 on a blurb that does not exist used to fire a
+        # request anyway: one wasted call per visit, reported back as a
+        # translation failure over a game the site simply has no blurb for.
+        self._pool_reset()
+        try:
+            bare = self._panel_game(1, overview="", url="")
+            self.app.rows = [bare]
+            self.app.shown = 1
+            with mock.patch.object(slg_gui.threading, "Thread") as thread:
+                self.app.select(bare)
+                self.app._set_overview_lang(bare, "中文")
+            started = [c.kwargs.get("target") for c in thread.call_args_list]
+            self.assertNotIn(self.app._overview_worker, started, "空简介仍发了翻译请求")
+            self.assertEqual(self.app._detail_parts["ov_label"].cget("text"),
+                             slg_gui.EMPTY_OVERVIEW)
         finally:
             self.app.selected = None
             self._finish()
@@ -846,6 +993,32 @@ class SidebarFit(unittest.TestCase):
             slg_gui.load_tag_translations(self.app.conn)
             self._finish()
 
+    def test_a_renamed_tag_reaches_the_filter_chips(self):
+        # The bar's redraw check compares the include/exclude lists, and a
+        # rename changes the chips' text without touching either list - so the
+        # bar kept showing the old Chinese under the new one.
+        self._pool_reset()
+        include = list(self.app.include)
+        try:
+            self.app.include = ["netorare"]
+            self.app._render_filterbar()
+            self.app.update()
+            self.assertTrue(any("netorare" in text
+                                for text in self._filterbar_texts()),
+                            "筛选条上没有这个标签")
+            slg_db.set_manual_translation(self.app.conn, "tag", "netorare", "NTR")
+            self.app._reload_tags(None, "")
+            self.app.update()
+            self.assertTrue(any("NTR" in text for text in self._filterbar_texts()),
+                            "改完译名筛选条还是旧中文：%s" % self._filterbar_texts())
+        finally:
+            self.app.include = include
+            slg_db.delete_manual_translation(self.app.conn, "tag", "netorare")
+            slg_gui.load_tag_translations(self.app.conn)
+            self.app._filter_sig = None
+            self.app._render_filterbar()
+            self._finish()
+
     def test_the_card_text_follows_the_card_that_holds_it(self):
         # The three text lines are plain tk.Labels, and a tk.Label is opaque
         # where the CTkLabel it replaced was not: it does not pick up its
@@ -917,6 +1090,117 @@ class SidebarFit(unittest.TestCase):
             with mock.patch.object(slg_db, "set_pref"):
                 self.app._apply_theme(original)
             self.app.update()
+            self._finish()
+
+    # --- the mouse, on things that are not frames ----------------------------
+
+    def test_a_click_on_the_title_opens_the_game(self):
+        # A plain tk.Label does not pass its clicks up to the frame that holds
+        # it, and the title, the version line and the tagline are all plain
+        # labels - so binding only the card frame left most of the card's
+        # surface dead. Clicking a game's name did nothing at all, and only the
+        # thin border around it worked.
+        self._pool_reset()
+        try:
+            games = [self._fake_game(i) for i in range(4)]
+            self._render(games)
+            for key in ("title", "meta", "tagline"):
+                with mock.patch.object(self.app, "select") as select:
+                    self.app._card_pool[1][key].event_generate("<Button-1>")
+                    self.app.update()
+                self.assertTrue(select.called, "点卡片上的 %s 没有打开游戏" % key)
+                self.assertEqual(select.call_args[0][0]["id"], games[1]["id"])
+        finally:
+            self._finish()
+
+    # --- dialogs -------------------------------------------------------------
+
+    def test_a_dialog_binds_escape(self):
+        # Tk hands a bare Toplevel no bindings, so every dialog in the app could
+        # only be closed with the window manager's X.
+        #
+        # The binding is asserted rather than exercised: Tk delivers a key event
+        # to the focused widget, and with no window manager in the loop nothing
+        # inside a fresh Toplevel ever takes focus - event_generate("<Escape>")
+        # on an unfocused window is silently dropped, so a keystroke-based test
+        # here would pass no matter what the app does.
+        win = self.app._new_dialog("测试对话框", "300x200")
+        try:
+            self.app.update()
+            self.assertTrue(win.bind("<Escape>"),
+                            "对话框没有绑定 Escape，只能靠窗口的 X 关掉")
+        finally:
+            if win.winfo_exists():
+                win.destroy()
+
+    def test_opening_the_same_dialog_twice_reuses_the_window(self):
+        # Two clicks on 帮助文档 used to leave two identical windows stacked.
+        first = self.app._new_dialog("测试对话框", "300x200")
+        self.app.update()
+        try:
+            second = self.app._new_dialog("测试对话框", "300x200")
+            self.app.update()
+            self.assertFalse(first.winfo_exists(), "旧对话框没有被关掉")
+            self.assertTrue(second.winfo_exists())
+            open_windows = [w for w in self.app.winfo_children()
+                            if isinstance(w, ctk.CTkToplevel)
+                            and w.title() == "测试对话框"]
+            self.assertEqual(len(open_windows), 1, "同一个对话框开了两个窗口")
+        finally:
+            for child in list(self.app.winfo_children()):
+                if isinstance(child, ctk.CTkToplevel) and child.title() == "测试对话框":
+                    child.destroy()
+
+    # --- which language the panel opens in -----------------------------------
+
+    def test_the_panel_opens_on_the_chinese_the_card_already_shows(self):
+        # The list said 中文 and the panel said English for the same game, which
+        # reads as the translation having silently gone missing.
+        self._pool_reset()
+        try:
+            game = self._panel_game(0)
+            slg_db.set_auto_translation(self.app.conn, "title", game["id"],
+                                        game["title"], "缓存的中文名", engine="m")
+            slg_gui.load_title_translations(self.app.conn)
+            self._select(game)
+            self.assertEqual(self.app._detail_parts["title"].cget("text"),
+                             "缓存的中文名")
+        finally:
+            slg_db.delete_translation(self.app.conn, "title", game["id"])
+            slg_gui.load_title_translations(self.app.conn)
+            self.app.selected = None
+            self._finish()
+
+    def test_the_chosen_language_survives_the_next_game(self):
+        # 中文 used to be reset by every selection, so a reader who wanted
+        # Chinese had to flip the switch again for every single game.
+        self._pool_reset()
+        try:
+            with mock.patch.object(slg_db, "set_pref") as set_pref:
+                self._select(self._panel_game(0, overview="One."))
+                self.app._set_overview_lang(self.app.selected, "中文")
+            self.assertTrue(set_pref.called, "语言选择没有存进 prefs")
+            self.assertEqual(set_pref.call_args[0][2], "中文")
+            self.assertEqual(self.app._detail_lang, "中文")
+            self._select(self._panel_game(1, overview="Two."))
+            self.assertEqual(self.app._detail_parts["ov_seg"].get(), "中文")
+        finally:
+            self.app._detail_lang = "原文"
+            self.app.selected = None
+            self._finish()
+
+    def test_restoring_a_remembered_language_spends_no_request(self):
+        # _fill_detail runs on every click in the list. Asking the translator
+        # from there would turn browsing into a hundred API calls.
+        self._pool_reset()
+        try:
+            self.app._detail_lang = "中文"
+            with mock.patch.object(slg_gui.threading, "Thread") as thread:
+                self._select(self._panel_game(0, overview="Nothing cached."))
+            self.assertFalse(thread.called, "被动填充发出了翻译请求")
+        finally:
+            self.app._detail_lang = "原文"
+            self.app.selected = None
             self._finish()
 
 

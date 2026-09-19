@@ -28,6 +28,9 @@ It is a personal tool and stays local. No account, no upload, no telemetry. It
 ships with an empty exclusion list on purpose — what you filter is your call,
 not mine.
 
+It is a catalogue, not a storefront: it holds no game files and offers no
+downloads. Go to the developers' own sites — or find the downloads yourself.
+
 ```
 slgking                       # the window
 slgking scrape --tag netorare # refresh the catalogue and exit
@@ -60,6 +63,9 @@ dikgames 是个大站（一千多款），但它没有「你」这个概念。�
 
 **本软件完全免费**：没有收费版、没有付费激活、没有隐藏收费入口。如果你是花钱拿到它的，
 请立即举报。
+
+**本软件只是一个检索库**：里面没有任何游戏文件，也不提供任何下载。想下载游戏请前往游戏
+官网，或者自己去找下载地址。检索到的信息与游戏版权都归原站点和作者所有。
 
 ## 快速开始
 
@@ -194,6 +200,25 @@ PowerShell 脚本，原因写在文件开头：这台机器上 CodePilot 会 sha
 都返回空；中文快捷方式名走环境变量过去（环境变量以 UTF-16 跨进程），避免
 PowerShell 5.1 猜错 `.ps1` 的编码。
 
+## 同步策略
+
+**exe 里不带任何数据。** 打包只把 `assets/slgking.ico` 塞进去，`dist/` 只有一个
+exe；清单是每个用户第一次点同步时自己抓的，存在 `%LOCALAPPDATA%\slgking\`。
+换电脑带走那个目录，不是带走 exe。
+
+同步早就不是翻页全量了，走的是 sitemap 增量：三个 sitemap 请求列出全站每个 slug
+和它的 `<lastmod>`，跟库里的逐条比对，**只有新增的、和 lastmod 变了的才去抓详情页**。
+库追上站点之后，一次同步通常就是 3 个请求。
+
+剩下的是两条配额，都是一次性的欠账，跑几次就清了：
+
+| 配额 | 值 | 用途 |
+|---|---|---|
+| `NEW_PER_RUN` | 200 | 首轮全站新游戏入库，剩下的滚到下次 |
+| `ENRICH_PER_SYNC` | 150 | 老游戏补评分 / 简介 / 封面 |
+
+`--incremental` 跑同步，`--enrich N` 单独跑补全。
+
 ## 站点结构（抓取依据）
 
 都是拿 curl 实测确认过的，不是猜的：
@@ -205,7 +230,12 @@ PowerShell 5.1 猜错 `.ps1` 的编码。
     懒加载的 base64 占位灰块
   - `section` 的 class 里带全部标签和引擎：`tag-netorare`、`platform-renpy`
 - 详情页才有：JSON-LD 里的 `ratingValue`（站内评分）、`Version:`、
-  `Developer:`、`datePublished`、`id="elementor-tab-content-1601"` 里的完整简介。
+  `Developer:`、`datePublished`、简介。
+- 简介在 Elementor 的 Overview 标签页里，**tab 实例 id 每页都不一样**
+  （agent17 是 `-1601`，cane-and-able 是 `-4591`，xxxfiles 是 `-8471`）。
+  写死 id 曾让大多数页面的简介抓不到，只能从 tab 标题的
+  `aria-controls="elementor-tab-content-<id>"` 反查。正文按 div 深度闭合，
+  不能停在第一个 `</div></div>`，否则嵌套一层就把简介截断。
 
 解析前**只剥 `<style>`、不剥 `<script>`**：评分在 JSON-LD 里，就在 script 标签中，
 剥掉了就一个都匹配不到；而 CSS 文本会让正则误命中。

@@ -370,16 +370,40 @@ class Cache(unittest.TestCase):
             ("Princess", slg_db.ENGINE_UNTRANSLATED))
 
     def test_title_translations_is_keyed_by_game_id(self):
+        # The src_text has to be the game's own title: the map is built for the
+        # cards, which only ever want the translation of the name that is on
+        # the row right now.
         self.assertEqual(slg_db.title_translations(self.conn), {})
-        slg_db.set_translation(self.conn, "title", self.gid, "Princess", "公主",
+        slg_db.set_translation(self.conn, "title", self.gid, "A", "啊",
                                engine="deepseek-chat")
         self.assertEqual(slg_db.title_translations(self.conn),
-                         {str(self.gid): ("公主", "deepseek-chat")})
+                         {str(self.gid): ("啊", "deepseek-chat")})
 
     def test_title_translations_ignores_the_other_kinds(self):
         slg_db.set_translation(self.conn, "overview", self.gid, "原文", "译文")
         slg_db.set_translation(self.conn, "tag", "netorare", "netorare", "NTR")
         self.assertEqual(slg_db.title_translations(self.conn), {})
+
+    def test_a_translation_of_a_title_that_changed_is_not_served(self):
+        # The hash is stored on the row but is not part of the primary key -
+        # there is one row per game - so cleaning up 'X - dikgames' left the
+        # translation made from it in place. get_translation_row spotted the
+        # mismatch and title_translations did not, so the panel showed the
+        # cleaned name while every card still showed the old one.
+        slg_db.set_translation(self.conn, "title", self.gid,
+                               "Princess - dikgames",
+                               "公主 [v1] [Studio] - dikgames", engine="m")
+        self.assertEqual(slg_db.title_translations(self.conn), {},
+                         "旧标题的译文还在被卡片使用")
+
+    def test_a_hand_typed_name_survives_a_title_change(self):
+        # A hand-typed name is a correction, not a translation, and carries no
+        # source hash to fall out of date.
+        slg_db.set_manual_translation(self.conn, "title", self.gid, "我自己取的名")
+        slg_db.set_translation(self.conn, "title", self.gid,
+                               "Princess - dikgames", "旧机翻", engine="m")
+        self.assertEqual(slg_db.title_translations(self.conn),
+                         {str(self.gid): ("我自己取的名", slg_db.ENGINE_MANUAL)})
 
     def test_counts(self):
         self.assertEqual(slg_db.translation_counts(self.conn)["tag_total"], 2)

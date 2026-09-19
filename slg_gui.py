@@ -18,7 +18,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 import traceback
 import webbrowser
-from tkinter import messagebox
+from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 from PIL import Image
@@ -28,7 +28,7 @@ import slg_engines
 import slg_scrape
 import slg_translate
 
-APP_VERSION = "0.12.0"
+APP_VERSION = "0.13.0"
 APP_TITLE = "SLG黄游之王"
 AUTHOR = "菊千代赛高"
 GITHUB_URL = "https://github.com/JXZ666"
@@ -39,6 +39,12 @@ SITE_URL = slg_scrape.BASE
 SITE_LABEL = "游戏官网 · dikgames.com"
 PREF_THEME = "theme"
 PREF_FREE_NOTICE = "free_notice_seen"
+# Where the games live on this machine. Asked for once and remembered, because
+# slg_scan used to ship one hard-coded path - the author's own - so the button
+# did nothing on anybody else's computer.
+PREF_SCAN_ROOT = "scan_root"
+PREF_DETAIL_LANG = "detail_lang"
+PREF_SYNC_SINCE = "sync_since"
 
 
 def asset_path(name):
@@ -102,7 +108,28 @@ COVER_W, COVER_H = 112, 69          # dikgames thumbs are 576x356, ~1.62:1
 DETAIL_W, DETAIL_H = 300, 185
 PAGE = 80                            # cards rendered per "load more"
 REFRESH_GAP = 5.0                    # seconds between refreshes while syncing
-ENRICH_PER_SYNC = 150                # detail pages a single sync will backfill
+# Detail pages a single sync will backfill. 968 of 1595 rows were still waiting
+# at 150 a run, which is seven syncs before the oldest game on screen gets a
+# blurb; a sync is three sitemap requests plus this, so the cap was the whole
+# cost and the queue, not the site, was what made it feel stuck.
+ENRICH_PER_SYNC = 400
+
+# Each field opens the way it reads: the best score, the best rating and the
+# newest update first, but names from A. The arrow button flips from there.
+SORT_FIELDS = {"推荐分": "score", "站内评分": "rating",
+               "最近更新": "updated", "名称": "title"}
+SORT_DEFAULT_DESC = {"score": True, "rating": True, "updated": True,
+                     "title": False}
+# Labelled: a bare ↓ in a 44px box next to the dropdown read as decoration, not
+# as a control. "只有正序没有反序" was the report, and the arrow was the answer.
+SORT_ARROW = {True: "↓ 降序", False: "↑ 升序"}
+
+# Shown in the description box when there is no blurb to show. Deliberately not
+# "the site has none": the library cannot yet tell "never fetched" from "the
+# site never wrote one", and 968 of 1595 rows were in the first state. Claiming
+# the site had no blurb for those would have been a lie the user could check.
+EMPTY_OVERVIEW = ("暂无简介 — 本站没有提供，或还没抓到（点「同步 dikgames」可补齐）。\n"
+                  "想自己写一段，点上面的「✎ 改简介」。")
 
 # Nearly every game carries these, so leading with them wastes the three lines
 # a card gets. Push them to the back and let the distinctive tags show.
@@ -421,6 +448,7 @@ class App(ctk.CTk):
         self.search = ""
         self.view = None
         self.sort = "score"
+        self.sort_desc = SORT_DEFAULT_DESC[self.sort]
         self.selected = None
         self.rows = []
         self.shown = PAGE
@@ -467,6 +495,10 @@ class App(ctk.CTk):
         self._title_inflight = set()
         self._ov_label = None     # the overview text widget currently on screen
         self._ov_seg = None
+        # Which language the panel reads in. Remembered across games and across
+        # restarts: it is a standing preference about the user, not a property of
+        # one game.
+        self._detail_lang = slg_db.get_pref(self.conn, PREF_DETAIL_LANG) or "原文"
         self._title_label = None  # the name at the top of the detail panel
         self._title_note = None   # why that name is still English, if it is
         # The detail panel's widgets, built once and repointed at each game.
@@ -540,6 +572,7 @@ class App(ctk.CTk):
         # invalidate themselves; clearing everything here re-decoded every
         # downloaded thumbnail, which is the bulk of the work of a repaint.
         self._build()
+        self._paint_scan_button()
         if self.busy:
             self._start_job(self._job_label)
         self.selected = None
@@ -550,6 +583,14 @@ class App(ctk.CTk):
 
     def _teardown_ui(self):
         for child in self.winfo_children():
+            # An open dialog is a child of the root as well, so destroying
+            # everything closed the help document, the settings dialog and the
+            # tag editor out from under the user - silently, and automatically
+            # every time the OS flipped theme in 跟随系统 mode. They keep the
+            # palette they were built with, which is a shade out of date and far
+            # better than gone.
+            if isinstance(child, ctk.CTkToplevel):
+                continue
             child.destroy()
         # Every one of these pointed at a widget that no longer exists. Leaving
         # them set is how a background repaint turns into a TclError on a dead
@@ -582,12 +623,15 @@ class App(ctk.CTk):
         self._detail_shown = None
         self._tag_chips = []
         self._title_entry = self._ov_text = None
-        self._tag_editor = None
-        self._settings_status = self.tag_btn = None
+        # _tag_editor / _settings_status / tag_btn are deliberately left alone:
+        # their widgets are inside dialogs, and those now survive the rebuild.
+        # Blanking them here would leave a live window whose buttons had nothing
+        # to write through.
         self.view_buttons = {}
         self.stat_label = self.progress_label = None
         self.update_btn = self.translate_btn = self.covers_btn = None
         self.sync_btn = self.rebuild_btn = self.search_entry = None
+        self.scan_btn = self.backfill_btn = None
 
     def _poll_system(self):
         """"system" has no callback to hang off, so sample the OS setting.
@@ -718,6 +762,17 @@ class App(ctk.CTk):
             fg_color="transparent", text_color=TEXT, hover_color=CARD,
             anchor="w", command=self.do_covers)
         self.covers_btn.pack(fill="x", padx=12, pady=(0, 8))
+        # The site lists 2066 games; the library has ever held about half, and
+        # the never-ingested rest are all years old. Without this the routine
+        # sync spends its whole 200-game budget on back catalogue every time,
+        # which is why the "new games" it reports are never the ones the user
+        # is waiting for. Right-click forgets the cutoff entirely.
+        self.backfill_btn = ctk.CTkButton(
+            actions, text="补齐历史…", height=28, corner_radius=8,
+            fg_color="transparent", text_color=MUTED, hover_color=CARD,
+            font=ui_font(size=12), anchor="w", command=self.do_backfill)
+        self.backfill_btn.pack(fill="x", padx=12, pady=(0, 2))
+        self.backfill_btn.bind("<Button-3>", lambda e: self._forget_sync_since())
 
         nav = ctk.CTkScrollableFrame(bar, fg_color="transparent")
         nav.pack(side="top", fill="both", expand=True)
@@ -740,11 +795,19 @@ class App(ctk.CTk):
         _section(nav, "工具")
         for text, command in (("标签库…", self.open_tag_picker),
                               ("标签译名…", self.open_tag_editor),
-                              ("偏好权重…", self.open_weights),
-                              ("扫描本地目录", self.do_scan)):
+                              ("偏好权重…", self.open_weights)):
             ctk.CTkButton(nav, text=text, height=34, corner_radius=8,
                           fg_color="transparent", text_color=TEXT, hover_color=CARD,
                           anchor="w", command=command).pack(fill="x", padx=12, pady=2)
+        # This one shows which folder it will walk, so "why did it find nothing"
+        # has an answer on screen. Right-click picks a different one - the same
+        # gesture the tag chips use, so it is already in the user's hands.
+        self.scan_btn = ctk.CTkButton(
+            nav, text="扫描本地目录", height=34, corner_radius=8,
+            fg_color="transparent", text_color=TEXT, hover_color=CARD,
+            anchor="w", command=self.do_scan)
+        self.scan_btn.pack(fill="x", padx=12, pady=2)
+        self.scan_btn.bind("<Button-3>", lambda e: self.pick_scan_root())
         self.update_btn = ctk.CTkButton(
             nav, text="检查更新", height=34, corner_radius=8, fg_color="transparent",
             text_color=TEXT, hover_color=CARD, anchor="w", command=self.do_updates)
@@ -790,6 +853,12 @@ class App(ctk.CTk):
             button_color=CHIP, button_hover_color=CARD_HOVER,
             command=self._on_sort)
         self.sort_menu.pack(side="left")
+        self.sort_dir_btn = ctk.CTkButton(
+            sort_row, text=SORT_ARROW[self.sort_desc], width=78, height=34,
+            corner_radius=8, fg_color=CARD, text_color=TEXT,
+            hover_color=CARD_HOVER, font=ui_font(size=15),
+            command=self._toggle_sort_dir)
+        self.sort_dir_btn.pack(side="left", padx=(6, 0))
 
         self.theme_switch = ctk.CTkSegmentedButton(
             right, values=[_THEME_LABELS[m] for m in ("light", "dark", "system")],
@@ -890,9 +959,22 @@ class App(ctk.CTk):
         self.refresh()
 
     def _on_sort(self, label):
-        self.sort = {"推荐分": "score", "站内评分": "rating",
-                     "最近更新": "updated", "名称": "title"}[label]
+        self.sort = SORT_FIELDS[label]
+        # A new field opens in its own natural direction rather than inheriting
+        # the previous field's flip.
+        self.sort_desc = SORT_DEFAULT_DESC[self.sort]
+        self._paint_sort_dir()
+        self.shown = PAGE
         self.refresh()
+
+    def _toggle_sort_dir(self):
+        self.sort_desc = not self.sort_desc
+        self._paint_sort_dir()
+        self.shown = PAGE
+        self.refresh()
+
+    def _paint_sort_dir(self):
+        self.sort_dir_btn.configure(text=SORT_ARROW[self.sort_desc])
 
     def _drop_chip(self, slug, excluded):
         (self.exclude if excluded else self.include).remove(slug)
@@ -932,7 +1014,7 @@ class App(ctk.CTk):
             self.conn, include=self.include, exclude=self.exclude,
             search=self.search or None,
             statuses=[self.view] if self.view else None,
-            downloaded_only=False, sort=self.sort)
+            downloaded_only=False, sort=self.sort, desc=self.sort_desc)
 
         # The row objects are replaced wholesale, so the old selection would
         # keep showing pre-edit values (a status button that never lights up).
@@ -968,10 +1050,17 @@ class App(ctk.CTk):
 
     def _render_stats(self):
         stats = slg_db.stats(self.conn)
-        self.stat_label.configure(
-            text="%d 款 · %d 标签\n评分 %d 款 · 已下载 %d 款"
-                 % (stats["games"], stats["tags"], stats["rated"], stats["downloaded"]))
         gaps = slg_db.data_gaps(self.conn)
+        text = ("%d 款 · %d 标签\n评分 %d 款 · 已下载 %d 款"
+                % (stats["games"], stats["tags"], stats["rated"],
+                   stats["downloaded"]))
+        # Only while there is something to report. "简介缺 0 款" forever would be
+        # noise in the one column with no room to spare, and the number is the
+        # only thing that tells the user why a panel is showing the placeholder
+        # and roughly how many syncs are left.
+        if gaps["overview"]:
+            text += "\n简介缺 %d 款（同步补齐）" % gaps["overview"]
+        self.stat_label.configure(text=text)
         self.covers_btn.configure(
             text="下载封面（%d）" % gaps["covers"] if gaps["covers"] else "封面已齐")
 
@@ -1199,7 +1288,11 @@ class App(ctk.CTk):
                            font=ui_font(size=11))
         tagline.grid(row=2, column=1, sticky="ew", pady=(0, 12))
 
-        for widget in (card, img):
+        # The three text lines are bound too, and that is not belt and braces:
+        # a plain tk.Label does not pass its clicks up to the frame, so binding
+        # only the frame left the 80% of the card that is text dead to the
+        # mouse - clicking a game's name did nothing at all.
+        for widget in (card, img, title, meta, tagline):
             widget.bind("<Button-1>", lambda e, c=card: self._on_card_click(c))
         slot = {"frame": card, "img": img, "title": title, "meta": meta,
                 "tagline": tagline}
@@ -1388,11 +1481,19 @@ class App(ctk.CTk):
         order.extend(self._build_detail_tags(d, parts))
         order.extend(self._build_detail_overview(d, parts))
 
+        # Static, so _detail_signature stays as it is, and _layout_detail shows
+        # it unconditionally: only url/ov_* are keyed off a flag there.
+        add("disclaimer", ctk.CTkLabel(
+                d, text="本站只做游戏检索，不提供下载。想玩请去官网或自寻下载地址。",
+                text_color=MUTED, font=ui_font(size=11), wraplength=340,
+                justify="left", anchor="w"),
+            fill="x", padx=18, pady=(12, 20))
+
         self._detail_parts = parts
         self._detail_order = order
         self._detail_shown = None
 
-    def _layout_detail(self, show_url, show_overview):
+    def _layout_detail(self, show_url):
         """Show, hide and order the panel's blocks.
 
         pack() appends, so a block that comes back lands at the bottom.
@@ -1400,8 +1501,14 @@ class App(ctk.CTk):
         the entire class of "the description is below the tags now" bug. It is
         skipped when the same set of blocks is already up, which is every
         game change but one.
+
+        The description block is unconditional. It used to be dropped when the
+        overview was empty, which hid 968 of 1595 games' 简介 section entirely:
+        the user could not tell "the site has no blurb for this one" from "the
+        app is broken", and there was nowhere to click 改简介 on a game whose
+        translation they wanted to write by hand.
         """
-        wanted = {"url": show_url, "ov_head": show_overview, "ov_box": show_overview}
+        wanted = {"url": show_url}
         keys = [key for key, _w, _p in self._detail_order if wanted.get(key, True)]
         if keys == self._detail_shown:
             return
@@ -1430,25 +1537,63 @@ class App(ctk.CTk):
             if game["note"]:
                 p["note_entry"].insert(0, game["note"])
         self._fill_detail_tags(game)
-        # Explicit, every time: the switch used to be reset by the rebuild, and
-        # without this the panel would show 中文 over the previous game's text.
-        p["ov_seg"].set("原文")
-        p["ov_label"].configure(text=self._overview_to_show(game))
-        self._layout_detail(bool(game["url"]), bool(game["overview"]))
+        # The switch remembers what the last game was read in. It used to be
+        # forced back to 原文 on every fill, which threw the choice away each
+        # time the user picked a new game, and it opened English even for games
+        # whose Chinese was already in the cache - so a card that read 中文 in
+        # the grid came up English in the panel and looked untranslated.
+        # request=False: restoring a cached language costs no API call, and
+        # spending one per click on the list is not something a passive fill
+        # should do.
+        p["ov_seg"].set(self._detail_lang)
+        self._apply_lang(game, self._detail_lang, request=False)
+        self._layout_detail(bool(game["url"]))
 
     def _show_title(self, text):
         label = self._title_label
         if label is not None and label.winfo_exists():
             label.configure(text=text)
 
+    def _set_ov_text(self, text):
+        """The description box, saying so when the site has none.
+
+        A blank label reads as a broken panel, and the block used to be hidden
+        outright - so a game with no blurb looked like a game with no
+        description section at all. The placeholder also tells the user the
+        box next to it is theirs to fill.
+        """
+        label = self._ov_label
+        if label is None or not label.winfo_exists():
+            return
+        if text:
+            label.configure(text=text, text_color=TEXT)
+        else:
+            label.configure(text=EMPTY_OVERVIEW, text_color=MUTED)
+
     def _set_overview_lang(self, game, value):
+        """The user picked a language. Remember it for the next game too."""
+        self._detail_lang = value
+        slg_db.set_pref(self.conn, PREF_DETAIL_LANG, value)
+        seg = self._ov_seg
+        if seg is not None and seg.winfo_exists() and seg.get() != value:
+            seg.set(value)
+        self._apply_lang(game, value, request=True)
+
+    def _apply_lang(self, game, value, request):
+        """Put `value`'s text in the panel, from the cache.
+
+        `request` decides what happens when nothing is cached: True kicks off
+        the translation, False leaves whatever is on screen alone. Both callers
+        go through here so the title and the description can never disagree
+        about which language the panel is in.
+        """
         label = self._ov_label
         if label is None or not label.winfo_exists():
             return
         if value == "原文":
             self._show_title(self._title_to_show(game))
             self._show_title_note("")
-            label.configure(text=self._overview_to_show(game))
+            self._set_ov_text(self._overview_to_show(game))
             return
         # get_translation_row, not get_translation: a row marked
         # ENGINE_UNTRANSLATED means "asked already, the model will not do it",
@@ -1462,16 +1607,31 @@ class App(ctk.CTk):
                                            game["overview"])
         if cached_title is not None:
             self._show_title(cached_title)
+        elif not request:
+            # Nothing cached for the remembered language. Falling back to the
+            # site's own name keeps the panel readable instead of half-empty.
+            self._show_title(self._title_to_show(game))
         if cached_ov is not None:
-            label.configure(text=cached_ov)
+            self._set_ov_text(cached_ov)
+        elif not game["overview"]:
+            # Nothing to translate. Asking anyway spends a request to come back
+            # with an error the user can do nothing about, over a game the site
+            # never wrote a blurb for. The placeholder stays; the name below
+            # still gets its translation.
+            self._set_ov_text("")
+        elif not request:
+            self._set_ov_text(self._overview_to_show(game))
         else:
             label.configure(text="翻译中…")
+        if not request:
+            return
         # The name rides along on the same switch rather than getting a button
         # of its own: it is one short string, and half the panel turning Chinese
         # while the title stays English reads as a bug.
         if cached_title is not None and cached_ov is not None:
             return
-        if cached_ov is None and game["id"] not in self._ov_inflight:
+        if (cached_ov is None and game["overview"]
+                and game["id"] not in self._ov_inflight):
             self._ov_inflight.add(game["id"])
             threading.Thread(target=self._overview_worker,
                              args=(dict(game),), daemon=True).start()
@@ -1595,10 +1755,11 @@ class App(ctk.CTk):
             if self._ov_seg.get() != "中文":
                 return
         if error:
-            label.configure(text="翻译失败：%s\n\n%s" % (error, game["overview"]))
+            label.configure(text="翻译失败：%s\n\n%s"
+                                 % (error, game["overview"] or ""))
             self._ov_seg.set("原文")
             return
-        label.configure(text=text)
+        self._set_ov_text(text)
 
     def _build_detail_status(self, d, parts):
         row = ctk.CTkFrame(d, fg_color="transparent")
@@ -1891,10 +2052,12 @@ class App(ctk.CTk):
         was filled from, so the two cannot disagree.
         """
         self._ov_seg.set("中文")
+        self._detail_lang = "中文"
+        slg_db.set_pref(self.conn, PREF_DETAIL_LANG, "中文")
         self._show_title(self._zh_title(game) or game["title"])
         self._show_title_note("")
-        self._ov_label.configure(text=self._zh_overview(game)
-                                 or self._overview_to_show(game))
+        self._set_ov_text(self._zh_overview(game)
+                          or self._overview_to_show(game))
 
     # --- writes (everything lands in sqlite immediately) ----------------------
 
@@ -1930,14 +2093,32 @@ class App(ctk.CTk):
     def _set_note(self, text):
         self.selected["note"] = text
         slg_db.set_state(self.conn, self.selected["id"], note=text)
+        # The write was already immediate and already silent: Enter saved the
+        # note and nothing on screen moved, which reads as the key not working.
+        self._set_progress("备注已保存" if text else "备注已清空")
 
     # --- dialogs --------------------------------------------------------------
 
-    def open_tag_picker(self):
+    def _new_dialog(self, title, geometry=None):
+        """A dialog window with the two things every one of them needs.
+
+        Escape closes it - Tk hands a bare Toplevel no bindings at all - and
+        re-opening the same dialog reuses the window instead of stacking a
+        second copy, which is what clicking 帮助文档 twice used to do.
+        """
+        for child in self.winfo_children():
+            if isinstance(child, ctk.CTkToplevel) and child.title() == title:
+                child.destroy()
         win = ctk.CTkToplevel(self)
-        win.title("标签库")
-        win.geometry("420x600")
+        win.title(title)
+        if geometry:
+            win.geometry(geometry)
         win.transient(self)
+        win.bind("<Escape>", lambda e: win.destroy())
+        return win
+
+    def open_tag_picker(self):
+        win = self._new_dialog("标签库", "420x600")
         ctk.CTkLabel(win, text="左键加入筛选 · 右键排除",
                      text_color=MUTED, font=ui_font(size=12)).pack(pady=10)
         frame = ctk.CTkScrollableFrame(win, fg_color="transparent")
@@ -1955,10 +2136,7 @@ class App(ctk.CTk):
                      lambda e, s=slug: (self.toggle_tag(s, exclude=True), win.destroy()))
 
     def open_weights(self):
-        win = ctk.CTkToplevel(self)
-        win.title("偏好权重")
-        win.geometry("420x560")
-        win.transient(self)
+        win = self._new_dialog("偏好权重", "420x560")
         ctk.CTkLabel(win, text="从你的五星评分里算出来的标签倾向\n正数 = 你喜欢，负数 = 你不喜欢",
                      text_color=MUTED, font=ui_font(size=12),
                      justify="left").pack(pady=10, anchor="w", padx=16)
@@ -1987,10 +2165,7 @@ class App(ctk.CTk):
         A hand-typed tag is stored as ENGINE_MANUAL, so a later translation run
         skips it while leaving every other tag alone.
         """
-        win = ctk.CTkToplevel(self)
-        win.title("标签译名")
-        win.geometry("520x640")
-        win.transient(self)
+        win = self._new_dialog("标签译名", "520x640")
         ctk.CTkLabel(
             win, justify="left", text_color=MUTED, font=ui_font(size=12),
             text="左边的英文是标签原文，右边是显示在卡片上的中文。\n"
@@ -2075,6 +2250,12 @@ class App(ctk.CTk):
             if entry.winfo_exists():
                 entry.delete(0, "end")
                 entry.insert(0, _TAG_ZH.get(slug, ""))
+        # The filter bar's signature is the include/exclude lists and nothing
+        # else, so a rename - which changes the chips' text without touching
+        # either list - would leave the bar showing the old Chinese until the
+        # next time the filters changed. Dropping the signature forces the
+        # repaint this call is already here to do.
+        self._filter_sig = None
         # preserve_scroll: the chips under the cursor change text, not order, so
         # throwing the scroll position away here would just be disorienting.
         self._invalidate_cards()
@@ -2090,10 +2271,7 @@ class App(ctk.CTk):
         the free engine is picked: five fields that have no meaning without a
         key would otherwise sit there greyed out and read as a broken dialog.
         """
-        win = ctk.CTkToplevel(self)
-        win.title("翻译设置")
-        win.geometry("500x580")
-        win.transient(self)
+        win = self._new_dialog("翻译设置", "500x580")
 
         frame = ctk.CTkFrame(win, fg_color="transparent")
         frame.pack(fill="both", expand=True, padx=18, pady=16)
@@ -2238,10 +2416,7 @@ class App(ctk.CTk):
                            / ctk.ScalingTracker.get_window_scaling(win)))))
 
     def open_help(self):
-        win = ctk.CTkToplevel(self)
-        win.title("帮助文档")
-        win.geometry("560x640")
-        win.transient(self)
+        win = self._new_dialog("帮助文档", "560x640")
         win.after(120, win.lift)
 
         ctk.CTkLabel(win, text="帮助文档", text_color=TEXT,
@@ -2309,8 +2484,25 @@ class App(ctk.CTk):
         body("A：同步是增量抓取，中断了再点一次「同步 dikgames」就行，"
              "已经抓到的不会重复抓。站点偶尔抖动，等一会儿再试。")
 
+        body("Q：同步跑太久，能停吗？", color=MUTED)
+        body("A：能。任务跑起来之后，左上角那颗按钮会变成「停止」，点一下就停；"
+             "已经抓到的部分会保存，下次接着来。")
+
+        body("Q：「补齐历史…」是干什么的？", color=MUTED)
+        body("A：站点有一批好几年前的老游戏，本库一直没收。日常「同步」默认只收"
+             "新出的，老的那些会跳过——否则每次同步都去啃老库，最新的游戏反而要等。\n"
+             "想把老游戏也收进来就点「补齐历史…」，它不设日期限制，一次收一批，"
+             "点几次就把历史补完了。\n"
+             "在「补齐历史…」上点右键可以彻底取消日期限制，之后普通「同步」也会收老游戏。")
+
         body("Q：封面显示灰色方块？", color=MUTED)
         body("A：说明这张封面还没下载。点左下角「下载封面」，让它慢慢跑完。")
+
+        body("Q：「扫描本地目录」扫哪里？", color=MUTED)
+        body("A：第一次点它会让你选一个文件夹，选完就记住了，按钮上写着它当前认的路径。"
+             "想换一个，在那颗按钮上点右键重新选。\n"
+             "选中文件夹之后，库里同名（或近似同名）的游戏会被标成「已下载」，"
+             "并记下本地版本号，方便和站点上的最新版对比。")
 
         body("Q：搜索、筛选、标签库之间的区别？", color=MUTED)
         body("A：搜索栏按游戏名找；卡片上的标签或「标签库…」里的左键加入筛选、右键排除；"
@@ -2319,6 +2511,11 @@ class App(ctk.CTk):
         body("Q：深色主题里的「跟随系统」是怎么工作的？", color=MUTED)
         body("A：程序每 5 秒采样一次 Windows 的浅色/深色设置，变了就跟着换，"
              "所以会有一小段延迟。手动选「浅色」或「深色」则会记住，下次打开还是它。")
+
+        head("下载说明")
+        body("本软件只是一个游戏资料检索库，里面没有任何游戏文件，也不提供"
+             "任何下载。想下载游戏请前往游戏官网，或者自己去找下载地址。\n"
+             "检索到的信息和游戏的版权都归原站点与作者所有。", color=DANGER_TEXT)
 
         head("关于")
         body("作者 · %s" % AUTHOR, color=MUTED)
@@ -2461,10 +2658,23 @@ class App(ctk.CTk):
         # on the buttons it just rebuilt.
         self._job_label = label
         self._stop.clear()
-        self.sync_btn.configure(text=label, state="disabled")
+        # The sync button doubles as the stop button for the duration. _stop has
+        # been threaded into every worker's should_stop since they were written
+        # and nothing ever set it: a job that ran long - 400 detail pages, or a
+        # stalled cover queue - had no way out except killing the app. The label
+        # moves to the sidebar's status line, which is where progress already
+        # goes.
+        self.sync_btn.configure(text="停止", state="normal",
+                                command=self._cancel_job)
         self.covers_btn.configure(state="disabled")
         self.rebuild_btn.configure(state="disabled")
         self.translate_btn.configure(state="disabled")
+        self._set_progress(label)
+
+    def _cancel_job(self):
+        """Ask the running worker to stop. It stops at its next checkpoint."""
+        self._stop.set()
+        self.sync_btn.configure(text="正在停止…", state="disabled")
 
     def _end_job(self, message, refill=False):
         """Finish a background job. `refill` forces every card to be redrawn.
@@ -2475,7 +2685,9 @@ class App(ctk.CTk):
         screen would keep showing the grey placeholder until the next restart.
         """
         self.busy = False
-        self.sync_btn.configure(text="同步 dikgames", state="normal")
+        self._job_label = ""
+        self.sync_btn.configure(text="同步 dikgames", state="normal",
+                                command=self.do_sync)
         self.covers_btn.configure(state="normal")
         self.rebuild_btn.configure(state="normal")
         self.translate_btn.configure(state="normal")
@@ -2485,21 +2697,52 @@ class App(ctk.CTk):
             self._invalidate_cards()
         self.refresh()
 
+    def sync_cutoff(self):
+        """The date an ordinary sync stops at, or None for no gate.
+
+        Seeded on first use from the newest row already in the library: that is
+        by definition everything the user has, so the gate costs them nothing
+        they had before. Stored the moment it is chosen, so forgetting it later
+        actually sticks.
+        """
+        stored = slg_db.get_pref(self.conn, PREF_SYNC_SINCE)
+        if stored is None:
+            stored = slg_db.newest_last_updated(self.conn)
+            slg_db.set_pref(self.conn, PREF_SYNC_SINCE, stored)
+        return stored or None
+
+    def _forget_sync_since(self):
+        """Stop gating the routine sync - right-click on 补齐历史."""
+        slg_db.set_pref(self.conn, PREF_SYNC_SINCE, "")
+        self._set_progress("已取消日期闸门，下次「同步」会把老游戏也一起收")
+
     def do_sync(self):
         """Incremental. Three sitemap requests, then only what actually moved."""
         if self.busy:
             return
+        # Read here, not in the worker: self.conn belongs to the tk thread and
+        # sqlite3 connections are not shareable across threads.
+        since = self.sync_cutoff()
         self._start_job("同步中…")
-        threading.Thread(target=self._sync_worker, daemon=True).start()
+        threading.Thread(target=self._sync_worker, args=(since, False),
+                         daemon=True).start()
 
-    def _sync_worker(self):
+    def do_backfill(self):
+        """One sync with the date gate off, to take the back catalogue."""
+        if self.busy:
+            return
+        self._start_job("补齐历史…")
+        threading.Thread(target=self._sync_worker, args=(None, True),
+                         daemon=True).start()
+
+    def _sync_worker(self, since, backfill):
         import slg_scrape
         fetcher = slg_scrape.Fetcher(log=lambda m: self.queue.put(("log", m)))
         post = lambda m: self.queue.put(("log", m))  # noqa: E731
         try:
             conn = slg_db.connect()
             summary = slg_scrape.sync_incremental(
-                conn, fetcher, log=post,
+                conn, fetcher, since=since, log=post,
                 on_progress=lambda i, n, title: self.queue.put(
                     ("progress", "抓详情 %d/%d · %s" % (i, n, title))))
             # Games that predate the rating/overview columns get topped up
@@ -2511,11 +2754,21 @@ class App(ctk.CTk):
                 on_progress=lambda d, total, url: self.queue.put(
                     ("progress", "补全详情 %d/%d" % (d, total))))
             conn.close()
-            tail = ("，还有 %d 款下次接着来" % summary["deferred"]
-                    if summary["deferred"] else "")
-            self.queue.put(("done", "同步完成 · 全站 %d 款 · 新增 %d · 变动 %d · 补全 %d%s"
-                            % (summary["catalogue"], summary["new"],
-                               summary["changed"], filled, tail)))
+            if backfill:
+                tail = ("，还有 %d 款下次接着来" % summary["deferred"]
+                        if summary["deferred"] else "")
+                said = "补齐完成 · 新增 %d 款 · 变动 %d · 补全 %d%s" % (
+                    summary["new"], summary["changed"], filled, tail)
+            else:
+                tail = ("，还有 %d 款下次接着来" % summary["deferred"]
+                        if summary["deferred"] else "")
+                said = ("同步完成 · 全站 %d 款 · 新增 %d · 变动 %d · 补全 %d%s"
+                        % (summary["catalogue"], summary["new"],
+                           summary["changed"], filled, tail))
+                if summary["skipped_old"]:
+                    said += ("（跳过 %d 款老游戏，点「补齐历史…」可以收）"
+                             % summary["skipped_old"])
+            self.queue.put(("done", said))
         except Exception as exc:  # noqa: BLE001 - the user needs the message
             self.queue.put(("done", "同步失败：%s: %s" % (type(exc).__name__, exc)))
 
@@ -2579,19 +2832,52 @@ class App(ctk.CTk):
         except Exception as exc:  # noqa: BLE001
             self.queue.put(("done", "全量重建失败：%s: %s" % (type(exc).__name__, exc)))
 
+    def scan_root(self):
+        """The remembered game folder, or "" when there is not one yet."""
+        root = slg_db.get_pref(self.conn, PREF_SCAN_ROOT) or ""
+        return root if root and os.path.isdir(root) else ""
+
+    def pick_scan_root(self):
+        """Ask for the folder the games live in. Returns it, or "" if cancelled."""
+        chosen = filedialog.askdirectory(
+            title="选择放游戏的文件夹（里面每个子文件夹是一款游戏）",
+            initialdir=self.scan_root() or os.path.expanduser("~"), parent=self)
+        if chosen:
+            slg_db.set_pref(self.conn, PREF_SCAN_ROOT, os.path.normpath(chosen))
+            self._paint_scan_button()
+        return self.scan_root()
+
+    def _paint_scan_button(self):
+        if self.scan_btn is None or not self.scan_btn.winfo_exists():
+            return
+        root = self.scan_root()
+        self.scan_btn.configure(
+            text="扫描本地目录（%s）" % os.path.basename(root) if root
+            else "扫描本地目录（右键选文件夹）")
+
     def do_scan(self):
         if self.busy:
             return
-        self.busy = True
-        self.sync_btn.configure(state="disabled")
-        self._set_progress("扫描本地目录…")
-        threading.Thread(target=self._scan_worker, daemon=True).start()
+        root = self.scan_root() or self.pick_scan_root()
+        if not root:
+            return
+        # _start_job, not a hand-rolled busy flag: the hand-rolled version
+        # disabled only the sync button, so 下载封面 and 全量重建 stayed
+        # clickable and then did nothing at all when clicked.
+        self._start_job("扫描本地目录…")
+        threading.Thread(target=self._scan_worker, args=(root,),
+                         daemon=True).start()
 
-    def _scan_worker(self):
+    def _scan_worker(self, root):
         import slg_scan
         try:
             conn = slg_db.connect()
-            result = slg_scan.scan(conn, log=lambda m: self.queue.put(("log", m)))
+            result = slg_scan.scan(
+                conn, roots=[root],
+                log=lambda m: self.queue.put(("log", m)),
+                on_progress=lambda name, gid: self.queue.put(
+                    ("progress", "扫描 %s" % name)),
+                should_stop=self._stop.is_set)
             conn.close()
             self.queue.put(("done", "扫描完成：匹配 %d 个，未匹配 %d 个"
                             % (result["matched"], len(result["unmatched"]))))
@@ -2603,10 +2889,7 @@ class App(ctk.CTk):
         report = slg_scan.check_updates(self.conn)
         behind = report["behind"]
 
-        win = ctk.CTkToplevel(self)
-        win.title("检查更新")
-        win.geometry("660x540")
-        win.transient(self)
+        win = self._new_dialog("检查更新", "660x540")
         ctk.CTkLabel(win, text="%d 款有新版 · 已最新 %d 款 · 无法比较 %d 款"
                      % (len(behind), len(report["same"]), len(report["unknown"])),
                      text_color=MUTED, font=ui_font(size=13)).pack(pady=10)

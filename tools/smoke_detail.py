@@ -159,7 +159,12 @@ def main():
     app.select(by_id[ids["no-ov"]])
     app.update()
     check("url block went away", "url" not in app._detail_shown)
-    check("overview block went away", "ov_box" not in app._detail_shown)
+    # The description block stays up and says it has nothing. It used to be
+    # packed away, which hid 968 of 1595 games' 简介 section outright and left
+    # nothing to click 改简介 on for a game the user wanted to write one for.
+    check("overview block stayed", "ov_box" in app._detail_shown)
+    check("overview says it is empty",
+          app._ov_label.cget("text") == slg_gui.EMPTY_OVERVIEW)
     check("title is the second game's", p["title"].cget("text") == NO_OV["title"])
     check("chips rebuilt", len(app._tag_chips) == 3)
 
@@ -222,15 +227,18 @@ def main():
     app._tag_editor = None
     app.update()
 
-    # --- refresh must not blank the panel ------------------------------------
+    # --- refresh must not blank the panel, nor flip its language -------------
+    # The panel was last read in 中文 up the page, and the refresh has to leave
+    # it there: every fill used to force the switch back to 原文, so a reader
+    # who wanted Chinese had to flip it again for each game they looked at.
     app.refresh()
     app.update()
     check("panel survived a refresh",
-          p["title"].cget("text") == WITH_OV["title"])
-    app._set_overview_lang(by_id[ids["with-ov"]], "中文")
-    app.update()
-    check("the hand-typed name survived too",
           p["title"].cget("text") == "阿尔法冒险 v1.20 [Studio X]")
+    app._set_overview_lang(by_id[ids["with-ov"]], "原文")
+    app.update()
+    check("switching back shows the original",
+          p["title"].cget("text") == WITH_OV["title"])
 
     app.destroy()
     print("\nall smoke checks passed")

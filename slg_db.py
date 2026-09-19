@@ -7,11 +7,28 @@ it, which is the one requirement that got its own question in the interview.
 
 import hashlib
 import os
+import re
 import sqlite3
+import time
 from datetime import datetime
 
 STATUSES = ("want", "downloaded", "playing")
 STATUS_LABELS = {"want": "想玩", "downloaded": "已下载", "playing": "正在玩"}
+
+# The site stamps its own name onto the end of every og:title, so a game the
+# detail page named arrives as 'Eternum [v0.9.5] [Caribdis] - dikgames' while
+# the listing page's bracket parse gives just 'Eternum'. This lives in the
+# storage layer rather than in slg_scrape because the migration below has to
+# clean rows written before the parser knew about it, and slg_scrape already
+# imports this module - the other direction would be a cycle.
+SITE_SUFFIX = re.compile(r"\s*[-\u2013\u2014]\s*dikgames\s*$", re.I)
+
+
+def clean_site_title(text):
+    """An og:title without the site's own name hanging off the end."""
+    if not text:
+        return text
+    return SITE_SUFFIX.sub("", text).strip() or text
 
 # Tag weights come from star ratings: a 5-star game pushes its tags up, a
 # 1-star game pushes them down. Dividing by count + SHRINK keeps a tag that
@@ -205,6 +222,48 @@ def _migrate(conn):
                  " WHERE engine = ?", (ENGINE_MANUAL,))
     conn.execute("DELETE FROM translations WHERE engine = ?", (ENGINE_MANUAL,))
     conn.commit()
+    # Rows the detail page named before clean_site_title existed still carry
+    # the site's name. Guarded by the LIKE so the usual case - nothing to fix -
+    # costs one scan and no write.
+    if conn.execute("SELECT 1 FROM games WHERE title LIKE '%dikgames%'"
+                    " LIMIT 1").fetchone():
+        for row in conn.execute("SELECT id, title FROM games"
+                                " WHERE title LIKE '%dikgames%'").fetchall():
+            conn.execute("UPDATE games SET title = ? WHERE id = ?",
+                         (clean_site_title(row["title"]), row["id"]))
+        conn.commit()
+    _repair_site_suffixed_translations(conn)
+
+
+def _repair_site_suffixed_translations(conn):
+    """Strip the site's name out of the cached translations too.
+
+    Cleaning games.title is not enough on its own: the cards read the cache,
+    not the title, so a name translated before the cleanup went on reading
+    '永恒世界 [v0.9.5] [Caribdis] - dikgames' with a clean row underneath it.
+
+    Dropping the row instead would work - title_translations refuses a hash
+    that no longer matches - but it costs the user the Chinese name until they
+    happen to switch that panel to 中文 again. The suffix came off the source,
+    so taking the same suffix off the translation leaves a translation of the
+    title the row now names, which is exactly what the hash is updated to say.
+    Hand-typed names live in manual_translations and are not touched.
+    """
+    stale = [row for row in conn.execute("SELECT ref, text FROM translations"
+                                         " WHERE kind = 'title'").fetchall()
+             if clean_site_title(row["text"]) != row["text"]]
+    for row in stale:
+        game_id = _int_or_none(row["ref"])
+        game = conn.execute("SELECT title FROM games WHERE id = ?",
+                            (game_id,)).fetchone() if game_id is not None else None
+        if game is None:
+            continue
+        conn.execute("UPDATE translations SET text = ?, src_hash = ?"
+                     " WHERE kind = 'title' AND ref = ?",
+                     (clean_site_title(row["text"]), src_hash(game["title"]),
+                      row["ref"]))
+    if stale:
+        conn.commit()
 
 
 def _now():
@@ -229,6 +288,16 @@ def upsert_game(conn, slug, url, title, version=None, developer=None,
         game_id, created = cur.lastrowid, True
     else:
         game_id, created = row["id"], False
+        # The version is the one column where "newer source wins" is wrong, and
+        # it is also the one that is not a plain COALESCE: the detail page's
+        # 'Version:' line trails the listing page's bracket often enough that
+        # an unconditional write walks the number down. Dropping it to NULL
+        # hands the decision to the COALESCE below, which keeps what is there.
+        if version is not None:
+            current = conn.execute("SELECT version FROM games WHERE id = ?",
+                                   (game_id,)).fetchone()["version"]
+            if current and not _version_gt(version, current):
+                version = None
         # Every nullable column is COALESCE'd, never assigned outright. Two
         # scrapers write this row - the tag walk has no rating to give and the
         # incremental pass has no list-page version or developer to give - so
@@ -269,9 +338,39 @@ def set_cover(conn, game_id, cover_file):
     conn.execute("UPDATE games SET cover_file = ? WHERE id = ?", (cover_file, game_id))
 
 
+def _version_gt(left, right):
+    """Is `left` a higher version than `right`?
+
+    Digit runs only, padded on the right, so '0.5b' reads as 0.5 and
+    'Ep.7 Free' as 7 - the same reading slg_scan uses to decide whether a
+    local copy is behind. An unparseable side answers False, which leaves the
+    stored value alone: refusing to move beats moving backwards.
+    """
+    def parts(text):
+        return [int(n) for n in re.findall(r"\d+", text or "")[:4]]
+    a, b = parts(left), parts(right)
+    if not a or not b:
+        return False
+    length = max(len(a), len(b))
+    a += [0] * (length - len(a))
+    b += [0] * (length - len(b))
+    return a > b
+
+
 def upsert_detail(conn, game_id, rating=None, version=None, developer=None,
                   overview=None):
-    """Merge what only the detail page knows. Never clobbers a value with NULL."""
+    """Merge what only the detail page knows.
+
+    Never clobbers a value with NULL, and never walks the version backwards.
+    The listing page's '[v0.26.6]' bracket is the site's current version; the
+    detail page's 'Version:' line is a field the author often forgets to bump,
+    and letting it win is what took agent17 from 0.26.6 down to 0.25.3.
+    """
+    if version is not None:
+        row = conn.execute("SELECT version FROM games WHERE id = ?",
+                           (game_id,)).fetchone()
+        if row is not None and row["version"] and not _version_gt(version, row["version"]):
+            version = None
     sets, params = [], []
     for column, value in (("rating", rating), ("version", version),
                           ("developer", developer), ("overview", overview)):
@@ -287,7 +386,7 @@ def upsert_detail(conn, game_id, rating=None, version=None, developer=None,
 # --- querying ------------------------------------------------------------------
 
 def find_games(conn, include=(), exclude=(), search=None, statuses=None,
-               downloaded_only=False, sort="score"):
+               downloaded_only=False, sort="score", desc=True):
     """Games matching a tag intersection (include) minus a tag union (exclude).
 
     include is an AND: every tag listed must be present. exclude is a NOT:
@@ -337,10 +436,20 @@ def find_games(conn, include=(), exclude=(), search=None, statuses=None,
     if where:
         sql += " WHERE " + " AND ".join(where)
 
-    order = {"score": "score DESC, g.title COLLATE NOCASE",
-             "rating": "g.rating DESC, g.title COLLATE NOCASE",
-             "updated": "g.last_updated DESC, g.title COLLATE NOCASE",
-             "title": "g.title COLLATE NOCASE"}.get(sort, "score DESC")
+    # Direction lives in the SQL rather than a reversed() in the caller: the
+    # list is paged, so reversing after the fetch would show the wrong 80.
+    direction = "DESC" if desc else "ASC"
+    if sort == "title":
+        # A name sort wants no tiebreaker, and titles are never NULL.
+        order = "g.title COLLATE NOCASE %s" % direction
+    else:
+        column = {"score": "score", "rating": "g.rating",
+                  "updated": "g.last_updated"}.get(sort, "score")
+        # (col IS NULL) leads so unrated rows sink in both directions. 985
+        # rows have no rating, and plain ASC would open the list with all of
+        # them; score is COALESCEd, so its guard is free.
+        order = "(%s IS NULL), %s %s, g.title COLLATE NOCASE" % (
+            column, column, direction)
     sql += " ORDER BY " + order
     return conn.execute(sql, params).fetchall()
 
@@ -387,14 +496,70 @@ def get_game(conn, game_id):
     return conn.execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
 
 
+# One filesystem call per stored cover, and the library has ~1500 of them:
+# 190ms on the author's machine. _render_stats asks for this on every refresh -
+# a sort, a scroll-page, a status write - so the answer is memoised briefly and
+# dropped outright by whatever actually changes it.
+_COVER_GAP_TTL = 15.0
+_missing_covers = None   # (count, monotonic seconds)
+
+
+def invalidate_cover_gaps():
+    """Forget the memo. Called after a cover download or a local scan."""
+    global _missing_covers
+    _missing_covers = None
+
+
+def missing_cover_files(conn, ttl=_COVER_GAP_TTL):
+    """Stored covers whose file is not on disk.
+
+    load_cover only accepts a file it can actually open, so a row naming a
+    deleted file renders as a blank card however healthy the database looks.
+    """
+    global _missing_covers
+    now = time.monotonic()
+    if _missing_covers is not None and now - _missing_covers[1] < ttl:
+        return _missing_covers[0]
+    rows = conn.execute("SELECT cover_file FROM games WHERE cover_file"
+                        " IS NOT NULL AND cover_file NOT LIKE 'pending:%'"
+                        ).fetchall()
+    directory = covers_dir()
+    count = sum(1 for row in rows
+                if not os.path.exists(os.path.join(directory, row["cover_file"])))
+    _missing_covers = (count, now)
+    return count
+
+
 def data_gaps(conn):
-    """How much of the catalogue is still missing each enrichable field."""
+    """How much of the catalogue is still missing each enrichable field.
+
+    A whitespace-only overview — and a cover_file naming a file that is not on
+    disk — both count as gaps. The first because the parser's _clean turns an
+    empty blurb into NULL but an old row may hold "": the panel renders the two
+    identically. The second because the button's job is to promise a picture
+    the user will actually see, and load_cover only accepts a file it can open,
+    so counting the stored name alone is how 封面已齐 ended up meaning nothing.
+    """
     one = lambda sql: conn.execute(sql).fetchone()[0]  # noqa: E731
     return {
-        "covers": one("SELECT COUNT(*) FROM games WHERE cover_file LIKE 'pending:%'"),
+        "covers": one("SELECT COUNT(*) FROM games WHERE cover_file LIKE 'pending:%'")
+        + missing_cover_files(conn),
         "rating": one("SELECT COUNT(*) FROM games WHERE rating IS NULL"),
-        "overview": one("SELECT COUNT(*) FROM games WHERE overview IS NULL"),
+        "overview": one("SELECT COUNT(*) FROM games WHERE overview IS NULL"
+                        " OR TRIM(overview) = ''"),
     }
+
+
+def newest_last_updated(conn):
+    """The newest last_updated in the library, as 'YYYY-MM-DD'.
+
+    The natural cutoff for the sync gate: every game the user already has
+    predates it, so gating there takes nothing away that was there before.
+    Empty when the library has no dated rows yet.
+    """
+    row = conn.execute("SELECT MAX(last_updated) AS d FROM games").fetchone()
+    text = (row["d"] or "").strip()
+    return text[:10] if len(text) >= 10 else ""
 
 
 # --- translation cache ---------------------------------------------------------
@@ -556,24 +721,40 @@ def tag_translations(conn, lang=TAG_LANG):
 
 
 def title_translations(conn, lang=TAG_LANG):
-    """{game id: (text, engine)} for every translated name.
+    """{game id as text: (text, engine)} for every translated name.
 
     One query rather than one per card: the list renders eighty cards at a time
     out of a catalogue of a thousand and a half. slg_gui caches this at module
     level, the same way it does the tag dictionary.
 
-    Merged in the order get_translation_row resolves: hand-typed over machine.
-    display_title reads the engine to spot the untranslatable marker, so a
-    hand-typed name has to arrive carrying ENGINE_MANUAL rather than one of the
-    model names.
+    Only rows whose src_hash still names the game's current title are returned.
+    The hash is stored on the row but is not part of its primary key - there is
+    one row per game - so a title the site or the migration rewrote leaves its
+    translation behind, and serving that quietly undoes the rewrite. This is
+    exactly how a card went on reading '... - dikgames' with a cleaned database
+    underneath: the source had been fixed and the cache had not.
+
+    Hand-typed names are exempt and always win. They are corrections to the
+    text rather than translations of it, and carry no source hash to match.
     """
-    both = {row["ref"]: (row["text"], row["engine"]) for row in conn.execute(
-        "SELECT ref, text, engine FROM translations"
-        " WHERE kind='title' AND lang=?", (lang,))}
+    current = {row["id"]: src_hash(row["title"]) for row in
+               conn.execute("SELECT id, title FROM games")}
+    both = {}
+    for row in conn.execute("SELECT ref, text, engine, src_hash FROM translations"
+                            " WHERE kind='title' AND lang=?", (lang,)):
+        if current.get(_int_or_none(row["ref"])) == row["src_hash"]:
+            both[row["ref"]] = (row["text"], row["engine"])
     for row in conn.execute("SELECT ref, text FROM manual_translations"
                             " WHERE kind='title' AND lang=?", (lang,)):
         both[row["ref"]] = (row["text"], ENGINE_MANUAL)
     return both
+
+
+def _int_or_none(text):
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return None
 
 
 def all_tags(conn):

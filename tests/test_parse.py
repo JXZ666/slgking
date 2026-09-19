@@ -109,6 +109,46 @@ class Compare(unittest.TestCase):
         self.assertEqual(slg_scan._compare("final", "beta"), 0)
 
 
+def _overview_page(tab_id, body):
+    """A detail page trimmed to the Overview tab, shaped like the real markup."""
+    return (
+        '<div id="elementor-tab-title-%s" class="elementor-tab-title"'
+        ' aria-controls="elementor-tab-content-%s" role="tab">Overview</div>'
+        '<div id="elementor-tab-content-%s" class="elementor-tab-content">%s</div>'
+        % (tab_id, tab_id, tab_id, body))
+
+
+class ExtractOverview(unittest.TestCase):
+    def test_reads_the_tab_id_off_the_title(self):
+        # Elementor numbers instances per page, so -1601 only covers the pages
+        # that happen to be built first. 90 rows in the real db had a rating
+        # but a NULL overview purely because their id was not 1601.
+        for tab_id in ("1601", "4591", "1181", "8471"):
+            with self.subTest(tab_id=tab_id):
+                self.assertEqual(
+                    slg_scrape.parse_detail_page(
+                        _overview_page(tab_id, "<p>Blurb.</p>"))["overview"],
+                    "Blurb.")
+
+    def test_nested_divs_do_not_cut_the_blurb_short(self):
+        # The old pattern stopped at the first "</div></div>" and dropped
+        # everything after a nested block.
+        page = _overview_page(
+            "4591", "<div class='inner'><p>First.</p></div><p>Second.</p>")
+        self.assertEqual(
+            slg_scrape.parse_detail_page(page)["overview"], "First. Second.")
+
+    def test_a_long_blurb_is_not_truncated_at_2000(self):
+        # 73 rows in the real db sat at exactly 2000 chars, clipped mid-sentence.
+        body = "<p>" + ("word " * 1000).strip() + "</p>"
+        got = slg_scrape.parse_detail_page(_overview_page("1601", body))["overview"]
+        self.assertEqual(got, ("word " * 1000).strip())
+
+    def test_a_page_without_an_overview_tab_is_none(self):
+        self.assertIsNone(
+            slg_scrape.parse_detail_page("<html><body>nothing</body></html>")["overview"])
+
+
 class StripStyle(unittest.TestCase):
     def test_script_survives(self):
         # The rating lives in JSON-LD inside a <script>; stripping scripts is
