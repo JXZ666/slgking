@@ -6,6 +6,7 @@ it, which is the one requirement that got its own question in the interview.
 """
 
 import hashlib
+import math
 import os
 import re
 import sqlite3
@@ -54,7 +55,11 @@ CREATE TABLE IF NOT EXISTS games (
     first_seen   TEXT NOT NULL,
     last_synced  TEXT,
     lastmod      TEXT,
-    fetch_failures INTEGER NOT NULL DEFAULT 0
+    fetch_failures INTEGER NOT NULL DEFAULT 0,
+    site_views    INTEGER,
+    site_likes    INTEGER,
+    site_comments INTEGER,
+    heat          REAL
 );
 
 CREATE TABLE IF NOT EXISTS tags (
@@ -235,6 +240,13 @@ def _migrate(conn):
     if "fetch_failures" not in have:
         conn.execute("ALTER TABLE games ADD COLUMN fetch_failures INTEGER NOT NULL DEFAULT 0")
         conn.commit()
+    for column in ("site_views", "site_likes", "site_comments"):
+        if column not in have:
+            conn.execute("ALTER TABLE games ADD COLUMN %s INTEGER" % column)
+            conn.commit()
+    if "heat" not in have:
+        conn.execute("ALTER TABLE games ADD COLUMN heat REAL")
+        conn.commit()
     # Hand-written rows move out of the translation cache into their own table.
     # Deleting them from `translations` is what stops them from having already
     # destroyed the machine row underneath - but it also means anyone who edited
@@ -401,8 +413,34 @@ def _version_gt(left, right):
     return a > b
 
 
+def compute_heat(rating, views, likes, comments):
+    """0-100 热度，偏人气：浏览 40% · 点赞 25% · 评论 20% · 评分 15%.
+
+    Counts are log-scaled because views (tens of thousands) and likes/comments
+    (single digits) otherwise differ by orders of magnitude. A missing value
+    reads as zero, so a game with no data scores 0 rather than erroring.
+    """
+    r = (rating or 0) / 10.0
+    v = math.log10((views or 0) + 1) / 5.0
+    l = math.log10((likes or 0) + 1) / 3.0
+    c = math.log10((comments or 0) + 1) / 3.0
+    return round(100.0 * (0.40 * v + 0.25 * l + 0.20 * c + 0.15 * r), 1)
+
+
+def _recompute_heat(conn, game_id):
+    row = conn.execute(
+        "SELECT rating, site_views, site_likes, site_comments FROM games"
+        " WHERE id = ?", (game_id,)).fetchone()
+    if row is None:
+        return
+    heat = compute_heat(row["rating"], row["site_views"],
+                        row["site_likes"], row["site_comments"])
+    conn.execute("UPDATE games SET heat = ? WHERE id = ?", (heat, game_id))
+
+
 def upsert_detail(conn, game_id, rating=None, version=None, developer=None,
-                  overview=None):
+                  overview=None, site_views=None, site_likes=None,
+                  site_comments=None):
     """Merge what only the detail page knows.
 
     Never clobbers a value with NULL, and never walks the version backwards.
@@ -417,7 +455,9 @@ def upsert_detail(conn, game_id, rating=None, version=None, developer=None,
             version = None
     sets, params = [], []
     for column, value in (("rating", rating), ("version", version),
-                          ("developer", developer), ("overview", overview)):
+                          ("developer", developer), ("overview", overview),
+                          ("site_views", site_views), ("site_likes", site_likes),
+                          ("site_comments", site_comments)):
         if value is not None:
             sets.append("%s = COALESCE(?, %s)" % (column, column))
             params.append(value)
@@ -425,6 +465,7 @@ def upsert_detail(conn, game_id, rating=None, version=None, developer=None,
         params.append(game_id)
         conn.execute("UPDATE games SET %s WHERE id = ?" % ", ".join(sets), params)
         conn.commit()
+        _recompute_heat(conn, game_id)
 
 
 # --- querying ------------------------------------------------------------------
@@ -488,7 +529,7 @@ def find_games(conn, include=(), exclude=(), search=None, statuses=None,
         order = "g.title COLLATE NOCASE %s" % direction
     else:
         column = {"score": "score", "rating": "g.rating",
-                  "updated": "g.last_updated"}.get(sort, "score")
+                  "updated": "g.last_updated", "heat": "g.heat"}.get(sort, "score")
         # (col IS NULL) leads so unrated rows sink in both directions. 985
         # rows have no rating, and plain ASC would open the list with all of
         # them; score is COALESCEd, so its guard is free.

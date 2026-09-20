@@ -21,7 +21,7 @@ import webbrowser
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
-from PIL import Image
+from PIL import Image, ImageGrab
 
 import slg_db
 import slg_engines
@@ -29,7 +29,7 @@ import slg_scrape
 import slg_translate
 import slg_update
 
-APP_VERSION = "0.16.0"
+APP_VERSION = "0.17.0"
 # The sidebar shows the number and nothing else. build_stamp() still carries
 # the channel and the build time, but it belongs on the 关于 page now: a
 # timestamp in the corner of every screen was answering a question the user
@@ -140,9 +140,9 @@ ENRICH_PER_SYNC = 150
 # Each field opens the way it reads: the best score, the best rating and the
 # newest update first, but names from A. The arrow button flips from there.
 SORT_FIELDS = {"推荐分": "score", "站内评分": "rating",
-               "最近更新": "updated", "名称": "title"}
+               "最近更新": "updated", "名称": "title", "热度": "heat"}
 SORT_DEFAULT_DESC = {"score": True, "rating": True, "updated": True,
-                     "title": False}
+                     "title": False, "heat": True}
 # Labelled: a bare ↓ in a 44px box next to the dropdown read as decoration, not
 # as a control. "只有正序没有反序" was the report, and the arrow was the answer.
 SORT_ARROW = {True: "↓ 降序", False: "↑ 升序"}
@@ -228,6 +228,30 @@ def _link_button(parent, text, url, **pack_kwargs):
     if pack_kwargs:
         button.pack(**pack_kwargs)
     return button
+
+
+def _centred_row(parent, **grid_kwargs):
+    """A full-width row whose contents sit on the window's centre axis.
+
+    Columns 0 and 2 are equal-weight spacers, so the middle column is centred
+    while there is room. When the contents outgrow the row the right spacer
+    collapses first and the contents stay fully readable, rather than being
+    clipped at both ends the way equal left and right padding would.
+
+    Returns the inner frame, which is where the row's widgets go. The caller
+    must grid it into the parent's column 0: `parent` gets a weighted column 0
+    here, without which the row would shrink to its contents and sit at the
+    left edge instead of spanning the frame it is centring inside.
+    """
+    parent.grid_columnconfigure(0, weight=1)
+    row = ctk.CTkFrame(parent, fg_color="transparent")
+    row.grid(**grid_kwargs)
+    row.grid_columnconfigure(0, weight=1)
+    row.grid_columnconfigure(2, weight=1)
+    inner = ctk.CTkFrame(row, fg_color="transparent")
+    inner.grid(row=0, column=1)
+    return inner
+
 
 def title_error_text(error):
     """The line shown under a game name whose translation failed, or "".
@@ -647,7 +671,8 @@ class App(ctk.CTk):
         self._detail_sig = None
         self._rendered_ids = []
         self._more_btn = None
-        self.filterbar = self.list = self.detail = None
+        self.filterbar = self.filterbar_inner = None
+        self.list = self.detail = None
         self._ov_label = self._ov_seg = self._title_label = None
         self._title_note = None
         self._status_btns = {}
@@ -932,7 +957,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(sort_row, text="排序", text_color=MUTED,
                      font=ui_font(size=13)).pack(side="left", padx=(0, 8))
         self.sort_menu = ctk.CTkOptionMenu(
-            sort_row, values=["推荐分", "站内评分", "最近更新", "名称"], width=110,
+            sort_row, values=["推荐分", "站内评分", "最近更新", "名称", "热度"], width=110,
             height=34, corner_radius=8, fg_color=CARD, text_color=TEXT,
             button_color=CHIP, button_hover_color=CARD_HOVER,
             command=self._on_sort)
@@ -953,17 +978,22 @@ class App(ctk.CTk):
         # in a box the width of the window, and it now sits with the other
         # disclaimers at the foot of the detail panel - the one place a reader
         # goes looking for "what is this site not promising me".
+        # The tinted band still spans the window - a card that shrank to the
+        # text would jump sideways every time the wording changed - but the two
+        # things inside it sit together on the centre axis instead of being
+        # pushed to opposite ends. The stretch of empty blue between them was
+        # the whole reason this row looked wrong.
         self.vpn_notice = ctk.CTkFrame(bar, fg_color=CHIP, corner_radius=8)
         self.vpn_notice.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        ctk.CTkButton(self.vpn_notice, text=SITE_LABEL, height=28, corner_radius=6,
+        inner = _centred_row(self.vpn_notice, row=0, column=0, sticky="ew")
+        ctk.CTkLabel(inner, text="建议开启梯子（VPN / 代理）后使用本软件",
+                     text_color=TEXT, font=ui_font(size=12)
+                     ).pack(side="left", padx=(0, 10), pady=6)
+        ctk.CTkButton(inner, text=SITE_LABEL, height=28, corner_radius=6,
                       fg_color="transparent", text_color=ACCENT,
                       hover_color=CARD_HOVER, font=ui_font(size=12),
                       command=lambda: webbrowser.open(SITE_URL)
-                      ).pack(side="right", padx=(8, 6), pady=6)
-        ctk.CTkLabel(self.vpn_notice, text="建议开启梯子（VPN / 代理）后使用本软件",
-                     text_color=TEXT, font=ui_font(size=12),
-                     anchor="w").pack(side="left", fill="x", expand=True,
-                                      padx=(12, 0), pady=6)
+                      ).pack(side="left", pady=6)
 
     def _on_theme_pick(self, label):
         mode = next(m for m, text in _THEME_LABELS.items() if text == label)
@@ -974,6 +1004,10 @@ class App(ctk.CTk):
     def _build_filterbar(self, parent):
         self.filterbar = ctk.CTkFrame(parent, fg_color="transparent")
         self.filterbar.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        # Same centre axis as the notice strip above it, so the two rows read as
+        # one column instead of one hugging the left edge and one spanning it.
+        self.filterbar_inner = _centred_row(self.filterbar, row=0, column=0,
+                                           sticky="ew")
 
     def _render_filterbar(self):
         # The chips are a function of the filters and nothing else, so a refresh
@@ -983,14 +1017,15 @@ class App(ctk.CTk):
         if signature == self._filter_sig:
             return
         self._filter_sig = signature
-        for child in self.filterbar.winfo_children():
+        bar = self.filterbar_inner
+        for child in bar.winfo_children():
             child.destroy()
-        ctk.CTkLabel(self.filterbar, text="筛选", text_color=MUTED,
+        ctk.CTkLabel(bar, text="筛选", text_color=MUTED,
                      font=ui_font(size=13)).pack(side="left", padx=(0, 6))
         if not self.include and not self.exclude:
             # A button, not a label: it was telling the user about 标签库 while
             # being the one thing in the row that could not open it.
-            ctk.CTkButton(self.filterbar, text="未设置 — 点这里挑标签",
+            ctk.CTkButton(bar, text="未设置 — 点这里挑标签",
                           height=24, corner_radius=12, fg_color="transparent",
                           text_color=ACCENT, hover_color=CHIP,
                           font=ui_font(size=12),
@@ -999,7 +1034,7 @@ class App(ctk.CTk):
         def chip(slug, excluded):
             label = ("× " if excluded else "") + display_tag(slug)
             btn = ctk.CTkButton(
-                self.filterbar, text=label, height=26, corner_radius=13,
+                bar, text=label, height=26, corner_radius=13,
                 fg_color=CHIP_OFF if excluded else CHIP,
                 text_color=DANGER_TEXT if excluded else TEXT,
                 hover_color=CARD_HOVER,
@@ -1012,7 +1047,7 @@ class App(ctk.CTk):
         for slug in self.exclude:
             chip(slug, True)
         if self.include or self.exclude:
-            ctk.CTkButton(self.filterbar, text="清空", width=54, height=26,
+            ctk.CTkButton(bar, text="清空", width=54, height=26,
                           corner_radius=13, fg_color="transparent", text_color=ACCENT,
                           hover_color=CHIP, font=ui_font(size=12),
                           command=self.clear_filters).pack(side="left", padx=(10, 0))
@@ -1560,8 +1595,11 @@ class App(ctk.CTk):
                                  hover_color=CARD_HOVER),
             fill="x", padx=18, pady=(10, 4))
 
+        order.extend(self._build_detail_share(d, parts))
+
         order.extend(self._build_detail_status(d, parts))
         order.extend(self._build_detail_stars(d, parts))
+        order.extend(self._build_detail_heat(d, parts))
         order.extend(self._build_detail_note(d, parts))
         order.extend(self._build_detail_tags(d, parts))
         order.extend(self._build_detail_overview(d, parts))
@@ -1637,6 +1675,7 @@ class App(ctk.CTk):
             p["url"].configure(command=lambda u=game["url"]: webbrowser.open(u))
         self._sync_status_btns(game)
         self._sync_star_btns(game)
+        self._fill_heat(game)
         # Only rewritten when it differs: the sync tick comes through here too,
         # and a delete/insert drops the cursor out of a note being typed.
         if p["note_entry"].get() != (game["note"] or ""):
@@ -1921,10 +1960,37 @@ class App(ctk.CTk):
             btn.configure(text="★" if index <= mine else "☆",
                           text_color=STAR if index <= mine else MUTED)
 
+    def _fill_heat(self, game):
+        heat = game.get("heat")
+        if heat is None:
+            self._detail_parts["heat"].configure(text="热度 —（同步后显示）")
+            return
+        parts = ["热度 %.1f" % heat]
+        if game.get("site_views") is not None:
+            parts.append("浏览 %s" % f"{game['site_views']:,}")
+        if game.get("site_likes") is not None:
+            parts.append("点赞 %s" % f"{game['site_likes']:,}")
+        if game.get("site_comments") is not None:
+            parts.append("评论 %s" % f"{game['site_comments']:,}")
+        self._detail_parts["heat"].configure(text=" · ".join(parts))
+
+    def _build_detail_heat(self, d, parts):
+        label = ctk.CTkLabel(d, text="", text_color=MUTED, font=ui_font(size=12))
+        parts["heat"] = label
+        return [("heat", label, {"anchor": "w", "padx": 18, "pady": (10, 0)})]
+
+    def _build_detail_share(self, d, parts):
+        btn = ctk.CTkButton(d, text="分享截图", height=30, corner_radius=8,
+                            fg_color=CHIP, text_color=ACCENT,
+                            hover_color=CARD_HOVER,
+                            command=self._share_screenshot)
+        parts["share"] = btn
+        return [("share", btn, {"fill": "x", "padx": 18, "pady": (0, 4)})]
+
     def _build_detail_note(self, d, parts):
-        head = ctk.CTkLabel(d, text="备注", text_color=MUTED, font=ui_font(size=12))
+        head = ctk.CTkLabel(d, text="评价", text_color=MUTED, font=ui_font(size=12))
         entry = ctk.CTkEntry(d, height=32, corner_radius=8, fg_color=BG,
-                             placeholder_text="玩到哪了、等更新…")
+                             placeholder_text="写点评价…")
         entry.bind("<Return>", lambda e: self._set_note(e.widget.get()))
         parts["note_head"] = head
         parts["note_entry"] = entry
@@ -2202,7 +2268,24 @@ class App(ctk.CTk):
         slg_db.set_state(self.conn, self.selected["id"], note=text)
         # The write was already immediate and already silent: Enter saved the
         # note and nothing on screen moved, which reads as the key not working.
-        self._set_progress("备注已保存" if text else "备注已清空")
+        self._set_progress("评价已保存" if text else "评价已清空")
+
+    def _share_screenshot(self):
+        if not self.selected:
+            return
+        self.update()
+        d = self.detail
+        x, y = d.winfo_rootx(), d.winfo_rooty()
+        box = (x, y, x + d.winfo_width(), y + d.winfo_height())
+        img = ImageGrab.grab(bbox=box, all_screens=True)
+        outdir = os.path.join(slg_db.app_dir(), "分享")
+        os.makedirs(outdir, exist_ok=True)
+        path = os.path.join(outdir, "%s_%s.png" % (
+            self.selected.get("slug", "game"),
+            time.strftime("%Y%m%d_%H%M%S")))
+        img.save(path)
+        self._set_progress("截图已保存：%s" % path)
+        messagebox.showinfo("分享", "详情截图已保存到：\n%s" % path)
 
     # --- dialogs --------------------------------------------------------------
 

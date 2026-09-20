@@ -404,6 +404,44 @@ class SidebarFit(unittest.TestCase):
     def test_the_game_site_link_is_visible(self):
         self._assert_has_height(slg_gui.SITE_LABEL, "游戏官网按钮")
 
+    def _content_bounds(self, frame):
+        """Left and right pixel edges of the labelled widgets inside `frame`."""
+        edges = []
+
+        def walk(widget):
+            for child in widget.winfo_children():
+                try:
+                    text = child.cget("text")
+                except Exception:  # noqa: BLE001 - not every widget has text
+                    text = None
+                if (isinstance(text, str) and text.strip()
+                        and child.winfo_width() > 1):
+                    edges.append(child.winfo_rootx())
+                    edges.append(child.winfo_rootx() + child.winfo_width())
+                walk(child)
+
+        walk(frame)
+        if not edges:
+            return None, None
+        return min(edges), max(edges)
+
+    def test_the_two_top_rows_share_the_windows_centre_axis(self):
+        # Both rows used to run edge to edge: the notice pinned its text left
+        # and its link right with a stretch of empty blue between them, and the
+        # filter row hugged the left edge under it. They are one centred column
+        # now. The centring frame only works if the frame it sits in has a
+        # weighted column - without one it silently shrinks to its contents and
+        # goes back to the left edge, which is exactly what this catches.
+        self.app.update()
+        for frame, what in ((self.app.vpn_notice, "梯子提示条"),
+                            (self.app.filterbar, "筛选条")):
+            left, right = self._content_bounds(frame)
+            self.assertIsNotNone(left, "%s里没有可测量的内容" % what)
+            drift = ((left + right) / 2.0
+                     - (frame.winfo_rootx() + frame.winfo_width() / 2.0))
+            self.assertLess(abs(drift), 2,
+                            "%s没居中，偏了 %.1f px" % (what, drift))
+
     # --- sort direction ------------------------------------------------------
 
     def test_the_sort_direction_button_is_visible(self):
@@ -688,13 +726,23 @@ class SidebarFit(unittest.TestCase):
         self.app.selected = None
 
     def _filterbar_texts(self):
-        """Every chip label currently in the filter bar."""
+        """Every chip label currently in the filter bar.
+
+        Walks the whole subtree, not just the bar's direct children: the row's
+        widgets live inside the centring frame that keeps it on the window's
+        centre axis, one level below `self.app.filterbar`.
+        """
         texts = []
-        for child in self.app.filterbar.winfo_children():
-            try:
-                texts.append(str(child.cget("text")))
-            except Exception:  # noqa: BLE001 - not every widget has text
-                pass
+
+        def walk(widget):
+            for child in widget.winfo_children():
+                try:
+                    texts.append(str(child.cget("text")))
+                except Exception:  # noqa: BLE001 - not every widget has text
+                    pass
+                walk(child)
+
+        walk(self.app.filterbar)
         return texts
 
     def _render(self, games):

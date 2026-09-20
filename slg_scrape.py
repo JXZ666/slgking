@@ -68,6 +68,9 @@ _TITLE_LINK = re.compile(
 _COVER = re.compile(r'data-src="(https://dikgames\.com/wp-content/uploads/[^"]+)"')
 _PUBDATE = re.compile(r'itemprop="datePublished"\s+datetime="([^"]+)"')
 _RATING = re.compile(r'"ratingValue":\s*"?([\d.]+)')
+_VIEWS = re.compile(r'gp-meta-views">([\d,]+)\s+views<')
+_LIKES = re.compile(r'gp-meta-likes">([\d,]+)\s+likes<')
+_COMMENTS = re.compile(r'comments-link"[^>]*>\s*([\d,]+)\s*Comments<')
 _VERSION_LINE = re.compile(r'Version:\s*([^<\n]{0,24})')
 _DEV_LINE = re.compile(r'Developer:\s*([^<\n]{0,40})')
 # Elementor numbers its tab instances per page, so the id is not a site-wide
@@ -184,6 +187,13 @@ def _clean(text):
     text = html.unescape(text)
     text = re.sub(r"<[^>]+>", " ", text)
     return re.sub(r"\s+", " ", text).strip() or None
+
+
+def _parse_int(text):
+    """'48,300' -> 48300; a missing or unparseable value is None."""
+    if not text:
+        return None
+    return int(text.replace(",", ""))
 
 
 _clean_title = slg_db.clean_site_title
@@ -312,6 +322,9 @@ def parse_detail_page(page):
     cover = _OG_IMAGE.search(page)
     title = _OG_TITLE.search(page)
     published = _PUBDATE.search(page)
+    views = _VIEWS.search(page)
+    likes = _LIKES.search(page)
+    comments = _COMMENTS.search(page)
     return {
         "rating": float(rating.group(1)) if rating else None,
         "version": (_clean(version.group(1)) or "").lstrip("vV") or None
@@ -322,6 +335,9 @@ def parse_detail_page(page):
         "cover_url": _sized_cover(cover.group(1)) if cover else None,
         "title": _clean_title(_clean(title.group(1))) if title else None,
         "last_updated": published.group(1)[:10] if published else None,
+        "site_views": _parse_int(views.group(1)) if views else None,
+        "site_likes": _parse_int(likes.group(1)) if likes else None,
+        "site_comments": _parse_int(comments.group(1)) if comments else None,
     }
 
 
@@ -621,7 +637,10 @@ def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, since=None,
                 else:
                     _note_cover(conn, game_id, cover)
             slg_db.upsert_detail(conn, game_id, overview=detail["overview"],
-                                 rating=detail["rating"])
+                                 rating=detail["rating"],
+                                 site_views=detail["site_views"],
+                                 site_likes=detail["site_likes"],
+                                 site_comments=detail["site_comments"])
             conn.commit()
         except Exception as exc:  # noqa: BLE001 - one bad row must not stop the run
             conn.rollback()
@@ -743,7 +762,8 @@ def enrich(conn, fetcher, limit=200, log=print, on_progress=None,
     rows = conn.execute(
         "SELECT id, slug, url FROM games"
         " WHERE url IS NOT NULL AND fetch_failures < 3"
-        "       AND (rating IS NULL OR overview IS NULL OR cover_file IS NULL)"
+        "       AND (rating IS NULL OR overview IS NULL OR cover_file IS NULL"
+        "            OR site_views IS NULL)"
         # A missing cover is the only gap the user can see, so it outranks a
         # missing rating. Plain last_updated DESC starved the last 13 coverless
         # games: they are old, and the missing-rating backlog is ~980 rows.
@@ -766,7 +786,9 @@ def enrich(conn, fetcher, limit=200, log=print, on_progress=None,
         detail = parse_detail_page(page)
         slg_db.upsert_detail(
             conn, row["id"], rating=detail["rating"], version=detail["version"],
-            developer=detail["developer"], overview=detail["overview"])
+            developer=detail["developer"], overview=detail["overview"],
+            site_views=detail["site_views"], site_likes=detail["site_likes"],
+            site_comments=detail["site_comments"])
         if detail["tags"]:
             slg_db.set_tags(conn, row["id"], detail["tags"])
         # Same as the sitemap pass: the picture is this game's second request,

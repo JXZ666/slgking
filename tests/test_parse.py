@@ -206,5 +206,35 @@ class ParseListPage(unittest.TestCase):
         self.assertEqual(slg_scrape.parse_list_page(""), [])
 
 
+def _metrics_page():
+    """A detail page carrying the three popularity counters dikgames shows."""
+    return (
+        '<html><body>'
+        '<span class="gp-post-meta gp-meta-views">48,300 views</span>'
+        '<span class="gp-post-meta gp-meta-likes">25 likes</span>'
+        '<a href="https://dikgames.com/g/#comments" class="comments-link" >12 Comments</a>'
+        '</body></html>')
+
+
+class ParseDetailMetrics(unittest.TestCase):
+    def test_extracts_views_likes_comments(self):
+        got = slg_scrape.parse_detail_page(_metrics_page())
+        self.assertEqual(got["site_views"], 48300)
+        self.assertEqual(got["site_likes"], 25)
+        self.assertEqual(got["site_comments"], 12)
+
+    def test_missing_metrics_are_none(self):
+        got = slg_scrape.parse_detail_page("<html><body>nothing</body></html>")
+        self.assertIsNone(got["site_views"])
+        self.assertIsNone(got["site_likes"])
+        self.assertIsNone(got["site_comments"])
+
+    def test_thousands_separator_is_dropped(self):
+        got = slg_scrape.parse_detail_page(
+            '<html><body><span class="gp-post-meta gp-meta-views">1,234,567 views</span>'
+            '</body></html>')
+        self.assertEqual(got["site_views"], 1234567)
+
+
 if __name__ == "__main__":
     unittest.main()

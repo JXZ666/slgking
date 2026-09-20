@@ -721,5 +721,47 @@ class FetcherHonoursStop(unittest.TestCase):
         self.assertEqual(second.call_count, 0)
 
 
+class Heat(unittest.TestCase):
+    """The popularity score is a pure function of the four scraped metrics."""
+
+    def setUp(self):
+        self.conn = slg_db.connect(":memory:")
+        self.gid, _ = slg_db.upsert_game(self.conn, slug="g", url="u", title="G")
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _heat(self):
+        return self.conn.execute("SELECT heat FROM games WHERE id = ?",
+                                 (self.gid,)).fetchone()["heat"]
+
+    def test_no_data_is_zero(self):
+        self.assertEqual(slg_db.compute_heat(None, None, None, None), 0.0)
+
+    def test_known_values_match_hand_calc(self):
+        self.assertEqual(slg_db.compute_heat(7.3, 48300, 25, 12), 67.6)
+
+    def test_upsert_detail_stores_heat(self):
+        slg_db.upsert_detail(self.conn, self.gid, rating=7.3,
+                             site_views=48300, site_likes=25, site_comments=12)
+        self.assertEqual(self._heat(), 67.6)
+
+    def test_metrics_are_never_clobbered_by_none(self):
+        slg_db.upsert_detail(self.conn, self.gid, rating=7.3,
+                             site_views=48300, site_likes=25, site_comments=12)
+        slg_db.upsert_detail(self.conn, self.gid, rating=None)
+        self.assertEqual(self._heat(), 67.6)
+
+    def test_heat_sort_sinks_games_without_heat(self):
+        slg_db.upsert_detail(self.conn, self.gid, rating=7.3,
+                             site_views=48300, site_likes=25, site_comments=12)
+        other, _ = slg_db.upsert_game(self.conn, slug="h", url="u2", title="H")
+        self.conn.commit()
+        rows = slg_db.find_games(self.conn, sort="heat", desc=True)
+        self.assertEqual(rows[0]["id"], self.gid)
+        self.assertEqual(rows[1]["id"], other)
+
+
 if __name__ == "__main__":
     unittest.main()
