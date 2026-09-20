@@ -22,6 +22,7 @@ import json
 import os
 import queue
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -146,12 +147,15 @@ def _call_with_deadline(fn, seconds):
     return value
 
 
-def _fetch(req, timeout):
+def _fetch(req, timeout, retries=0):
     """The response body, gzip-decoded.
 
     Transport and HTTP failures both come out as TranslateError. "网络错误" is
     the caller's cue that every endpoint is unreachable rather than that this
-    one said no.
+    one said no. A 429/503 is retried `retries` times with a short backoff - the
+    paid engine asks for a couple, the free one leaves it at 0 because its own
+    fallback chain (translate-pa -> lingva -> gtx) already moves on past a
+    throttled endpoint.
     """
     def roundtrip():
         # read() blocks on the same socket, so it belongs inside the deadline
@@ -161,20 +165,25 @@ def _fetch(req, timeout):
             kind = (resp.headers.get("Content-Encoding") or "").lower()
         return body, kind
 
-    try:
-        raw, encoding = _call_with_deadline(roundtrip, timeout)
-    except urllib.error.HTTPError as exc:
-        raise TranslateError("HTTP %s: %s" % (exc.code, _error_detail(exc))) from None
-    except (urllib.error.URLError, OSError) as exc:
-        raise TranslateError("网络错误：%s" % (getattr(exc, "reason", None) or exc)) from None
+    for attempt in range(retries + 1):
+        try:
+            raw, encoding = _call_with_deadline(roundtrip, timeout)
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code in (429, 503) and attempt < retries:
+                time.sleep(1.0 * (attempt + 1))
+                continue
+            raise TranslateError("HTTP %s: %s" % (exc.code, _error_detail(exc))) from None
+        except (urllib.error.URLError, OSError) as exc:
+            raise TranslateError("网络错误：%s" % (getattr(exc, "reason", None) or exc)) from None
     if encoding == "gzip" or raw[:2] == b"\x1f\x8b":
         raw = gzip.decompress(raw)
     return raw
 
 
-def _fetch_json(req, timeout):
+def _fetch_json(req, timeout, retries=0):
     try:
-        return json.loads(_fetch(req, timeout).decode("utf-8", "replace"))
+        return json.loads(_fetch(req, timeout, retries=retries).decode("utf-8", "replace"))
     except ValueError:
         raise TranslateError("返回结构异常") from None
 
@@ -238,7 +247,7 @@ class OpenAIEngine(Engine):
                 "Authorization": "Bearer " + api_key,
                 "Accept-Encoding": "gzip, deflate",
             })
-        data = _fetch_json(req, timeout)
+        data = _fetch_json(req, timeout, retries=2)
         try:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):

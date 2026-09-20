@@ -31,6 +31,7 @@ import zlib
 from datetime import datetime
 
 import slg_db
+import slg_util
 
 BASE = "https://dikgames.com"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) slgking/0.1 "
@@ -250,7 +251,7 @@ def parse_title(raw):
     return name or raw, version, developer or None, int(complete)
 
 
-def parse_list_page(page):
+def parse_list_page(page, log=None):
     """Every game on one listing page.
 
     The parameter is 'page', not 'html' - naming it 'html' shadows the html
@@ -260,9 +261,15 @@ def parse_list_page(page):
     """
     page = _strip_style(page)
     out = []
+    dropped = 0
     for section in _SECTION.findall(page):
         link = _TITLE_LINK.search(section)
         if not link:
+            # _TITLE_LINK wants href immediately followed by title; a card whose
+            # attributes got reordered is invisible to it and used to vanish with
+            # no trace. Counting it makes a markup change on the site show up as
+            # a number instead of silently missing games.
+            dropped += 1
             continue
         url, raw_title = link.group(1), link.group(2)
         slug = url.rstrip("/").rsplit("/", 1)[-1]
@@ -284,6 +291,8 @@ def parse_list_page(page):
             "last_updated": published.group(1)[:10] if published else None,
             "cover_url": cover.group(1) if cover else None,
         })
+    if dropped and log is not None:
+        log("  ! %d 个卡片未解析（站点的属性顺序可能变了）" % dropped)
     return out
 
 
@@ -314,6 +323,11 @@ def parse_detail_page(page):
         "title": _clean_title(_clean(title.group(1))) if title else None,
         "last_updated": published.group(1)[:10] if published else None,
     }
+
+
+def _ext_from_url(url):
+    """The file extension of a cover URL, defaulting to .jpg."""
+    return os.path.splitext(url.split("?")[0])[1] or ".jpg"
 
 
 def _sized_cover(url):
@@ -379,7 +393,7 @@ def walk_tag(fetcher, tag, max_pages=None, on_progress=None):
         html = fetcher.get(url)
         if not html:
             break
-        games = parse_list_page(html)
+        games = parse_list_page(html, log=fetcher.log)
         if not games:
             break
         yield games
@@ -419,12 +433,57 @@ def sync_tags(conn, fetcher, tags, max_pages=None, on_progress=None, log=print,
 
 
 def _note_cover(conn, game_id, url):
-    """Record the cover URL; the download happens in a later, separate pass."""
+    """Record the cover URL without downloading it.
+
+    Still used by the tag walk and as the fallback when an inline download
+    fails: a NULL cover_file is not a gap as far as data_gaps is concerned, so
+    a URL that is merely dropped would be invisible to 「下载封面」 forever.
+    The pending: marker is what keeps it findable.
+    """
     row = conn.execute("SELECT cover_file FROM games WHERE id = ?", (game_id,)).fetchone()
     if row and row["cover_file"]:
         return
     conn.execute("UPDATE games SET cover_file = ? WHERE id = ?",
                  ("pending:" + url, game_id))
+
+
+def _needs_cover(conn, game_id):
+    """True when the row holds no real picture yet.
+
+    Empty and 'pending:<url>' both count: the first is a game whose cover was
+    never noted, the second one whose thumbnail was noted but never fetched.
+    """
+    row = conn.execute("SELECT cover_file FROM games WHERE id = ?",
+                       (game_id,)).fetchone()
+    if row is None or not row["cover_file"]:
+        return True
+    return row["cover_file"].startswith("pending:")
+
+
+def _fetch_cover(fetcher, conn, game_id, slug, url, log):
+    """Download one cover right now and point the row at it. True if it landed.
+
+    Through the Fetcher rather than http_get, so the picture queues behind the
+    same one-request-a-second gate as the pages: this is the second request of
+    the game's turn, not a burst beside it.
+
+    A dead image is not an error. The caller notes the URL as pending instead,
+    which is both what keeps the row visible to download_covers and what makes
+    the failed half retryable without refetching the page.
+    """
+    blob = fetcher.get(url, binary=True)
+    if not blob:
+        return False
+    ext = _ext_from_url(url)
+    name = slug + ext
+    try:
+        with open(os.path.join(slg_db.covers_dir(), name), "wb") as fh:
+            fh.write(blob)
+    except OSError as exc:
+        log("  ! 写入失败 %s：%s" % (name, exc))
+        return False
+    slg_db.set_cover(conn, game_id, name)
+    return True
 
 
 def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, since=None,
@@ -437,6 +496,12 @@ def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, since=None,
     The tag walk this replaces issued ~100 requests every run, revisited 2.24x
     as many game slots as there are games, and re-read ~600 pages that could
     not possibly contain anything new.
+
+    A synced game arrives with its thumbnail. The detail page names the cover
+    in the same response as the blurb, so fetching it here costs one extra
+    request inside the game's own turn rather than a separate pass the user has
+    to remember to start - and because both halves are committed together, a
+    run they stop partway leaves no game with a blurb and no picture.
 
     A NULL lastmod means the row predates this column, so it adopts the
     current value rather than counting as changed: adopting costs one UPDATE,
@@ -464,11 +529,11 @@ def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, since=None,
         # the user looking for a network problem they do not have.
         log("  已停止")
         return {"catalogue": len(index), "new": 0, "changed": 0, "deferred": 0,
-                "skipped_old": 0, "requests": fetcher.count}
+                "skipped_old": 0, "covers": 0, "requests": fetcher.count}
     if not index:
         log("  ! sitemap 全取不到，本次不同步")
         return {"catalogue": 0, "new": 0, "changed": 0, "deferred": 0,
-                "skipped_old": 0, "requests": fetcher.count}
+                "skipped_old": 0, "covers": 0, "requests": fetcher.count}
 
     known = {row["slug"]: row for row in conn.execute(
         "SELECT id, slug, lastmod FROM games")}
@@ -499,7 +564,7 @@ def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, since=None,
         log("  跳过 %d 款早于 %s 的老游戏（点「补齐历史」可以收录）"
             % (skipped_old, since))
 
-    created = 0
+    created, covers = 0, 0
     for i, (slug, meta, is_new) in enumerate(todo, 1):
         if should_stop and should_stop():
             log("  已停止 · 抓到第 %d/%d 款，剩下的下次接着来"
@@ -531,10 +596,32 @@ def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, since=None,
                 lastmod=meta["lastmod"])
             game_id = conn.execute("SELECT id FROM games WHERE slug = ?",
                                    (slug,)).fetchone()["id"]
+            # The picture is fetched before upsert_detail, not after it, and
+            # that ordering is the whole trick: upsert_detail commits (it has to
+            # - the version guard reads back the row it just wrote), so a cover
+            # staged behind it could no longer be unwound. Cover first means the
+            # two stop checks below can still take the game back whole, which is
+            # what "截止到这款之前" has to mean: a game that needs a cover is
+            # either committed complete or not committed at all.
+            if cover and _needs_cover(conn, game_id):
+                if should_stop and should_stop():
+                    conn.rollback()
+                    log("  已停止 · 抓到第 %d/%d 款，剩下的下次接着来"
+                        % (i - 1, len(todo)))
+                    break
+                if _fetch_cover(fetcher, conn, game_id, slug, cover, log):
+                    covers += 1
+                elif should_stop and should_stop():
+                    # The stop landed on the picture request itself. Same
+                    # unwind: nothing about this game is written down.
+                    conn.rollback()
+                    log("  已停止 · 抓到第 %d/%d 款，剩下的下次接着来"
+                        % (i - 1, len(todo)))
+                    break
+                else:
+                    _note_cover(conn, game_id, cover)
             slg_db.upsert_detail(conn, game_id, overview=detail["overview"],
                                  rating=detail["rating"])
-            if cover:
-                _note_cover(conn, game_id, cover)
             conn.commit()
         except Exception as exc:  # noqa: BLE001 - one bad row must not stop the run
             conn.rollback()
@@ -547,7 +634,7 @@ def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, since=None,
     slg_db.log_sync(conn, "incremental", 1, len(index), created)
     return {"catalogue": len(index), "new": created, "changed": changed,
             "deferred": deferred, "skipped_old": skipped_old,
-            "requests": fetcher.count}
+            "covers": covers, "requests": fetcher.count}
 
 
 def download_covers(conn, limit=None, workers=3, rate=3.0, log=print,
@@ -595,10 +682,13 @@ def download_covers(conn, limit=None, workers=3, rate=3.0, log=print,
             if wait > 0:
                 time.sleep(wait)
             url = row["cover_file"][len("pending:"):]
-            try:
-                blob = http_get(url)
-            except Exception:  # noqa: BLE001 - a dead image must not stop the run
-                blob = None
+            blob = None
+            for _attempt in range(2):
+                try:
+                    blob = http_get(url)
+                    break
+                except Exception:  # noqa: BLE001 - a dead image must not stop the run
+                    blob = None
             results.put((row["id"], row["slug"], url, blob))
         results.put((None, None, None, None))  # told to stop: unblock the writer
 
@@ -616,7 +706,7 @@ def download_covers(conn, limit=None, workers=3, rate=3.0, log=print,
             continue
         received += 1
         if blob:
-            ext = os.path.splitext(url.split("?")[0])[1] or ".jpg"
+            ext = _ext_from_url(url)
             name = slug + ext
             try:
                 with open(os.path.join(dest, name), "wb") as fh:
@@ -645,40 +735,61 @@ def enrich(conn, fetcher, limit=200, log=print, on_progress=None,
     it picks up where it stopped.
 
     The detail page is a superset of the listing page, so this takes the tags
-    and the og:image too. That is what finally clears the 861-cover backlog:
-    the URLs were sitting in the db the whole time, and the pages that carry
-    them are the same ones being fetched for the ratings anyway.
+    and the og:image too. The thumbnail is fetched here as well as in the
+    sitemap pass, for the same reason: the URLs were sitting in the db the
+    whole time, and the pages that carry them are the same ones being fetched
+    for the ratings anyway. A game is only committed once both halves are in.
     """
     rows = conn.execute(
-        "SELECT id, url FROM games"
-        " WHERE url IS NOT NULL AND (rating IS NULL OR overview IS NULL"
-        "       OR cover_file IS NULL)"
+        "SELECT id, slug, url FROM games"
+        " WHERE url IS NOT NULL AND fetch_failures < 3"
+        "       AND (rating IS NULL OR overview IS NULL OR cover_file IS NULL)"
         # A missing cover is the only gap the user can see, so it outranks a
         # missing rating. Plain last_updated DESC starved the last 13 coverless
         # games: they are old, and the missing-rating backlog is ~980 rows.
-        " ORDER BY (cover_file IS NULL) DESC, last_updated DESC LIMIT ?",
+        # fetch_failures ASC drops a page that failed last run below a healthy
+        # one, and fetch_failures < 3 parks a permanently-dead page so it stops
+        # re-consuming a slot every run.
+        " ORDER BY (cover_file IS NULL) DESC, fetch_failures ASC, last_updated DESC"
+        " LIMIT ?",
         (limit,)).fetchall()
-    done = 0
+    done, covers = 0, 0
     for row in rows:
         if should_stop and should_stop():
             break
         page = fetcher.get(row["url"])
         if not page:
+            slg_db.note_fetch_failure(conn, row["id"])
+            conn.commit()
             continue
+        slg_db.clear_fetch_failures(conn, row["id"])
         detail = parse_detail_page(page)
         slg_db.upsert_detail(
             conn, row["id"], rating=detail["rating"], version=detail["version"],
             developer=detail["developer"], overview=detail["overview"])
         if detail["tags"]:
             slg_db.set_tags(conn, row["id"], detail["tags"])
-        if detail["cover_url"]:
-            _note_cover(conn, row["id"], detail["cover_url"])
+        # Same as the sitemap pass: the picture is this game's second request,
+        # so a stop landing on it unwinds the row and leaves the whole game for
+        # the next run rather than committing a blurb with no thumbnail.
+        if detail["cover_url"] and _needs_cover(conn, row["id"]):
+            if should_stop and should_stop():
+                conn.rollback()
+                break
+            if _fetch_cover(fetcher, conn, row["id"], row["slug"],
+                            detail["cover_url"], log):
+                covers += 1
+            elif should_stop and should_stop():
+                conn.rollback()
+                break
+            else:
+                _note_cover(conn, row["id"], detail["cover_url"])
         conn.commit()
         done += 1
         if on_progress:
             on_progress(done, len(rows), row["url"])
     log("详情补全 %d/%d" % (done, len(rows)))
-    return done
+    return {"filled": done, "covers": covers}
 
 
 # --- CLI -----------------------------------------------------------------------
@@ -687,11 +798,7 @@ def _main(argv=None):
     # The console is cp936 here and every line below is Chinese. slg_main sets
     # this for the packaged entry point; running this file directly needs it
     # too.
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, OSError):
-            pass
+    slg_util.fix_console()
 
     import argparse
     parser = argparse.ArgumentParser(prog="slgking scrape", description="抓取 dikgames")

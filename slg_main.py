@@ -16,6 +16,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import argparse  # noqa: E402
+import slg_util  # noqa: E402
 
 
 def _attach_console():
@@ -44,11 +45,7 @@ def _attach_console():
 
     # Game titles and paths are routinely CJK; the Windows console defaults to
     # cp936 and would mangle them. Under a windowless build these are None.
-    for _stream in (sys.stdout, sys.stderr):
-        try:
-            _stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, OSError):
-            pass
+    slg_util.fix_console()
 
 
 def _pause_on_error(code):

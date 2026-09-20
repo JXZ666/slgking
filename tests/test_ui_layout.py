@@ -368,8 +368,38 @@ class SidebarFit(unittest.TestCase):
     def test_the_vpn_notice_is_visible_at_the_minimum_size(self):
         self._assert_has_height("建议开启梯子", "梯子提示")
 
-    def test_the_not_using_a_vpn_disclaimer_is_visible(self):
-        self._assert_has_height("与作者无关", "免责声明")
+    def test_the_vpn_disclaimer_lives_in_the_detail_panel(self):
+        # Moved down here with the "本站只做检索" line when the notice strip was
+        # compressed to a single row. It only exists on screen once a game is
+        # selected, so this picks one first - the panel is empty until then.
+        self._pool_reset()
+        try:
+            self._select(self._panel_game(0))
+            self._assert_has_height("与作者无关", "免责声明")
+            self.assertIn("未使用梯子", self.app._detail_parts["disclaimer"].cget("text"))
+        finally:
+            self.app.selected = None
+            self._finish()
+
+    def test_the_notice_strip_no_longer_carries_the_disclaimer(self):
+        # The strip is one row now; a second line there would push it back to
+        # the two-row height this change existed to remove.
+        for hit in self._find("与作者无关"):
+            self.assertFalse(self._inside(hit, self.app.vpn_notice),
+                             "免责声明还在工具栏的说明条里")
+
+    def _inside(self, widget, ancestor):
+        """True when `widget` is `ancestor` or sits somewhere below it.
+
+        customtkinter wraps every CTkLabel in a real tkinter.Label, so a text
+        match turns up twice per widget and the outer one is what the layout
+        tests care about.
+        """
+        while widget is not None:
+            if widget is ancestor:
+                return True
+            widget = widget.master
+        return False
 
     def test_the_game_site_link_is_visible(self):
         self._assert_has_height(slg_gui.SITE_LABEL, "游戏官网按钮")
@@ -1298,10 +1328,72 @@ class SidebarFit(unittest.TestCase):
         # the other three are behind 更多….
         self.assertIsNotNone(self.app.sync_btn)
         self.assertIsNotNone(self.app.maintenance_btn)
+        self.assertIsNotNone(self.app.settings_btn)
         self._assert_has_height("同步 dikgames", "同步按钮")
         self._assert_has_height("更多", "更多按钮")
         for gone in ("covers_btn", "rebuild_btn", "backfill_btn"):
             self.assertFalse(hasattr(self.app, gone), gone)
+
+    def test_the_gear_is_visible_and_leads_to_the_settings(self):
+        # The toolbar gear and 设置… in the sidebar are two doors to one dialog;
+        # the gear is the one that is on screen at every window size.
+        self._assert_has_height("⚙", "设置齿轮")
+        try:
+            self.app.open_settings()
+            self.assertIsNotNone(self._dialog("设置"), "设置弹窗没打开")
+        finally:
+            self._close("设置")
+
+    def test_the_settings_dialog_holds_the_set_once_entries(self):
+        # These four used to be sidebar rows, where they outnumbered the two
+        # controls anyone touches twice.
+        try:
+            self.app.open_settings()
+            win = self._dialog("设置")
+            self.assertIsNotNone(win, "设置弹窗没打开")
+            texts = [b.cget("text") for b in self._buttons_in(win)]
+            for label in ("标签译名…", "偏好权重…", "翻译设置…", "检查更新"):
+                self.assertIn(label, texts)
+        finally:
+            self._close("设置")
+
+    def test_the_tool_group_no_longer_lists_the_set_once_entries(self):
+        # 标签库 and the local scan are the two that stayed; the moved four must
+        # be out of the column, not merely also reachable from the dialog.
+        self.assertTrue(self._find("标签库…"), "标签库 被一起搬走了")
+        self.assertTrue(self._find("扫描本地目录"), "扫描本地目录 被一起搬走了")
+        for label in ("标签译名…", "偏好权重…", "翻译设置…", "检查更新"):
+            self.assertEqual(self._find(label), [], "%s 还留在左侧栏" % label)
+
+    def test_the_version_label_is_just_the_version(self):
+        # The build time is a question the user has once. It pushed the version
+        # itself - the part that tells a stale exe from a fresh one - into a
+        # long line nobody finishes reading.
+        hits = self._find("v" + slg_gui.APP_VERSION)
+        self.assertTrue(hits, "版本号没了")
+        for hit in hits:
+            text = hit.cget("text")
+            self.assertNotIn("·", text, text)
+            self.assertNotIn("源码", text, text)
+
+    def test_the_sidebar_asks_for_feedback_and_a_star(self):
+        # Two lines under the version, and the header is packed side="top" in a
+        # column that is already tight at 940x600 - so they have to be checked
+        # for height, not just for being constructed.
+        self._assert_has_height(slg_gui.CONTACT_EMAIL, "侧栏反馈邮箱")
+        self._assert_has_height("求个 GitHub star", "侧栏求 star 文案")
+
+    def test_the_detail_footer_carries_the_same_ask(self):
+        # Same two sentences, at the foot of the panel where someone who just
+        # finished a game is actually looking.
+        self._pool_reset()
+        try:
+            self._select(self._panel_game(0))
+            self._assert_has_height("点个 star", "详情页求 star 文案")
+            self._assert_has_height("反馈 / 建议", "详情页反馈按钮")
+        finally:
+            self.app.selected = None
+            self._finish()
 
     def test_the_maintenance_dialog_lists_all_three_chores(self):
         try:

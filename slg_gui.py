@@ -29,11 +29,18 @@ import slg_scrape
 import slg_translate
 import slg_update
 
-APP_VERSION = "0.14.0"
+APP_VERSION = "0.15.0"
+# The sidebar shows the number and nothing else. build_stamp() still carries
+# the channel and the build time, but it belongs on the 关于 page now: a
+# timestamp in the corner of every screen was answering a question the user
+# asks once.
+APP_VERSION_LABEL = "v" + APP_VERSION
 APP_TITLE = "SLG黄游之王"
 AUTHOR = "菊千代赛高"
 GITHUB_URL = "https://github.com/JXZ666"
 GITHUB_LABEL = "GitHub 主页 · JXZ666"
+CONTACT_EMAIL = "jxzsaikou666@qq.com"
+CONTACT_MAILTO = "mailto:" + CONTACT_EMAIL
 # Taken from the scraper rather than typed again: this is the site the catalogue
 # comes from, and two copies of that URL is one copy that goes stale.
 SITE_URL = slg_scrape.BASE
@@ -122,7 +129,13 @@ DRAIN_PER_TICK = 200                 # background messages handled per pump pass
 # at 150 a run, which is seven syncs before the oldest game on screen gets a
 # blurb; a sync is three sitemap requests plus this, so the cap was the whole
 # cost and the queue, not the site, was what made it feel stuck.
-ENRICH_PER_SYNC = 400
+#
+# Back down from 400 now that a cover rides along with each page: an enriched
+# game is two requests, not one, and both queue behind the same one-a-second
+# gate. 400 meant a sync could run past ten minutes, which is the stall the
+# raise was meant to fix. At 150 the first run still finishes in minutes and the
+# remainder is still just there next time.
+ENRICH_PER_SYNC = 150
 
 # Each field opens the way it reads: the best score, the best rating and the
 # newest update first, but names from A. The arrow button flips from there.
@@ -304,12 +317,15 @@ def display_title(game):
 
 
 def build_stamp():
-    """Version, channel and build time. Puts "am I running the build I just
-    made?" in the corner of the window instead of in a guess about timestamps.
+    """Version, channel and build time, for the 关于 page.
 
-    The exe's own mtime is the honest answer for a frozen build - it changes
-    exactly when a new one is written - and the source file's stands in when
-    running from the tree.
+    Puts "am I running the build I just made?" in front of the user instead of
+    in a guess about timestamps. The exe's own mtime is the honest answer for a
+    frozen build - it changes exactly when a new one is written - and the
+    source file's stands in when running from the tree.
+
+    Not on screen by default: the sidebar reads APP_VERSION_LABEL, because the
+    build time is a question the user has once and then reads past forever.
     """
     if getattr(sys, "frozen", False):
         path, channel = sys.executable, "exe"
@@ -648,7 +664,7 @@ class App(ctk.CTk):
         # to write through.
         self.view_buttons = {}
         self.stat_label = self.progress_label = None
-        self.update_btn = self.translate_btn = self.search_entry = None
+        self.search_entry = self.settings_btn = None
         self.sync_btn = self.maintenance_btn = self.scan_btn = None
         self.update_label = None
 
@@ -682,6 +698,16 @@ class App(ctk.CTk):
         label = self.progress_label
         if label is not None and label.winfo_exists():
             label.configure(text=text[:60])
+
+    def _ui(self, widget, **kwargs):
+        """configure() a widget that may no longer exist.
+
+        Same reason as _set_progress, for the sidebar's buttons: a theme switch
+        rebuilds them and a job started before the switch finishes after it, so
+        the finish has to reach whichever button is there now - or none.
+        """
+        if widget is not None and widget.winfo_exists():
+            widget.configure(**kwargs)
 
     # --- layout ---------------------------------------------------------------
 
@@ -735,8 +761,18 @@ class App(ctk.CTk):
                                                                    padx=18)
         ctk.CTkLabel(header, text="作者 · %s" % AUTHOR, text_color=MUTED,
                      font=ui_font(size=11)).pack(padx=18)
-        ctk.CTkLabel(header, text=build_stamp(), text_color=MUTED,
+        ctk.CTkLabel(header, text=APP_VERSION_LABEL, text_color=MUTED,
                      font=ui_font(size=10)).pack(padx=18, pady=(1, 0))
+        # Where a person looks for who to tell about a bug. A button here would
+        # outweigh the two lines around it, so it is a label with the same
+        # hand cursor and click binding update_label uses.
+        mail = ctk.CTkLabel(header, text="反馈：%s" % CONTACT_EMAIL, text_color=MUTED,
+                            font=ui_font(size=10), wraplength=166, cursor="hand2")
+        mail.pack(padx=18, pady=(4, 0))
+        mail.bind("<Button-1>", lambda e: webbrowser.open(CONTACT_MAILTO))
+        ctk.CTkLabel(header, text="求个 GitHub star，也欢迎推荐给朋友",
+                     text_color=MUTED, font=ui_font(size=10),
+                     wraplength=166).pack(padx=18)
 
         self.stat_label = ctk.CTkLabel(header, text="", text_color=MUTED,
                                        font=ui_font(size=12))
@@ -809,9 +845,13 @@ class App(ctk.CTk):
 
         _rule(nav)
         _section(nav, "工具")
+        # Four rows, not seven. 标签译名/偏好权重/翻译设置/检查更新 are all set-
+        # once-then-forget, and as a list that long they buried the two that are
+        # actually routine (标签库 and the scan) among ones nobody clicks twice.
+        # They live behind 设置… now, which is also where the gear in the
+        # toolbar leads.
         for text, command in (("标签库…", self.open_tag_picker),
-                              ("标签译名…", self.open_tag_editor),
-                              ("偏好权重…", self.open_weights)):
+                              ("设置…", self.open_settings)):
             ctk.CTkButton(nav, text=text, height=34, corner_radius=8,
                           fg_color="transparent", text_color=TEXT, hover_color=CARD,
                           anchor="w", command=command).pack(fill="x", padx=12, pady=2)
@@ -824,15 +864,6 @@ class App(ctk.CTk):
             anchor="w", command=self.do_scan)
         self.scan_btn.pack(fill="x", padx=12, pady=2)
         self.scan_btn.bind("<Button-3>", lambda e: self.pick_scan_root())
-        self.update_btn = ctk.CTkButton(
-            nav, text="检查更新", height=34, corner_radius=8, fg_color="transparent",
-            text_color=TEXT, hover_color=CARD, anchor="w", command=self.do_updates)
-        self.update_btn.pack(fill="x", padx=12, pady=2)
-        self.translate_btn = ctk.CTkButton(
-            nav, text="翻译设置…", height=34, corner_radius=8,
-            fg_color="transparent", text_color=TEXT, hover_color=CARD,
-            anchor="w", command=self.open_translate_settings)
-        self.translate_btn.pack(fill="x", padx=12, pady=2)
         ctk.CTkButton(nav, text="帮助文档", height=34, corner_radius=8,
                       fg_color="transparent", text_color=TEXT, hover_color=CARD,
                       anchor="w", command=self.open_help).pack(fill="x", padx=12,
@@ -876,19 +907,33 @@ class App(ctk.CTk):
             command=self._toggle_sort_dir)
         self.sort_dir_btn.pack(side="left", padx=(6, 0))
 
+        theme_row = ctk.CTkFrame(right, fg_color="transparent")
+        theme_row.pack(fill="x", pady=(6, 0))
+        # Same height and corner radius as the sort controls beside it, so the
+        # row of three reads as one toolbar instead of three unrelated gadgets.
+        self.settings_btn = ctk.CTkButton(
+            theme_row, text="⚙", width=36, height=30, corner_radius=8,
+            fg_color=CARD, text_color=TEXT, hover_color=CARD_HOVER,
+            font=ui_font(size=14), command=self.open_settings)
+        self.settings_btn.pack(side="right", padx=(6, 0))
         self.theme_switch = ctk.CTkSegmentedButton(
-            right, values=[_THEME_LABELS[m] for m in ("light", "dark", "system")],
+            theme_row, values=[_THEME_LABELS[m] for m in ("light", "dark", "system")],
             height=30, corner_radius=8, fg_color=CARD, selected_color=ACCENT,
             selected_hover_color=ACCENT, unselected_color=CARD,
             unselected_hover_color=CARD_HOVER, text_color=TEXT,
             font=ui_font(size=12), command=self._on_theme_pick)
-        self.theme_switch.pack(anchor="e", pady=(6, 0))
+        self.theme_switch.pack(side="left", fill="x", expand=True)
         self.theme_switch.set(_THEME_LABELS[self.theme_mode])
 
-        # Permanent and deliberately not dismissible - the disclaimer is the
-        # point. It lives inside the toolbar rather than in a row of its own on
-        # `main` so that a theme switch rebuilds it along with everything else,
-        # and so the filter bar and body keep their row numbers.
+        # Permanent and deliberately not dismissible. It lives inside the
+        # toolbar rather than in a row of its own on `main` so that a theme
+        # switch rebuilds it along with everything else, and so the filter bar
+        # and body keep their row numbers.
+        #
+        # One line, not two: the second sentence was the same warning said twice
+        # in a box the width of the window, and it now sits with the other
+        # disclaimers at the foot of the detail panel - the one place a reader
+        # goes looking for "what is this site not promising me".
         self.vpn_notice = ctk.CTkFrame(bar, fg_color=CHIP, corner_radius=8)
         self.vpn_notice.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ctk.CTkButton(self.vpn_notice, text=SITE_LABEL, height=28, corner_radius=6,
@@ -896,14 +941,10 @@ class App(ctk.CTk):
                       hover_color=CARD_HOVER, font=ui_font(size=12),
                       command=lambda: webbrowser.open(SITE_URL)
                       ).pack(side="right", padx=(8, 6), pady=6)
-        note = ctk.CTkFrame(self.vpn_notice, fg_color="transparent")
-        note.pack(side="left", fill="x", expand=True, padx=(12, 0), pady=6)
-        ctk.CTkLabel(note, text="建议开启梯子（VPN / 代理）后使用本软件",
+        ctk.CTkLabel(self.vpn_notice, text="建议开启梯子（VPN / 代理）后使用本软件",
                      text_color=TEXT, font=ui_font(size=12),
-                     anchor="w").pack(fill="x")
-        ctk.CTkLabel(note, text="未使用梯子导致的一切问题与作者无关",
-                     text_color=DANGER_TEXT, font=ui_font(size=11),
-                     anchor="w").pack(fill="x")
+                     anchor="w").pack(side="left", fill="x", expand=True,
+                                      padx=(12, 0), pady=6)
 
     def _on_theme_pick(self, label):
         mode = next(m for m, text in _THEME_LABELS.items() if text == label)
@@ -928,8 +969,13 @@ class App(ctk.CTk):
         ctk.CTkLabel(self.filterbar, text="筛选", text_color=MUTED,
                      font=ui_font(size=13)).pack(side="left", padx=(0, 6))
         if not self.include and not self.exclude:
-            ctk.CTkLabel(self.filterbar, text="未设置 — 左侧「标签库…」可以挑",
-                         text_color=MUTED, font=ui_font(size=12)).pack(side="left")
+            # A button, not a label: it was telling the user about 标签库 while
+            # being the one thing in the row that could not open it.
+            ctk.CTkButton(self.filterbar, text="未设置 — 点这里挑标签",
+                          height=24, corner_radius=12, fg_color="transparent",
+                          text_color=ACCENT, hover_color=CHIP,
+                          font=ui_font(size=12),
+                          command=self.open_tag_picker).pack(side="left")
 
         def chip(slug, excluded):
             label = ("× " if excluded else "") + display_tag(slug)
@@ -1503,11 +1549,33 @@ class App(ctk.CTk):
 
         # Static, so _detail_signature stays as it is, and _layout_detail shows
         # it unconditionally: only url/ov_* are keyed off a flag there.
+        #
+        # The VPN sentence came down here from the toolbar. Both halves are the
+        # same kind of statement - what this app does not promise to deliver -
+        # and the foot of the panel is where someone reads them together
+        # instead of glancing past a box under the search field.
         add("disclaimer", ctk.CTkLabel(
-                d, text="本站只做游戏检索，不提供下载。想玩请去官网或自寻下载地址。",
+                d, text="本站只做游戏检索，不提供下载。想玩请去官网或自寻下载地址。\n"
+                        "未使用梯子导致的一切问题与作者无关。",
                 text_color=MUTED, font=ui_font(size=11), wraplength=340,
                 justify="left", anchor="w"),
-            fill="x", padx=18, pady=(12, 20))
+            fill="x", padx=18, pady=(12, 2))
+
+        # Last thing in the panel on every game, for the same reason the
+        # disclaimer is: it is addressed to whoever is reading, and there is no
+        # other screen they are guaranteed to see.
+        feedback = ctk.CTkFrame(d, fg_color="transparent")
+        ctk.CTkLabel(feedback,
+                     text="用得还行的话，欢迎在 GitHub 点个 star，"
+                          "也帮忙推荐给周围的朋友。",
+                     text_color=MUTED, font=ui_font(size=11), wraplength=340,
+                     justify="left", anchor="w").pack(fill="x")
+        ctk.CTkButton(feedback, text="反馈 / 建议：%s" % CONTACT_EMAIL, height=22,
+                      corner_radius=6, fg_color="transparent", text_color=ACCENT,
+                      hover_color=CHIP, font=ui_font(size=11), anchor="w",
+                      command=lambda: webbrowser.open(CONTACT_MAILTO)
+                      ).pack(anchor="w", pady=(2, 0))
+        add("feedback", feedback, fill="x", padx=18, pady=(0, 20))
 
         self._detail_parts = parts
         self._detail_order = order
@@ -1671,7 +1739,7 @@ class App(ctk.CTk):
             engine = config.build()
             if not config.api_key and engine.needs_key:
                 raise slg_translate.TranslateError(
-                    "还没填 API Key。点左边的「翻译设置…」填一下。")
+                    "还没填 API Key。点工具栏的齿轮 ⚙（或左侧「设置…」）→「翻译设置…」填一下。")
             text = slg_translate.translate_overview(game["overview"], config.api_key,
                                                    config.model, engine=engine)
             slg_db.set_auto_translation(conn, "overview", game["id"],
@@ -1699,7 +1767,7 @@ class App(ctk.CTk):
             engine = config.build()
             if not config.api_key and engine.needs_key:
                 raise slg_translate.TranslateError(
-                    "还没填 API Key。点左边的「翻译设置…」填一下。")
+                    "还没填 API Key。点工具栏的齿轮 ⚙（或左侧「设置…」）→「翻译设置…」填一下。")
             title = slg_translate.translate_title(game["title"], config.api_key,
                                                  config.model, engine=engine)
         except slg_translate.TitleGuardError as exc:
@@ -2137,6 +2205,26 @@ class App(ctk.CTk):
         win.bind("<Escape>", lambda e: win.destroy())
         return win
 
+    def _dialog_rows(self, win, entries, state="normal"):
+        """A dialog body of rows: one button over one blurb, identically styled.
+
+        同步与维护 and 设置 are the same shape and only differ in their text and
+        one optional right-click - so the loop lives here instead of twice.
+        """
+        for text, blurb, command, on_right in entries:
+            btn = ctk.CTkButton(
+                win, text=text, height=36, corner_radius=8, anchor="w",
+                fg_color="transparent", text_color=TEXT, hover_color=CARD,
+                font=ui_font(size=13), state=state,
+                command=lambda c=command, w=win: (w.destroy(), c()))
+            if on_right is not None:
+                btn.bind("<Button-3>",
+                         lambda e, c=on_right, w=win: (w.destroy(), c()))
+            btn.pack(fill="x", padx=16, pady=(10, 0))
+            ctk.CTkLabel(win, text=blurb, text_color=MUTED,
+                         font=ui_font(size=11), justify="left",
+                         wraplength=380).pack(fill="x", padx=22, pady=(2, 0))
+
     def open_tag_picker(self):
         """Browse and select tags without losing the window on every click.
 
@@ -2236,19 +2324,41 @@ class App(ctk.CTk):
         # button that leads here - but the job may have started from the sync
         # button while this was already on screen.
         state = "disabled" if self.busy else "normal"
-        for text, blurb, command, on_right in entries:
-            btn = ctk.CTkButton(
-                win, text=text, height=36, corner_radius=8, anchor="w",
-                fg_color="transparent", text_color=TEXT, hover_color=CARD,
-                font=ui_font(size=13), state=state,
-                command=lambda c=command, w=win: (w.destroy(), c()))
-            if on_right is not None:
-                btn.bind("<Button-3>",
-                         lambda e, c=on_right, w=win: (w.destroy(), c()))
-            btn.pack(fill="x", padx=16, pady=(10, 0))
-            ctk.CTkLabel(win, text=blurb, text_color=MUTED,
-                         font=ui_font(size=11), justify="left",
-                         wraplength=380).pack(fill="x", padx=22, pady=(2, 0))
+        self._dialog_rows(win, entries, state=state)
+
+    def open_settings(self):
+        """The things you set once, behind one door.
+
+        Same shape as 同步与维护 and for the same reason: none of these is what
+        the window is for, and as four more rows in the sidebar's 工具 group
+        they pushed the two controls that are routine out of the part of the
+        column a new user reads. Reached from the gear in the toolbar and from
+        设置… in the sidebar; both land here.
+
+        Each row closes this window before opening its own, so the two dialogs
+        cannot stack - and the next visit rebuilds the list, which is what keeps
+        the numbers in the blurbs below honest.
+        """
+        win = self._new_dialog("设置", "440x420")
+        ctk.CTkLabel(win, text="都是设一次就不用再管的东西。\n"
+                               "同步与维护在左侧栏的「更多…」里。",
+                     text_color=MUTED, font=ui_font(size=12), justify="left",
+                     anchor="w").pack(fill="x", padx=16, pady=(12, 0))
+        entries = (
+            ("标签译名…",
+             "给标签写中文名。改完列表和筛选条立刻跟着变。",
+             self.open_tag_editor, None),
+            ("偏好权重…",
+             "从你的五星评分里算出来的标签倾向，正数是你喜欢的。",
+             self.open_weights, None),
+            ("翻译设置…",
+             "配置名称和简介用的翻译引擎与密钥。",
+             self.open_translate_settings, None),
+            ("检查更新",
+             "去 GitHub 看看有没有新版本。每 24 小时自动查一次。",
+             self.do_updates, None),
+        )
+        self._dialog_rows(win, entries)
 
     def open_weights(self):
         win = self._new_dialog("偏好权重", "420x560")
@@ -2566,7 +2676,7 @@ class App(ctk.CTk):
         body("一个 dikgames 站点游戏的本地资料库。把站上的游戏抓下来存进本地数据库，"
              "再按标签、评分、下载状态去挑你想玩的那些。")
         body("数据来自站点的 sitemap，抓完就存在本地，浏览、搜索、筛选都不联网。"
-             "封面图会单独下载到本地缓存。")
+             "封面图跟着游戏一起抓下来，抓完一款存一款。")
         body("数据库和封面不在程序旁边，在 %LOCALAPPDATA%\\slgking\\ 下面："
              "slgking.db 和 covers 文件夹。想备份或换电脑，把那个目录整个带走。"
              "exe 删了数据还在，换台机器数据留在原处。")
@@ -2584,7 +2694,7 @@ class App(ctk.CTk):
         head("常见问题")
 
         body("Q：翻译要怎么开？", color=MUTED)
-        body("A：点左侧「翻译设置…」，有两条路。\n"
+        body("A：点工具栏的齿轮 ⚙（或者左侧栏的「设置…」）→「翻译设置…」，有两条路。\n"
              "· 免费机翻：什么都不用填，选上就能用，简介和游戏名都翻。质量一般，"
              "偶尔会被 Google 限流，过几分钟再试。\n"
              "· AI 翻译：填一个 OpenAI 兼容接口的 Key（DeepSeek、硅基流动、Kimi、"
@@ -2599,7 +2709,7 @@ class App(ctk.CTk):
         body("Q：为什么标签只能用 AI 翻？", color=MUTED)
         body("A：标签是全库共用的固定术语，一百多张卡片都显示同一份。机翻每次给的"
              "译法都不一样（netorare 这轮叫「寝取」下轮叫「NTR」），整个库会读起来"
-             "前后矛盾。所以标签翻译需要 AI 引擎——在「翻译设置…」里选一个服务商，"
+             "前后矛盾。所以标签翻译需要 AI 引擎——在「设置…」→「翻译设置…」里选一个服务商，"
              "填好 Key，然后点「翻译标签」就行，一趟大概花 1 分钱。")
 
         body("Q：为什么有些游戏名还是英文？", color=MUTED)
@@ -2622,12 +2732,19 @@ class App(ctk.CTk):
              "默认只收新出的，老的那些会跳过——否则每次同步都去啃老库，最新的游戏"
              "反而要等。点它不设日期限制，一次收一批，点几次就把历史补完了。"
              "在它上面点右键可以彻底取消日期限制，之后普通「同步」也会收老游戏。\n"
-             "「下载封面」：补下缺的封面缩略图。\n"
+             "「下载封面」：补下缺的封面缩略图。正常「同步」自带封面，这个只是用来"
+             "补老库里的存量欠账，或者哪张图当时没抓到。\n"
              "「全量重建」：按标签把站点重爬一遍，慢得多，拿到的数据和「同步」一样，"
              "只有增量同步明显出问题时才需要跑。")
 
+        body("Q：右上角那颗齿轮是干什么的？", color=MUTED)
+        body("A：收纳设一次就不用再管的东西——「标签译名…」给标签写中文名，"
+             "「偏好权重…」看你自己的口味，「翻译设置…」配翻译引擎，「检查更新」"
+             "去 GitHub 看有没有新版。左侧栏的「设置…」是同一个门。")
+
         body("Q：封面显示灰色方块？", color=MUTED)
-        body("A：说明这张封面还没下载。点左下角「更多…」→「下载封面」，让它慢慢跑完。")
+        body("A：说明这张封面还没下载。正常「同步」会把封面一起抓下来，所以先再点一次"
+             "同步；还是灰的就点左下角「更多…」→「下载封面」补，让它慢慢跑完。")
 
         body("Q：「扫描本地目录」扫哪里？", color=MUTED)
         body("A：第一次点它会让你选一个文件夹，选完就记住了，按钮上写着它当前认的路径。"
@@ -2637,7 +2754,7 @@ class App(ctk.CTk):
 
         body("Q：搜索、筛选、标签库之间的区别？", color=MUTED)
         body("A：搜索栏按游戏名找；卡片上的标签或「标签库…」里的左键加入筛选、右键排除；"
-             "「偏好权重…」会按你打过的五星评分算出你倾向的标签。")
+             "「设置…」→「偏好权重…」会按你打过的五星评分算出你倾向的标签。")
 
         body("Q：深色主题里的「跟随系统」是怎么工作的？", color=MUTED)
         body("A：程序每 5 秒采样一次 Windows 的浅色/深色设置，变了就跟着换，"
@@ -2657,6 +2774,11 @@ class App(ctk.CTk):
         body("版本 " + build_stamp(), color=MUTED)
         body("本软件完全免费。没有收费版、没有付费激活、没有隐藏收费入口。\n"
              "如果你是通过付费渠道拿到它的，请立即举报。", color=DANGER_TEXT)
+        body("用得还行的话，欢迎在 GitHub 点个 star，也帮忙推荐给周围的朋友。"
+             "有想法、有 bug、想要什么功能，发邮件到 %s。" % CONTACT_EMAIL,
+             color=MUTED)
+        _link_button(frame, "发邮件给作者", CONTACT_MAILTO).pack(
+            fill="x", padx=8, pady=(0, 6))
 
     @staticmethod
     def _tag_btn_text(pending, allowed=True):
@@ -2752,24 +2874,21 @@ class App(ctk.CTk):
             return
         self._save_translate_prefs(engine, provider, base_url, key, model)
         self._set_settings_status("翻译中…")
-        self._start_job("翻标签…")
-        threading.Thread(target=self._tag_worker,
-                         args=(engine, provider, base_url, key, model),
-                         daemon=True).start()
+        self._run_job("翻标签…", self._tag_worker,
+                      engine, provider, base_url, key, model)
 
     def _tag_worker(self, engine, provider, base_url, key, model):
-        conn = None
         try:
-            conn = slg_db.connect()
-            config = slg_engines.Config(engine, provider, base_url, key, model)
-            summary = slg_translate.run_tag_translation(
-                conn, config.api_key, config.model or slg_translate.DEFAULT_MODEL,
-                engine=config.build(),
-                log=lambda m: self.queue.put(("log", m)))
-            # Both dictionaries are module level, so the refresh at the end of
-            # the job picks the new translations up for every card at once.
-            load_tag_translations(conn)
-            load_title_translations(conn)
+            with slg_db.session() as conn:
+                config = slg_engines.Config(engine, provider, base_url, key, model)
+                summary = slg_translate.run_tag_translation(
+                    conn, config.api_key, config.model or slg_translate.DEFAULT_MODEL,
+                    engine=config.build(),
+                    log=self._log)
+                # Both dictionaries are module level, so the refresh at the end
+                # of the job picks the new translations up for every card at once.
+                load_tag_translations(conn)
+                load_title_translations(conn)
             text = "标签翻译完成：%d/%d 个" % (summary["translated"],
                                               summary["pending"])
             if summary["missing"]:
@@ -2777,9 +2896,6 @@ class App(ctk.CTk):
             self.queue.put(("done", text))
         except Exception as exc:  # noqa: BLE001
             self.queue.put(("done", "标签翻译失败：%s" % str(exc)[:150]))
-        finally:
-            if conn is not None:
-                conn.close()
 
     # --- software updates ------------------------------------------------------
 
@@ -2797,11 +2913,8 @@ class App(ctk.CTk):
     def _update_worker(self, force):
         found = None
         try:
-            conn = slg_db.connect()
-            try:
+            with slg_db.session() as conn:
                 found = slg_update.check(conn, APP_VERSION, force=force)
-            finally:
-                conn.close()
         except Exception as exc:  # noqa: BLE001 - a version check is never fatal
             self.queue.put(("note", "检查更新失败：%s" % str(exc)[:100]))
             return
@@ -2840,6 +2953,21 @@ class App(ctk.CTk):
 
     # --- background work ------------------------------------------------------
 
+    def _log(self, message):
+        self.queue.put(("log", message))
+
+    def _fail(self, what, exc):
+        return "%s失败：%s: %s" % (what, type(exc).__name__, exc)
+
+    def _run_job(self, label, worker, *args):
+        """Start `worker` in a daemon thread under the usual job discipline.
+
+        Every long job used to repeat the same _start_job + Thread(daemon=True)
+        preamble; the only thing that differed was the worker and its args.
+        """
+        self._start_job(label)
+        threading.Thread(target=worker, args=args, daemon=True).start()
+
     def _start_job(self, label):
         self.busy = True
         # Remembered so a theme switch can replay the disabled/relabelled state
@@ -2852,16 +2980,20 @@ class App(ctk.CTk):
         # stalled cover queue - had no way out except killing the app. The label
         # moves to the sidebar's status line, which is where progress already
         # goes.
-        self.sync_btn.configure(text="停止", state="normal",
-                                command=self._cancel_job)
-        self.maintenance_btn.configure(state="disabled")
-        self.translate_btn.configure(state="disabled")
+        self._ui(self.sync_btn, text="停止", state="normal",
+                 command=self._cancel_job)
+        # 设置… and 翻译设置… are behind dialogs now, so these reach whichever
+        # window is open - usually none, and that is fine: the entry point the
+        # user could click to start a second job is the sync button, which is
+        # disabled above.
+        self._ui(self.maintenance_btn, state="disabled")
+        self._ui(self.settings_btn, state="disabled")
         self._set_progress(label)
 
     def _cancel_job(self):
         """Ask the running worker to stop. It stops at its next checkpoint."""
         self._stop.set()
-        self.sync_btn.configure(text="正在停止…", state="disabled")
+        self._ui(self.sync_btn, text="正在停止…", state="disabled")
 
     def _end_job(self, message, refill=False):
         """Finish a background job. `refill` forces every card to be redrawn.
@@ -2873,10 +3005,10 @@ class App(ctk.CTk):
         """
         self.busy = False
         self._job_label = ""
-        self.sync_btn.configure(text="同步 dikgames", state="normal",
-                                command=self.do_sync)
-        self.maintenance_btn.configure(state="normal")
-        self.translate_btn.configure(state="normal")
+        self._ui(self.sync_btn, text="同步 dikgames", state="normal",
+                 command=self.do_sync)
+        self._ui(self.maintenance_btn, state="normal")
+        self._ui(self.settings_btn, state="normal")
         self._set_progress(message)
         self._refresh_tag_button()
         if refill:
@@ -2909,63 +3041,68 @@ class App(ctk.CTk):
         # Read here, not in the worker: self.conn belongs to the tk thread and
         # sqlite3 connections are not shareable across threads.
         since = self.sync_cutoff()
-        self._start_job("同步中…")
-        threading.Thread(target=self._sync_worker, args=(since, False),
-                         daemon=True).start()
+        self._run_job("同步中…", self._sync_worker, since, False)
 
     def do_backfill(self):
         """One sync with the date gate off, to take the back catalogue."""
         if self.busy:
             return
-        self._start_job("补齐历史…")
-        threading.Thread(target=self._sync_worker, args=(None, True),
-                         daemon=True).start()
+        self._run_job("补齐历史…", self._sync_worker, None, True)
 
     def _sync_worker(self, since, backfill):
         import slg_scrape
-        fetcher = slg_scrape.Fetcher(log=lambda m: self.queue.put(("log", m)),
+        fetcher = slg_scrape.Fetcher(log=self._log,
                                      should_stop=self._stop.is_set)
-        post = lambda m: self.queue.put(("log", m))  # noqa: E731
         try:
-            conn = slg_db.connect()
-            summary = slg_scrape.sync_incremental(
-                conn, fetcher, since=since, log=post,
-                should_stop=self._stop.is_set,
-                on_progress=lambda i, n, title: self.queue.put(
-                    ("progress", "抓详情 %d/%d · %s" % (i, n, title))))
-            # Games that predate the rating/overview columns get topped up
-            # here rather than in a separate chore. Capped and resumable, so a
-            # sync stays minutes and the next one continues where this stopped.
-            filled = slg_scrape.enrich(
-                conn, fetcher, limit=ENRICH_PER_SYNC, log=post,
-                should_stop=self._stop.is_set,
-                on_progress=lambda d, total, url: self.queue.put(
-                    ("progress", "补全详情 %d/%d" % (d, total))))
-            conn.close()
+            with slg_db.session() as conn:
+                summary = slg_scrape.sync_incremental(
+                    conn, fetcher, since=since, log=self._log,
+                    should_stop=self._stop.is_set,
+                    on_progress=lambda i, n, title: self.queue.put(
+                        ("progress", "抓详情 %d/%d · %s" % (i, n, title))))
+                # Games that predate the rating/overview columns get topped up
+                # here rather than in a separate chore. Capped and resumable, so
+                # a sync stays minutes and the next one continues where this
+                # stopped.
+                filled = slg_scrape.enrich(
+                    conn, fetcher, limit=ENRICH_PER_SYNC, log=self._log,
+                    should_stop=self._stop.is_set,
+                    on_progress=lambda d, total, url: self.queue.put(
+                        ("progress", "补全详情 %d/%d" % (d, total))))
+            # Covers now arrive with the games they belong to, so the count is
+            # reported here rather than left to the 更多… badge to reveal.
+            covers = summary["covers"] + filled["covers"]
+            filled = filled["filled"]
+            # The 更多… badge walks the covers directory and memoises the walk;
+            # a run that just wrote files has to drop it or the count is stale.
+            # Before the stop branch below, not after: a cancelled run is exactly
+            # the one that just wrote some covers.
+            slg_db.invalidate_cover_gaps()
             # Reported before the summary branches: a cancelled run's counts are
             # partial by definition, and printing them as "同步完成" would claim
             # a clean sweep the user cut short.
             if self._stop.is_set():
-                self.queue.put(("done", "已停止 · 新增 %d · 变动 %d · 补全 %d"
-                                % (summary["new"], summary["changed"], filled)))
+                self.queue.put(("done", "已停止 · 新增 %d · 变动 %d · 补全 %d · 封面 %d"
+                                % (summary["new"], summary["changed"], filled,
+                                   covers)))
                 return
             if backfill:
                 tail = ("，还有 %d 款下次接着来" % summary["deferred"]
                         if summary["deferred"] else "")
-                said = "补齐完成 · 新增 %d 款 · 变动 %d · 补全 %d%s" % (
-                    summary["new"], summary["changed"], filled, tail)
+                said = "补齐完成 · 新增 %d 款 · 变动 %d · 补全 %d · 封面 %d%s" % (
+                    summary["new"], summary["changed"], filled, covers, tail)
             else:
                 tail = ("，还有 %d 款下次接着来" % summary["deferred"]
                         if summary["deferred"] else "")
-                said = ("同步完成 · 全站 %d 款 · 新增 %d · 变动 %d · 补全 %d%s"
+                said = ("同步完成 · 全站 %d 款 · 新增 %d · 变动 %d · 补全 %d · 封面 %d%s"
                         % (summary["catalogue"], summary["new"],
-                           summary["changed"], filled, tail))
+                           summary["changed"], filled, covers, tail))
                 if summary["skipped_old"]:
                     said += ("（跳过 %d 款老游戏，点「补齐历史…」可以收）"
                              % summary["skipped_old"])
             self.queue.put(("done", said))
         except Exception as exc:  # noqa: BLE001 - the user needs the message
-            self.queue.put(("done", "同步失败：%s: %s" % (type(exc).__name__, exc)))
+            self.queue.put(("done", self._fail("同步", exc)))
 
     def do_covers(self):
         if self.busy:
@@ -2974,23 +3111,20 @@ class App(ctk.CTk):
         if not gaps["covers"]:
             self._set_progress("封面都下载好了")
             return
-        self._start_job("下封面…")
-        threading.Thread(target=self._covers_worker, daemon=True).start()
+        self._run_job("下封面…", self._covers_worker)
 
     def _covers_worker(self):
         import slg_scrape
         try:
-            conn = slg_db.connect()
-            done = slg_scrape.download_covers(
-                conn, workers=3, rate=3.0, log=lambda m: self.queue.put(("log", m)),
-                should_stop=self._stop.is_set,
-                on_progress=lambda d, total: self.queue.put(
-                    ("progress", "封面 %d/%d" % (d, total))))
-            conn.close()
+            with slg_db.session() as conn:
+                done = slg_scrape.download_covers(
+                    conn, workers=3, rate=3.0, log=self._log,
+                    should_stop=self._stop.is_set,
+                    on_progress=lambda d, total: self.queue.put(
+                        ("progress", "封面 %d/%d" % (d, total))))
             self.queue.put(("covers_done", "封面下载 %d 张" % done))
         except Exception as exc:  # noqa: BLE001
-            self.queue.put(("covers_done", "封面下载失败：%s: %s"
-                            % (type(exc).__name__, exc)))
+            self.queue.put(("covers_done", self._fail("封面下载", exc)))
 
     def do_rebuild(self):
         """The original tag walk, kept only as a fallback.
@@ -3007,27 +3141,25 @@ class App(ctk.CTk):
                 "它拿到的数据和「同步 dikgames」完全一样，只是慢得多。\n"
                 "只有增量同步明显出问题时才需要跑。确定继续吗？"):
             return
-        self._start_job("重建中…")
-        threading.Thread(target=self._rebuild_worker, daemon=True).start()
+        self._run_job("重建中…", self._rebuild_worker)
 
     def _rebuild_worker(self):
         import slg_scrape
-        fetcher = slg_scrape.Fetcher(log=lambda m: self.queue.put(("log", m)),
+        fetcher = slg_scrape.Fetcher(log=self._log,
                                      should_stop=self._stop.is_set)
         try:
-            conn = slg_db.connect()
-            tags = slg_db.get_pref(conn, "watched_tags")
-            tags = tags.split(",") if tags else ["netorare", "corruption", "cheating"]
-            summary = slg_scrape.sync_tags(
-                conn, fetcher, tags, should_stop=self._stop.is_set,
-                on_progress=lambda t, p, n: self.queue.put(
-                    ("progress", "%s 第 %d 页 · %d 款" % (t, p, n))))
-            conn.close()
+            with slg_db.session() as conn:
+                tags = slg_db.get_pref(conn, "watched_tags")
+                tags = tags.split(",") if tags else ["netorare", "corruption", "cheating"]
+                summary = slg_scrape.sync_tags(
+                    conn, fetcher, tags, should_stop=self._stop.is_set,
+                    on_progress=lambda t, p, n: self.queue.put(
+                        ("progress", "%s 第 %d 页 · %d 款" % (t, p, n))))
             said = ("全量重建已停止：%d 款（新增 %d）"
                     if self._stop.is_set() else "全量重建完成：%d 款（新增 %d）")
             self.queue.put(("done", said % (summary["games"], summary["new"])))
         except Exception as exc:  # noqa: BLE001
-            self.queue.put(("done", "全量重建失败：%s: %s" % (type(exc).__name__, exc)))
+            self.queue.put(("done", self._fail("全量重建", exc)))
 
     def scan_root(self):
         """The remembered game folder, or "" when there is not one yet."""
@@ -3061,25 +3193,22 @@ class App(ctk.CTk):
         # _start_job, not a hand-rolled busy flag: the hand-rolled version
         # disabled only the sync button, so 下载封面 and 全量重建 stayed
         # clickable and then did nothing at all when clicked.
-        self._start_job("扫描本地目录…")
-        threading.Thread(target=self._scan_worker, args=(root,),
-                         daemon=True).start()
+        self._run_job("扫描本地目录…", self._scan_worker, root)
 
     def _scan_worker(self, root):
         import slg_scan
         try:
-            conn = slg_db.connect()
-            result = slg_scan.scan(
-                conn, roots=[root],
-                log=lambda m: self.queue.put(("log", m)),
-                on_progress=lambda name, gid: self.queue.put(
-                    ("progress", "扫描 %s" % name)),
-                should_stop=self._stop.is_set)
-            conn.close()
+            with slg_db.session() as conn:
+                result = slg_scan.scan(
+                    conn, roots=[root],
+                    log=self._log,
+                    on_progress=lambda name, gid: self.queue.put(
+                        ("progress", "扫描 %s" % name)),
+                    should_stop=self._stop.is_set)
             self.queue.put(("done", "扫描完成：匹配 %d 个，未匹配 %d 个"
                             % (result["matched"], len(result["unmatched"]))))
         except Exception as exc:  # noqa: BLE001
-            self.queue.put(("done", "扫描失败：%s: %s" % (type(exc).__name__, exc)))
+            self.queue.put(("done", self._fail("扫描", exc)))
 
     def do_updates(self):
         import slg_scan

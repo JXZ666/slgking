@@ -13,6 +13,7 @@ import os
 import re
 
 import slg_db
+import slg_util
 
 # The author's own library. It used to be the unconditional default, which made
 # 扫描本地目录 a no-op on every other machine that ran the exe. The GUI now asks
@@ -30,6 +31,20 @@ _NOISE = re.compile(
 
 _ORDINALS = {"1st": "first", "2nd": "second", "3rd": "third",
              "4th": "fourth", "5th": "fifth"}
+
+
+def _listdir(path):
+    """os.listdir, but a locked or vanished directory reads as empty.
+
+    One bad folder used to abort the whole scan: a directory the user deleted
+    mid-scan, or one the OS holds open, raises OSError out of the walk and the
+    GUI reports 扫描失败 with no partial result. Reading it as empty keeps the
+    rest of the run intact.
+    """
+    try:
+        return os.listdir(path)
+    except OSError:
+        return []
 
 
 def _key(text):
@@ -122,13 +137,13 @@ def inspect(folder):
         info["is_renpy"] = True
     tl_dir = os.path.join(game_dir, "tl")
     if os.path.isdir(tl_dir):
-        for entry in os.listdir(tl_dir):
+        for entry in _listdir(tl_dir):
             if "chin" in entry.lower():
                 info["has_translation"] = 1
                 break
     # rpykit-luna drops this shim; its presence means the font has been fixed.
     if info["is_renpy"]:
-        for name in os.listdir(game_dir) if os.path.isdir(game_dir) else []:
+        for name in _listdir(game_dir):
             if "rpykit" in name.lower() or name.lower().startswith("zz_fontgroup"):
                 info["has_fontpatch"] = 1
                 break
@@ -149,7 +164,7 @@ def scan(conn, roots=None, with_size=False, on_progress=None, log=print,
         if not os.path.isdir(root):
             log("跳过（不存在）：%s" % root)
             continue
-        for name in sorted(os.listdir(root)):
+        for name in sorted(_listdir(root)):
             if should_stop and should_stop():
                 conn.commit()
                 slg_db.invalidate_cover_gaps()
@@ -165,14 +180,26 @@ def scan(conn, roots=None, with_size=False, on_progress=None, log=print,
             info = inspect(folder)
             size = None
             if with_size:
-                size = sum(
-                    os.path.getsize(os.path.join(dirpath, f))
-                    for dirpath, _, files in os.walk(folder) for f in files
-                    if os.path.exists(os.path.join(dirpath, f)))
+                try:
+                    size = sum(
+                        os.path.getsize(os.path.join(dirpath, f))
+                        for dirpath, _, files in os.walk(folder) for f in files
+                        if os.path.exists(os.path.join(dirpath, f)))
+                except OSError:
+                    size = None
+            # COALESCE on size_bytes: a re-scan without --size (or one that hit
+            # a vanished file) must not blank a size the last run measured.
             conn.execute(
-                "INSERT OR REPLACE INTO local (game_id, folder_path, folder_version,"
+                "INSERT INTO local (game_id, folder_path, folder_version,"
                 " has_translation, has_fontpatch, size_bytes, scanned_at)"
-                " VALUES (?,?,?,?,?,?,datetime('now'))",
+                " VALUES (?,?,?,?,?,?,datetime('now'))"
+                " ON CONFLICT(game_id) DO UPDATE SET"
+                " folder_path=excluded.folder_path,"
+                " folder_version=excluded.folder_version,"
+                " has_translation=excluded.has_translation,"
+                " has_fontpatch=excluded.has_fontpatch,"
+                " size_bytes=COALESCE(excluded.size_bytes, local.size_bytes),"
+                " scanned_at=excluded.scanned_at",
                 (game_id, folder, parse_folder_version(name),
                  info["has_translation"], info["has_fontpatch"], size))
             # Downloaded is a fact about the disk, so it should not need saying.
@@ -240,16 +267,12 @@ def _compare(left, right):
 
 def _main(argv=None):
     import argparse
-    import sys
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, OSError):
-            pass
+    slg_util.fix_console()
 
     parser = argparse.ArgumentParser(prog="slgking scan", description="扫描本地游戏目录")
+    default_roots = " 或 ".join(DEFAULT_ROOTS) or "（无默认目录）"
     parser.add_argument("--root", action="append", default=[],
-                        help="要扫描的根目录（可重复，默认 %s）" % DEFAULT_ROOTS[0])
+                        help="要扫描的根目录（可重复，默认 %s）" % default_roots)
     parser.add_argument("--size", action="store_true", help="顺便统计文件夹体积（较慢）")
     parser.add_argument("--updates", action="store_true", help="只列出有更新的游戏")
     args = parser.parse_args(argv)

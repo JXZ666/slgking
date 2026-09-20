@@ -18,6 +18,7 @@ import re
 import sys
 
 import slg_db
+import slg_util
 from slg_engines import (  # noqa: F401 - re-exported for the callers that import them from here
     DEFAULT_BASE_URL, DEFAULT_MODEL, ENGINE_FREE, ENGINE_OPENAI, PREF_BASE_URL,
     PREF_ENGINE, PREF_KEY, PREF_MODEL, PREF_PROVIDER, PROVIDERS, PROVIDER_BY_ID,
@@ -312,11 +313,7 @@ def run_tag_translation(conn, api_key, model=DEFAULT_MODEL, limit=0, log=None,
 def _main(argv=None):
     # The console is cp936 and every line below is Chinese; slg_main sets this
     # for the packaged entry point, running this file directly needs it too.
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, OSError):
-            pass
+    slg_util.fix_console()
 
     import argparse
     parser = argparse.ArgumentParser(prog="slgking translate",

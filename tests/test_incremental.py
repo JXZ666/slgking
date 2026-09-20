@@ -44,6 +44,9 @@ SITEMAP = """<?xml version="1.0" encoding="UTF-8"?>
 </urlset>
 """
 
+COVER_KEY = "mainscreen1-576x356.jpg"
+COVER_BYTES = b"\xff\xd8\xff\xe0not-really-a-jpeg"
+
 DETAIL = """<html><head>
 <meta property="og:title" content="The Copycat" />
 <meta property="og:image" content="https://dikgames.com/wp-content/uploads/2025/04/mainscreen1.jpg" />
@@ -145,12 +148,23 @@ class ParseDetailPage(unittest.TestCase):
 class SyncIncremental(unittest.TestCase):
     def setUp(self):
         self.conn = slg_db.connect(":memory:")
+        # The cover fixture is keyed on the *sized* name, because _sized_cover
+        # rewrites the full-size og:image before anything asks for it.
         self.pages = {"post-sitemap.xml": SITEMAP,
                       "the-copycat": DETAIL,
-                      "your-rwby-fantasy": DETAIL}
+                      "your-rwby-fantasy": DETAIL,
+                      COVER_KEY: COVER_BYTES}
+        # A sync now writes a real thumbnail, so the covers directory has to be
+        # disposable - otherwise the suite drops JPEG-looking junk into the
+        # user's own library, one file per run.
+        self.tmp = tempfile.mkdtemp()
+        self.covers = mock.patch.object(slg_db, "covers_dir", return_value=self.tmp)
+        self.covers.start()
 
     def tearDown(self):
+        self.covers.stop()
         self.conn.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_first_run_adopts_lastmod_without_refetching(self):
         # 1274 existing rows all start with a NULL lastmod. Treating that as
@@ -197,9 +211,77 @@ class SyncIncremental(unittest.TestCase):
         self.assertEqual(row["version"], "1.3.0")
         self.assertEqual(row["rating"], 7.3)
         self.assertEqual(row["overview"], "A dark story.")
-        self.assertTrue(row["cover_file"].startswith("pending:"))
         self.assertEqual(slg_db.game_tags(self.conn, row["id"]),
                          ["cheating", "horror", "netorare"])
+        # The picture is part of the same game now, not a second pass the user
+        # has to know to start. The row names a file and the file is on disk.
+        self.assertEqual(row["cover_file"], "the-copycat.jpg")
+        with open(os.path.join(self.tmp, "the-copycat.jpg"), "rb") as fh:
+            self.assertEqual(fh.read(), COVER_BYTES)
+
+    def test_a_synced_game_is_no_longer_a_cover_gap(self):
+        # The whole point of pulling the picture through the sync: the 更多…
+        # badge should not still be counting games that were just synced.
+        slg_scrape.sync_incremental(self.conn, FakeFetcher(self.pages),
+                                    log=lambda *a: None)
+        slg_db.invalidate_cover_gaps()
+        self.assertEqual(slg_db.data_gaps(self.conn)["covers"], 0)
+
+    def test_a_dead_picture_is_noted_as_pending_instead_of_dropped(self):
+        # data_gaps counts 'pending:<url>' and stored names whose file is gone,
+        # but not a NULL cover_file. Dropping the URL outright would make the
+        # game invisible to 「下载封面」 and it would never be retried.
+        pages = {k: v for k, v in self.pages.items() if k != COVER_KEY}
+        slg_scrape.sync_incremental(self.conn, FakeFetcher(pages),
+                                    log=lambda *a: None)
+        row = self.conn.execute(
+            "SELECT * FROM games WHERE slug = 'the-copycat'").fetchone()
+        self.assertTrue(row["cover_file"].startswith("pending:"))
+        self.assertEqual(row["overview"], "A dark story.")
+        slg_db.invalidate_cover_gaps()
+        self.assertEqual(slg_db.data_gaps(self.conn)["covers"], 2)
+
+    def test_a_stop_between_the_page_and_the_picture_unwinds_that_game(self):
+        # A game is two requests now, and the stop check at the top of the loop
+        # only ever covered the first one. Stopping in between used to be the
+        # window where a game landed as a blurb with no thumbnail; the row goes
+        # back instead, so the next sync redoes the whole game.
+        state = {"stop": False}
+
+        class StoppingFetcher(FakeFetcher):
+            def get(self, url, retries=1, binary=False):
+                body = super().get(url, retries=retries, binary=binary)
+                if "the-copycat" in url:
+                    state["stop"] = True      # the user pressed 停止 mid-game
+                return body
+
+        said = []
+        slg_scrape.sync_incremental(self.conn, StoppingFetcher(self.pages),
+                                    log=said.append,
+                                    should_stop=lambda: state["stop"])
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM games").fetchone()[0], 0,
+            "停止时那一款还是入库了")
+        self.assertTrue(any("已停止" in line for line in said), said)
+
+    def test_a_stopped_game_is_not_left_holding_a_cover_url(self):
+        # The pending: marker is what makes the unwind complete: a row that is
+        # rolled back must not also have had its cover URL written down.
+        state = {"stop": False}
+
+        class StoppingFetcher(FakeFetcher):
+            def get(self, url, retries=1, binary=False):
+                body = super().get(url, retries=retries, binary=binary)
+                if "the-copycat" in url:
+                    state["stop"] = True
+                return body
+
+        slg_scrape.sync_incremental(self.conn, StoppingFetcher(self.pages),
+                                    log=lambda *a: None,
+                                    should_stop=lambda: state["stop"])
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM games"
+                              " WHERE cover_file IS NOT NULL").fetchone()[0], 0)
 
     def _summary(self, since):
         return slg_scrape.sync_incremental(self.conn, FakeFetcher(self.pages),
@@ -530,9 +612,16 @@ class StoppingTheSync(unittest.TestCase):
         self.conn = slg_db.connect(":memory:")
         self.pages = {"post-sitemap.xml": SITEMAP,
                       "the-copycat": DETAIL,
-                      "your-rwby-fantasy": DETAIL}
+                      "your-rwby-fantasy": DETAIL,
+                      COVER_KEY: COVER_BYTES}
+        self.tmp = tempfile.mkdtemp()
+        self.covers = mock.patch.object(slg_db, "covers_dir",
+                                        return_value=self.tmp)
+        self.covers.start()
 
     def tearDown(self):
+        self.covers.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
         self.conn.close()
 
     def _games(self):
@@ -547,13 +636,19 @@ class StoppingTheSync(unittest.TestCase):
 
     def test_the_loop_stops_between_detail_pages(self):
         # Counting the checks rather than flagging them: the one after the
-        # sitemap and the one at the top of each page are separate, and the
-        # loop has to stop at the *second* page, not before the first.
+        # sitemap and the ones inside the loop are separate, and the loop has to
+        # stop at the *second* page, not before the first.
+        #
+        # Three checks before the second page now, not two: a game is a page plus
+        # its thumbnail, so a game that needs a cover is checked once before the
+        # page is processed and once before the cover request. The first page
+        # gets through all three and lands; the fourth check is the top of the
+        # second game's turn, which is where this cuts.
         checks = []
 
         def should_stop():
             checks.append(1)
-            return len(checks) > 2
+            return len(checks) > 3
 
         summary = slg_scrape.sync_incremental(self.conn, FakeFetcher(self.pages),
                                               should_stop=should_stop,

@@ -9,7 +9,9 @@ import hashlib
 import os
 import re
 import sqlite3
+import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 
 STATUSES = ("want", "downloaded", "playing")
@@ -51,7 +53,8 @@ CREATE TABLE IF NOT EXISTS games (
     complete     INTEGER NOT NULL DEFAULT 0,
     first_seen   TEXT NOT NULL,
     last_synced  TEXT,
-    lastmod      TEXT
+    lastmod      TEXT,
+    fetch_failures INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS tags (
@@ -202,6 +205,24 @@ def connect(path=None):
     return conn
 
 
+@contextmanager
+def session(path=None):
+    """A connection that commits on success and always closes.
+
+    The GUI workers each open their own connection - self.conn belongs to the
+    tk thread and sqlite connections do not cross threads - and every one of
+    them used to repeat connect()/work/close() with the close() in the try
+    rather than a finally, so an exception leaked the WAL connection. This is
+    the one place that pattern lives now.
+    """
+    conn = connect(path)
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _migrate(conn):
     """Add columns that CREATE TABLE IF NOT EXISTS will not add to an old db."""
     have = {row["name"] for row in conn.execute("PRAGMA table_info(games)")}
@@ -210,6 +231,9 @@ def _migrate(conn):
         conn.commit()
     if "lastmod" not in have:
         conn.execute("ALTER TABLE games ADD COLUMN lastmod TEXT")
+        conn.commit()
+    if "fetch_failures" not in have:
+        conn.execute("ALTER TABLE games ADD COLUMN fetch_failures INTEGER NOT NULL DEFAULT 0")
         conn.commit()
     # Hand-written rows move out of the translation cache into their own table.
     # Deleting them from `translations` is what stops them from having already
@@ -323,15 +347,35 @@ def set_lastmod(conn, game_id, lastmod):
     conn.execute("UPDATE games SET lastmod = ? WHERE id = ?", (lastmod, game_id))
 
 
+def note_fetch_failure(conn, game_id):
+    """Bump a game's consecutive-fetch-failure counter (enrich starvation)."""
+    conn.execute("UPDATE games SET fetch_failures = fetch_failures + 1 WHERE id = ?",
+                 (game_id,))
+
+
+def clear_fetch_failures(conn, game_id):
+    conn.execute("UPDATE games SET fetch_failures = 0 WHERE id = ?", (game_id,))
+
+
 def set_tags(conn, game_id, tags):
-    ids = []
-    for name in tags:
-        conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (name,))
-        ids.append(conn.execute("SELECT id FROM tags WHERE name = ?", (name,))
-                   .fetchone()["id"])
+    """Replace a game's tags. An empty list means "leave them alone".
+
+    The listing and detail parsers can both come back with zero tag links -
+    a page whose markup moved, not a game that genuinely has no tags - and the
+    old unconditional DELETE wiped a healthy row in that case. Reading the ids
+    back in one IN query also drops the old one-SELECT-per-tag round trip.
+    """
+    if not tags:
+        return
+    names = list(dict.fromkeys(tags))
+    conn.executemany("INSERT OR IGNORE INTO tags (name) VALUES (?)",
+                     [(name,) for name in names])
+    rows = conn.execute(
+        "SELECT id FROM tags WHERE name IN (%s)" % ",".join("?" * len(names)),
+        names).fetchall()
     conn.execute("DELETE FROM game_tags WHERE game_id = ?", (game_id,))
     conn.executemany("INSERT OR IGNORE INTO game_tags (game_id, tag_id) VALUES (?,?)",
-                     [(game_id, tid) for tid in ids])
+                     [(game_id, row["id"]) for row in rows])
 
 
 def set_cover(conn, game_id, cover_file):
@@ -347,7 +391,7 @@ def _version_gt(left, right):
     stored value alone: refusing to move beats moving backwards.
     """
     def parts(text):
-        return [int(n) for n in re.findall(r"\d+", text or "")[:4]]
+        return [int(n) for n in re.findall(r"\d+", str(text or ""))[:4]]
     a, b = parts(left), parts(right)
     if not a or not b:
         return False
@@ -502,12 +546,14 @@ def get_game(conn, game_id):
 # dropped outright by whatever actually changes it.
 _COVER_GAP_TTL = 15.0
 _missing_covers = None   # (count, monotonic seconds)
+_cover_gap_lock = threading.Lock()
 
 
 def invalidate_cover_gaps():
     """Forget the memo. Called after a cover download or a local scan."""
     global _missing_covers
-    _missing_covers = None
+    with _cover_gap_lock:
+        _missing_covers = None
 
 
 def missing_cover_files(conn, ttl=_COVER_GAP_TTL):
@@ -517,17 +563,18 @@ def missing_cover_files(conn, ttl=_COVER_GAP_TTL):
     deleted file renders as a blank card however healthy the database looks.
     """
     global _missing_covers
-    now = time.monotonic()
-    if _missing_covers is not None and now - _missing_covers[1] < ttl:
-        return _missing_covers[0]
-    rows = conn.execute("SELECT cover_file FROM games WHERE cover_file"
-                        " IS NOT NULL AND cover_file NOT LIKE 'pending:%'"
-                        ).fetchall()
-    directory = covers_dir()
-    count = sum(1 for row in rows
-                if not os.path.exists(os.path.join(directory, row["cover_file"])))
-    _missing_covers = (count, now)
-    return count
+    with _cover_gap_lock:
+        now = time.monotonic()
+        if _missing_covers is not None and now - _missing_covers[1] < ttl:
+            return _missing_covers[0]
+        rows = conn.execute("SELECT cover_file FROM games WHERE cover_file"
+                            " IS NOT NULL AND cover_file NOT LIKE 'pending:%'"
+                            ).fetchall()
+        directory = covers_dir()
+        count = sum(1 for row in rows
+                    if not os.path.exists(os.path.join(directory, row["cover_file"])))
+        _missing_covers = (count, now)
+        return count
 
 
 def data_gaps(conn):
