@@ -29,7 +29,7 @@ import slg_scrape
 import slg_translate
 import slg_update
 
-APP_VERSION = "0.17.5"
+APP_VERSION = "0.18.0"
 # The sidebar shows the number and nothing else. build_stamp() still carries
 # the channel and the build time, but it belongs on the 关于 page now: a
 # timestamp in the corner of every screen was answering a question the user
@@ -112,9 +112,38 @@ def resolved_theme(mode):
 
 apply_palette("light")
 
-COVER_W, COVER_H = 112, 69          # dikgames thumbs are 576x356, ~1.62:1
+COVER_W, COVER_H = 128, 79          # dikgames thumbs are 576x356, ~1.62:1
 DETAIL_W, DETAIL_H = 300, 185
-PAGE = 80                            # cards rendered per "load more"
+# Cards on screen at once, i.e. one page. The list was an accumulating
+# "显示更多" before this: eighty cards built eagerly and four hundred on
+# screen after a few clicks, which is where the scroll lag came from. The
+# cost was never the query - find_games still reads the whole catalogue in
+# single-digit milliseconds - it was the widget count.
+#
+# Seven is the measured fit of the maximized window, and that is the size this
+# is designed against - a page that fills the screen with no scrolling is what
+# the number is for. A card is cover-driven (79px * 1.5 widget scaling on the
+# machine this was built for, plus its padding and three text lines = 142px),
+# so seven is ~1000px of list.
+#
+# Below that the page simply does not all fit, and that is deliberate: the
+# cards keep their size and the scroll area does the rest. Shrinking them to
+# fit a narrow window is what makes a seven-card page unreadable, and it is the
+# one thing this number must not do. A five-card page measured at the default
+# 1180x760 wasted two rows on a maximized window, which was the other half of
+# the complaint.
+#
+# A fixed number rather than a fit-to-window count, because the page numbers
+# have to mean the same thing after a resize - the pager lets you type one, and
+# a count that followed the window would silently move the game off the page
+# you just turned to. The pager sits outside the scroll area (see _build), so
+# it is reachable without scrolling whatever this is set to.
+PAGE_SIZE = 7
+# The card tagline's wrap width. It is a function of COVER_W - the text column
+# is whatever is left of the list after the cover and its padding - so the two
+# have to move together. It was a literal 430, which silently clipped the
+# moment the cover grew.
+CARD_WRAP = 405
 REFRESH_GAP = 5.0                    # seconds between refreshes while syncing
 # What that gap becomes while a job is running. A refresh rebuilds every card
 # on screen, and during a sync the top of the list churns - enrich rewrites
@@ -136,6 +165,13 @@ DRAIN_PER_TICK = 200                 # background messages handled per pump pass
 # raise was meant to fix. At 150 the first run still finishes in minutes and the
 # remainder is still just there next time.
 ENRICH_PER_SYNC = 150
+# Detail pages one 补齐热度 run will re-read. Separate from ENRICH_PER_SYNC
+# because it costs one request per game where enrich costs two - it does not
+# fetch the cover - so the same wall-clock buys twice the progress. 150 keeps
+# a run at about three minutes and it is resumable, which matters more than
+# finishing in one sitting: the backlog is every game ingested before v0.17.0,
+# which is most of the catalogue.
+METRICS_PER_RUN = 150
 
 # Each field opens the way it reads: the best score, the best rating and the
 # newest update first, but names from A. The arrow button flips from there.
@@ -501,7 +537,11 @@ class App(ctk.CTk):
         self.sort_desc = SORT_DEFAULT_DESC[self.sort]
         self.selected = None
         self.rows = []
-        self.shown = PAGE
+        # 1-based, and it indexes _page_slice(). self.rows stays the whole
+        # result set on purpose: four other places read it as such (re-finding
+        # the selection by id, dropping a card, resolving a click, counting
+        # pages), and they would all change meaning if it held one page.
+        self.page = 1
         self.queue = queue.Queue()
         self.busy = False
         self._job_label = ""
@@ -534,7 +574,8 @@ class App(ctk.CTk):
         self._empty_label = None
         self._status_btns = {}    # status key -> its button in the detail panel
         self._star_btns = []      # the five rating buttons, index 0 == one star
-        self._more_btn = None
+        self._pager = None        # the pager bar, built lazily on first render
+        self._pager_parts = None  # its children, blanked with it on teardown
         self._search_after = None
         # Overview translations in flight, by game id. Deliberately separate
         # from self.busy: translating one description must not lock out syncing.
@@ -670,9 +711,10 @@ class App(ctk.CTk):
         self._filter_sig = None
         self._detail_sig = None
         self._rendered_ids = []
-        self._more_btn = None
+        self._pager = self._pager_parts = None
         self.filterbar = self.filterbar_inner = None
         self.list = self.detail = None
+        self._pager_holder = None
         self._ov_label = self._ov_seg = self._title_label = None
         self._title_note = None
         self._status_btns = {}
@@ -778,6 +820,18 @@ class App(ctk.CTk):
         self.list = ctk.CTkScrollableFrame(body, fg_color="transparent")
         self.list.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
         self.list.grid_columnconfigure(0, weight=1)
+
+        # The pager is a sibling of the list, not a child, so it stays pinned to
+        # the bottom of the column. Packed inside the list it would sit after
+        # the cards in the scroll region, and with the covers at their current
+        # size the sixth row plus the bar is already past the fold - the user
+        # would have to scroll to turn the page, which is the one thing
+        # pagination is for. Row 1 has weight 0, so the list keeps everything
+        # the pager does not use.
+        self._pager_holder = ctk.CTkFrame(body, fg_color="transparent")
+        self._pager_holder.grid(row=1, column=0, sticky="ew", padx=(0, 12),
+                                pady=(8, 0))
+        self._pager_holder.grid_columnconfigure(0, weight=1)
 
         self.detail = ctk.CTkScrollableFrame(body, fg_color=CARD, corner_radius=12)
         self.detail.grid(row=0, column=1, sticky="nsew")
@@ -900,7 +954,7 @@ class App(ctk.CTk):
         # The two routine tools stay out here: 标签库 for filtering, and
         # 检查更新 for "which of my local games has a newer build on the site".
         # The set-once-then-forget ones (标签译名/偏好权重/翻译设置/扫描本地目录)
-        # live behind 更多工具…, and the toolbar gear opens 关于 instead.
+        # live behind 更多工具…, and the toolbar gear opens 设置 instead.
         for text, command in (("标签库…", self.open_tag_picker),
                               ("检查更新", self.do_updates),
                               ("更多工具…", self.open_tools)):
@@ -920,54 +974,52 @@ class App(ctk.CTk):
         # The "搜索" caption is gone and the text is centred: the caption only
         # pushed the placeholder into the left edge, and with the whole row to
         # itself the box says what it is without it.
+        #
+        # 70 is not a look, it is the row height: sort and the theme switch
+        # used to be stacked beside this box (30 + 6 + 34), and now that the
+        # theme switch has moved into 设置 the sort row has the whole right-hand
+        # side to itself. Growing the box to that height is what puts its lower
+        # edge flush against the notice band below, which is the row's own
+        # bottom edge - see the pady on vpn_notice.
         self.search_entry = ctk.CTkEntry(
-            bar, placeholder_text="搜索游戏名…", height=36, corner_radius=8,
+            bar, placeholder_text="搜索游戏名…", height=70, corner_radius=8,
             fg_color=CARD, text_color=TEXT, placeholder_text_color=MUTED,
             border_width=1, border_color=CHIP, font=ui_font(size=13),
             justify="center")
         self.search_entry.grid(row=0, column=0, sticky="ew")
         self.search_entry.bind("<KeyRelease>", self._on_search)
 
-        # Sort and the theme switch share the right-hand column, stacked, so the
-        # search box keeps the whole row to itself and stops looking cramped.
+        # Sort field, sort direction and 设置, all on one line and all the same
+        # height. The "排序" caption that used to open this row is gone: the
+        # dropdown reads as a sort control without a label, and the room the
+        # label took is where the gear sits now that it no longer shares a row
+        # with a theme switch.
+        #
+        # sticky="e" without n/s is load-bearing: it centres the three on the
+        # search box's height instead of stretching them with it.
         right = ctk.CTkFrame(bar, fg_color="transparent")
         right.grid(row=0, column=1, padx=(20, 0), sticky="e")
 
-        # Theme + gear on top: the theme is the thing a user flips most often
-        # and the gear is a one-keystroke "about/update" door, so they sit above
-        # the sort controls instead of below them.
-        theme_row = ctk.CTkFrame(right, fg_color="transparent")
-        theme_row.pack(fill="x")
-        self.settings_btn = ctk.CTkButton(
-            theme_row, text="⚙", width=36, height=30, corner_radius=8,
-            fg_color=CARD, text_color=TEXT, hover_color=CARD_HOVER,
-            font=ui_font(size=14), command=self.open_about)
-        self.settings_btn.pack(side="right", padx=(6, 0))
-        self.theme_switch = ctk.CTkSegmentedButton(
-            theme_row, values=[_THEME_LABELS[m] for m in ("light", "dark", "system")],
-            height=30, corner_radius=8, fg_color=CARD, selected_color=ACCENT,
-            selected_hover_color=ACCENT, unselected_color=CARD,
-            unselected_hover_color=CARD_HOVER, text_color=TEXT,
-            font=ui_font(size=12), command=self._on_theme_pick)
-        self.theme_switch.pack(side="left", fill="x", expand=True)
-        self.theme_switch.set(_THEME_LABELS[self.theme_mode])
-
-        sort_row = ctk.CTkFrame(right, fg_color="transparent")
-        sort_row.pack(fill="x", pady=(6, 0))
-        ctk.CTkLabel(sort_row, text="排序", text_color=MUTED,
-                     font=ui_font(size=13)).pack(side="left", padx=(0, 8))
         self.sort_menu = ctk.CTkOptionMenu(
-            sort_row, values=["推荐分", "站内评分", "最近更新", "名称", "热度"], width=110,
-            height=34, corner_radius=8, fg_color=CARD, text_color=TEXT,
+            right, values=["推荐分", "站内评分", "最近更新", "名称", "热度"], width=116,
+            height=38, corner_radius=8, fg_color=CARD, text_color=TEXT,
             button_color=CHIP, button_hover_color=CARD_HOVER,
             command=self._on_sort)
         self.sort_menu.pack(side="left")
         self.sort_dir_btn = ctk.CTkButton(
-            sort_row, text=SORT_ARROW[self.sort_desc], width=78, height=34,
+            right, text=SORT_ARROW[self.sort_desc], width=78, height=38,
             corner_radius=8, fg_color=CARD, text_color=TEXT,
             hover_color=CARD_HOVER, font=ui_font(size=15),
             command=self._toggle_sort_dir)
         self.sort_dir_btn.pack(side="left", padx=(6, 0))
+        # The gear lands on 设置, not 关于: the theme switch lives in there now,
+        # and 关于 is the first row inside it. Same width as the button it
+        # replaced, taller to match the two controls beside it.
+        self.settings_btn = ctk.CTkButton(
+            right, text="⚙", width=38, height=38, corner_radius=8,
+            fg_color=CARD, text_color=TEXT, hover_color=CARD_HOVER,
+            font=ui_font(size=14), command=self.open_settings)
+        self.settings_btn.pack(side="left", padx=(6, 0))
 
         # Permanent and deliberately not dismissible. It lives inside the
         # toolbar rather than in a row of its own on `main` so that a theme
@@ -983,8 +1035,11 @@ class App(ctk.CTk):
         # things inside it sit together on the centre axis instead of being
         # pushed to opposite ends. The stretch of empty blue between them was
         # the whole reason this row looked wrong.
+        # No top padding: this band is what the search box's lower edge is flush
+        # against, and the 8px that used to separate them read as the search box
+        # floating above the header instead of heading it.
         self.vpn_notice = ctk.CTkFrame(bar, fg_color=CHIP, corner_radius=8)
-        self.vpn_notice.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.vpn_notice.grid(row=1, column=0, columnspan=2, sticky="ew")
         inner = _centred_row(self.vpn_notice, row=0, column=0, sticky="ew")
         ctk.CTkLabel(inner, text="建议开启梯子（VPN / 代理）后使用本软件",
                      text_color=TEXT, font=ui_font(size=12)
@@ -1056,7 +1111,7 @@ class App(ctk.CTk):
 
     def set_view(self, status):
         self.view = status
-        self.shown = PAGE
+        self.page = 1
         for key, btn in self.view_buttons.items():
             btn.configure(fg_color=CARD if key == status else "transparent")
         self.refresh()
@@ -1071,7 +1126,7 @@ class App(ctk.CTk):
 
     def _apply_search(self):
         self._search_after = None
-        self.shown = PAGE
+        self.page = 1
         self.refresh()
 
     def _on_sort(self, label):
@@ -1080,13 +1135,13 @@ class App(ctk.CTk):
         # the previous field's flip.
         self.sort_desc = SORT_DEFAULT_DESC[self.sort]
         self._paint_sort_dir()
-        self.shown = PAGE
+        self.page = 1
         self.refresh()
 
     def _toggle_sort_dir(self):
         self.sort_desc = not self.sort_desc
         self._paint_sort_dir()
-        self.shown = PAGE
+        self.page = 1
         self.refresh()
 
     def _paint_sort_dir(self):
@@ -1094,12 +1149,12 @@ class App(ctk.CTk):
 
     def _drop_chip(self, slug, excluded):
         (self.exclude if excluded else self.include).remove(slug)
-        self.shown = PAGE
+        self.page = 1
         self.refresh()
 
     def clear_filters(self):
         self.include, self.exclude = [], []
-        self.shown = PAGE
+        self.page = 1
         self.refresh()
 
     def toggle_tag(self, slug, exclude=False):
@@ -1111,7 +1166,7 @@ class App(ctk.CTk):
             target.append(slug)
             if slug in other:
                 other.remove(slug)
-        self.shown = PAGE
+        self.page = 1
         self.refresh()
 
     # --- rendering ------------------------------------------------------------
@@ -1119,11 +1174,18 @@ class App(ctk.CTk):
     def refresh(self, preserve_scroll=False, skip_if_same=False):
         """Rebuild the whole list. For filter/sort/data changes only.
 
-        Selecting a card does NOT come through here - rebuilding ~480 CTk
-        widgets to recolour two of them was the multi-second stall. The two
+        Selecting a card does NOT come through here - rebuilding a screenful of
+        CTk widgets to recolour two of them was the multi-second stall. The two
         flags exist for the one caller that is neither: the sync's periodic
         tick, which fires every few seconds whether or not anything the user
         can see has changed.
+
+        find_games returns the whole result set and the page is sliced out of
+        it below, which is O(the catalogue) per refresh - single-digit
+        milliseconds at the few thousand rows this holds, and fine an order of
+        magnitude past that. Keeping self.rows whole is what lets the four
+        other readers of it (re-finding the selection by id, dropping a card,
+        resolving a click, counting pages) go on meaning what they meant.
         """
         self._render_filterbar()
         self.rows = slg_db.find_games(
@@ -1131,6 +1193,10 @@ class App(ctk.CTk):
             search=self.search or None,
             statuses=[self.view] if self.view else None,
             downloaded_only=False, sort=self.sort, desc=self.sort_desc)
+        # A filter or a sort handler sets page 1 already; this is for the other
+        # way the set can shrink - the tick after a sync emptied the tail, or a
+        # drop that took the last row off the last page.
+        self._clamp_page()
 
         # The row objects are replaced wholesale, so the old selection would
         # keep showing pre-edit values (a status button that never lights up).
@@ -1143,19 +1209,26 @@ class App(ctk.CTk):
             if fresh is not None:
                 self.selected = dict(fresh)
 
-        visible = [g["id"] for g in self.rows[:self.shown]]
+        visible = [g["id"] for g in self._page_slice()]
         if skip_if_same and visible == self._rendered_ids:
-            # A sync added rows past the fold, or only touched columns nothing
-            # on screen reads. Destroying and redrawing 480 widgets to arrive
-            # at the same picture is what made the list stutter. The detail
-            # panel is left alone too - rebuilding it would throw away the
-            # user's place in it (and reset the 原文/中文 switch) every tick.
+            # A sync added rows on another page, or only touched columns nothing
+            # on screen reads. Destroying and redrawing every card to arrive at
+            # the same picture is what made the list stutter. The detail panel is
+            # left alone too - rebuilding it would throw away the user's place in
+            # it (and reset the 原文/中文 switch) every tick.
+            #
+            # The pager is not left alone: this branch is reached precisely when
+            # rows were appended past the fold, which can add a whole page, and a
+            # 第 1 / 3 页 that never moves is the one thing on screen that is now
+            # wrong. It is configure-only, so it does not undo the point of the
+            # shortcut.
+            self._render_pager()
             self._render_stats()
             return
 
         offset = self._scroll_offset() if preserve_scroll else None
-        self._sync_cards(self.rows[:self.shown])
-        self._render_more()
+        self._sync_cards(self._page_slice())
+        self._render_pager()
         self._set_empty_label(not self.rows)
         self._rendered_ids = visible
         if offset is not None:
@@ -1265,7 +1338,7 @@ class App(ctk.CTk):
                     self._fill_card(slot, game, tags.get(gid, ()))
                     self._pool_gid[i] = gid
                 if was_hidden:
-                    slot["frame"].pack(fill="x", pady=3)
+                    slot["frame"].pack(fill="x", pady=2)
             else:
                 slot = self._new_card(game, tags.get(gid, ()))
                 self._card_pool.append(slot)
@@ -1276,39 +1349,111 @@ class App(ctk.CTk):
                 self._pool_gid[i] = None
         self._reset_card_index()
 
-    def _more(self):
-        self.shown += PAGE
-        self._sync_cards(self.rows[:self.shown])
-        self._render_more()
+    def _page_count(self):
+        # PAGE_SIZE is read here rather than bound as a default argument: a
+        # default is evaluated at import, and the tests patch the module
+        # global to widen a page to their fake catalogue.
+        return max(1, -(-len(self.rows) // PAGE_SIZE))
 
-    def _is_last_slave(self, widget):
-        """pack() records its own order, and only pack_slaves() reports it -
-        winfo_children() hands back creation order instead."""
-        slaves = self.list.pack_slaves()
-        return bool(slaves) and slaves[-1] is widget
+    def _page_slice(self):
+        start = (self.page - 1) * PAGE_SIZE
+        return self.rows[start:start + PAGE_SIZE]
 
-    def _render_more(self):
-        """Keep one button, moved to the end.
+    def _clamp_page(self):
+        self.page = min(max(1, self.page), self._page_count())
 
-        pack() appends, so a re-packed widget lands after everything currently in
-        the list - which is where this one belongs, behind the cards _sync_cards
-        just re-shuffled. Skipped when it is already last: a needless
-        forget/re-pack invalidates the whole scroll region's geometry, and this
-        runs on every single refresh.
-        """
-        remaining = len(self.rows) - self.shown
-        if self._more_btn is None:
-            self._more_btn = ctk.CTkButton(
-                self.list, text="", height=36, corner_radius=8, fg_color=CARD,
-                text_color=ACCENT, hover_color=CARD_HOVER, command=self._more)
-        if remaining <= 0:
-            if self._more_btn.winfo_manager():
-                self._more_btn.pack_forget()
+    def _goto_page(self, page):
+        """Turn to a page. A no-op when it is the one already showing, so the
+        pager's Entry does not redraw the list for a jump to where it is."""
+        before = self.page
+        self.page = page
+        self._clamp_page()
+        if self.page == before:
+            self._render_pager()
             return
-        self._more_btn.configure(text="显示更多（还有 %d 款）" % remaining)
-        if not self._is_last_slave(self._more_btn):
-            self._more_btn.pack_forget()
-            self._more_btn.pack(fill="x", pady=8)
+        self.refresh()
+        # Not preserve_scroll: the canvas keeps its yview across a card swap,
+        # so without this the new page opens wherever the old one was scrolled
+        # to. _restore_scroll defers through after_idle, which is what it needs
+        # - the scrollregion only covers the new cards after the next geometry
+        # pass.
+        self._restore_scroll(0.0)
+
+    def _prev_page(self):
+        self._goto_page(self.page - 1)
+
+    def _next_page(self):
+        self._goto_page(self.page + 1)
+
+    def _jump_to_typed(self):
+        """Read the page box and go there. Anything that is not a number is
+        ignored outright - _goto_page would clamp a garbage parse to page 1,
+        which silently throws the user to the top of the list."""
+        text = self._pager_parts["entry"].get().strip()
+        if not text.isdigit():
+            return
+        self._goto_page(int(text))
+
+    def _render_pager(self):
+        """Draw the page bar: 上一页 / 第 X / Y 页 / 下一页, plus a box to type
+        a page into.
+
+        Configure-only once built. This runs from refresh(), including the
+        skip_if_same branch and every sync tick, and the whole reason that
+        branch exists is to avoid re-doing geometry - so the bar is never
+        re-packed and its widgets are only touched when the value differs.
+        """
+        pages = self._page_count()
+        if self._pager is None:
+            self._pager = ctk.CTkFrame(self._pager_holder, fg_color=CARD,
+                                       corner_radius=8)
+            self._pager.grid(row=0, column=0, sticky="ew")
+            self._pager.grid_columnconfigure(1, weight=1)
+            prev = ctk.CTkButton(self._pager, text="‹ 上一页", width=84, height=30,
+                                 corner_radius=8, fg_color=CHIP, text_color=TEXT,
+                                 hover_color=CARD_HOVER, font=ui_font(size=12),
+                                 command=self._prev_page)
+            prev.grid(row=0, column=0, padx=(10, 6), pady=8)
+            label = ctk.CTkLabel(self._pager, text="", text_color=MUTED,
+                                 font=ui_font(size=12))
+            label.grid(row=0, column=1)
+            nxt = ctk.CTkButton(self._pager, text="下一页 ›", width=84, height=30,
+                                corner_radius=8, fg_color=CHIP, text_color=TEXT,
+                                hover_color=CARD_HOVER, font=ui_font(size=12),
+                                command=self._next_page)
+            nxt.grid(row=0, column=2, padx=6, pady=8)
+            entry = ctk.CTkEntry(self._pager, width=56, height=30, corner_radius=8,
+                                 fg_color=BG, text_color=TEXT, border_color=CHIP,
+                                 justify="center", font=ui_font(size=12))
+            entry.bind("<Return>", lambda e: self._jump_to_typed())
+            entry.grid(row=0, column=3, padx=(6, 4), pady=8)
+            jump = ctk.CTkButton(self._pager, text="跳转", width=56, height=30,
+                                 corner_radius=8, fg_color=CHIP, text_color=ACCENT,
+                                 hover_color=CARD_HOVER, font=ui_font(size=12),
+                                 command=self._jump_to_typed)
+            jump.grid(row=0, column=4, padx=(0, 10), pady=8)
+            self._pager_parts = {"prev": prev, "label": label, "next": nxt,
+                                 "entry": entry, "jump": jump}
+        if len(self.rows) <= PAGE_SIZE:
+            # One page or none: there is nothing to turn to, and a bar reading
+            # 第 1 / 1 页 is furniture.
+            if self._pager.winfo_manager():
+                self._pager.grid_forget()
+            return
+        if not self._pager.winfo_manager():
+            self._pager.grid(row=0, column=0, sticky="ew")
+        p = self._pager_parts
+        p["label"].configure(text="第 %d / %d 页 · 共 %d 款"
+                             % (self.page, pages, len(self.rows)))
+        p["prev"].configure(state="disabled" if self.page <= 1 else "normal")
+        p["next"].configure(state="disabled" if self.page >= pages else "normal")
+        # Never rewrite a box the user is typing into - the sync tick comes
+        # through here every few seconds and would eat a half-entered number.
+        # Same guard as the 评价 field's, for the same reason.
+        want = str(self.page)
+        if p["entry"].get() != want and self.focus_get() is not p["entry"]:
+            p["entry"].delete(0, "end")
+            p["entry"].insert(0, want)
 
     def _set_empty_label(self, show):
         """One label, shown or hidden. It used to be built fresh on every empty
@@ -1324,7 +1469,7 @@ class App(ctk.CTk):
             self._empty_label.pack_forget()
 
     def _drop_card(self, game_id):
-        """Take one card off the list without rebuilding the other four hundred.
+        """Take one card off the list without rebuilding the rest of the page.
 
         A status write made from inside one of the filtered views always means
         the game just left that view, so the list loses a row and gains nothing.
@@ -1333,9 +1478,13 @@ class App(ctk.CTk):
         only way to keep the index invariant intact.
         """
         self.rows = [g for g in self.rows if g["id"] != game_id]
-        self._rendered_ids = [i for i in self._rendered_ids if i != game_id]
-        self._sync_cards(self.rows[:self.shown])
-        self._render_more()
+        # Removed and then recomputed, not just filtered: dropping the only row
+        # of the last page decrements the page, and the on-screen set changes
+        # wholesale in a way that a one-id filter cannot describe.
+        self._clamp_page()
+        self._rendered_ids = [g["id"] for g in self._page_slice()]
+        self._sync_cards(self._page_slice())
+        self._render_pager()
 
     def _detail_signature(self):
         """What the detail panel's contents depend on.
@@ -1385,19 +1534,24 @@ class App(ctk.CTk):
         transparent any more: each label carries its own `bg`, which is why
         _paint_card has to recolour them along with the frame.
         """
+        # Row height is cover-driven: COVER_H plus the image's vertical padding
+        # plus the card's. At six rows a page those two paddings are the whole
+        # difference between the last card sitting above the fold and needing a
+        # scroll to see, which is why they are quoted off the line they were
+        # written on.
         card = ctk.CTkFrame(self.list, corner_radius=10)
-        card.pack(fill="x", pady=3)
+        card.pack(fill="x", pady=2)
         card.grid_columnconfigure(1, weight=1)
 
         img = ctk.CTkLabel(card, text="")
-        img.grid(row=0, column=0, rowspan=3, padx=10, pady=10)
+        img.grid(row=0, column=0, rowspan=3, padx=10, pady=8)
 
         # tk.Label takes a raw pixel wraplength where CTkLabel scaled it for us.
-        wrap = card._apply_widget_scaling(430)
+        wrap = card._apply_widget_scaling(CARD_WRAP)
 
         title = tk.Label(card, text="", bg=CARD, fg=TEXT, anchor="w",
-                         font=ui_font(size=14, weight="bold"))
-        title.grid(row=0, column=1, sticky="ew", pady=(12, 0))
+                         font=ui_font(size=15, weight="bold"))
+        title.grid(row=0, column=1, sticky="ew", pady=(10, 0))
 
         meta = tk.Label(card, text="", bg=CARD, fg=MUTED, anchor="w",
                         font=ui_font(size=12))
@@ -1405,8 +1559,8 @@ class App(ctk.CTk):
 
         tagline = tk.Label(card, text="", bg=CARD, fg=MUTED, anchor="w",
                            wraplength=wrap, justify="left",
-                           font=ui_font(size=11))
-        tagline.grid(row=2, column=1, sticky="ew", pady=(0, 12))
+                           font=ui_font(size=12))
+        tagline.grid(row=2, column=1, sticky="ew", pady=(0, 10))
 
         # The three text lines are bound too, and that is not belt and braces:
         # a plain tk.Label does not pass its clicks up to the frame, so binding
@@ -1678,10 +1832,13 @@ class App(ctk.CTk):
         self._fill_heat(game)
         # Only rewritten when it differs: the sync tick comes through here too,
         # and a delete/insert drops the cursor out of a note being typed.
-        if p["note_entry"].get() != (game["note"] or ""):
-            p["note_entry"].delete(0, "end")
+        # get('1.0','end') would append a newline, so the comparison would
+        # never come out equal and this guard would fire - and drop the caret -
+        # on every sync tick, which is the exact stall it is here to prevent.
+        if p["note_entry"].get("1.0", "end-1c") != (game["note"] or ""):
+            p["note_entry"].delete("1.0", "end")
             if game["note"]:
-                p["note_entry"].insert(0, game["note"])
+                p["note_entry"].insert("1.0", game["note"])
         self._fill_detail_tags(game)
         # The switch remembers what the last game was read in. It used to be
         # forced back to 原文 on every fill, which threw the choice away each
@@ -1988,14 +2145,34 @@ class App(ctk.CTk):
         return [("share", btn, {"fill": "x", "padx": 18, "pady": (0, 4)})]
 
     def _build_detail_note(self, d, parts):
+        """A Textbox, not an Entry. CTkEntry wraps tkinter.Entry, which has no
+        wrapping at any setting - a review longer than the panel just scrolled
+        sideways out of view, which is what "只能在同一行里不断延伸" was. Same
+        widget and same key bindings as the 简介 editor below, so the panel has
+        one way of editing a long text rather than two.
+        """
         head = ctk.CTkLabel(d, text="评价", text_color=MUTED, font=ui_font(size=12))
-        entry = ctk.CTkEntry(d, height=32, corner_radius=8, fg_color=BG,
-                             placeholder_text="写点评价…")
-        entry.bind("<Return>", lambda e: self._set_note(e.widget.get()))
+        box = ctk.CTkTextbox(d, height=90, corner_radius=8, fg_color=BG,
+                             text_color=TEXT, border_color=CHIP, border_width=1,
+                             font=ui_font(size=12), wrap="word")
+        box.bind("<Control-Return>", lambda e: self._set_note())
+        box.bind("<Escape>", lambda e: self._cancel_note_edit())
+        row = ctk.CTkFrame(d, fg_color="transparent")
+        # The keys are not guessable - an empty box with no hint reads as the
+        # app having lost the text, and Enter inserting a newline instead of
+        # saving is exactly the surprise a hint is for.
+        ctk.CTkLabel(row, text="Ctrl+Enter 保存 · Esc 还原", text_color=MUTED,
+                     font=ui_font(size=11)).pack(side="left")
+        ctk.CTkButton(row, text="保存", height=28, width=80, corner_radius=8,
+                      fg_color=ACCENT, text_color=ON_ACCENT,
+                      hover_color=CARD_HOVER, font=ui_font(size=12),
+                      command=self._set_note).pack(side="right")
         parts["note_head"] = head
-        parts["note_entry"] = entry
+        parts["note_entry"] = box
+        parts["note_row"] = row
         return [("note_head", head, {"anchor": "w", "padx": 18, "pady": (12, 2)}),
-                ("note_entry", entry, {"fill": "x", "padx": 18})]
+                ("note_entry", box, {"fill": "x", "padx": 18}),
+                ("note_row", row, {"fill": "x", "padx": 18, "pady": (4, 0)})]
 
     def _build_detail_tags(self, d, parts):
         head = ctk.CTkFrame(d, fg_color="transparent")
@@ -2263,12 +2440,30 @@ class App(ctk.CTk):
         # worse than a sort that settles on the next redraw - and the rating
         # itself is not on the card, so there is nothing stale on screen.
 
-    def _set_note(self, text):
+    def _set_note(self):
+        """Read the box and store it.
+
+        Both callers - Ctrl+Enter and the 保存 button - read from the widget
+        here rather than passing a value in, so there is one definition of what
+        "the text" is. end-1c because a Textbox's get() ends with a newline of
+        its own making, and storing that would put a blank last line into every
+        saved review.
+        """
+        text = self._detail_parts["note_entry"].get("1.0", "end-1c").strip()
         self.selected["note"] = text
         slg_db.set_state(self.conn, self.selected["id"], note=text)
-        # The write was already immediate and already silent: Enter saved the
-        # note and nothing on screen moved, which reads as the key not working.
         self._set_progress("评价已保存" if text else "评价已清空")
+
+    def _cancel_note_edit(self):
+        """Put the stored value back, from the in-memory game rather than the
+        db: _set_note always writes through to self.selected, so the two cannot
+        disagree and this costs no query."""
+        note = self.selected.get("note") or ""
+        box = self._detail_parts["note_entry"]
+        box.delete("1.0", "end")
+        if note:
+            box.insert("1.0", note)
+        self._set_progress("评价已还原")
 
     def _share_screenshot(self):
         if not self.selected:
@@ -2421,8 +2616,11 @@ class App(ctk.CTk):
             ("补齐历史…",
              "收下日期闸门之前的老游戏。右键这颗按钮 = 取消日期闸门。",
              self.do_backfill, self._forget_sync_since),
-            ("补齐热度（%d）" % gaps["heat"] if gaps["heat"] else "热度已齐",
-             "给有数据的老游戏补上热度值。纯本地计算，不联网，几秒就完。",
+            ("补齐热度（%d）" % (gaps["metrics"] or gaps["heat"])
+             if (gaps["metrics"] or gaps["heat"]) else "热度已齐",
+             "给老游戏补上浏览/点赞/评论，再算热度。这条会联网重抓详情页，"
+             "需要梯子；每轮 %d 款、约三分钟，可随时停止，再点就接着补。"
+             % METRICS_PER_RUN,
              self.do_heat, None),
         )
         # The dialog cannot normally be opened mid-job - _start_job disables the
@@ -2437,7 +2635,7 @@ class App(ctk.CTk):
         Same shape as 同步与维护 and for the same reason: none of these is what
         the window is for, and as four more rows in the sidebar's 工具 group
         they buried the routine controls. The toolbar gear no longer lands here
-        - it opens 关于, the system-level door.
+        - it opens 设置, which holds the theme switch and a way into 关于.
 
         Each row closes this window before opening its own, so the two dialogs
         cannot stack - and the next visit rebuilds the list, which is what keeps
@@ -2468,6 +2666,48 @@ class App(ctk.CTk):
         )
         state = "disabled" if self.busy else "normal"
         self._dialog_rows(win, entries, state=state)
+
+    def open_settings(self):
+        """The gear's door: the theme switch, with 关于 one row inside it.
+
+        The theme switch used to sit in the toolbar, in the row the sort
+        controls now occupy. It is a choice you make once and forget, and the
+        three buttons it needed were the widest thing in the header - so it
+        moved in here and the sort controls moved up into the space, which also
+        left room for the gear beside them.
+        """
+        win = self._new_dialog("设置", "420x310")
+        ctk.CTkLabel(win, text="主题", text_color=TEXT, anchor="w",
+                     font=ui_font(size=14, weight="bold")).pack(
+            fill="x", padx=16, pady=(16, 0))
+        switch = ctk.CTkSegmentedButton(
+            win, values=[_THEME_LABELS[m] for m in ("light", "dark", "system")],
+            height=34, corner_radius=8, fg_color=CARD, selected_color=ACCENT,
+            selected_hover_color=ACCENT, unselected_color=CARD,
+            unselected_hover_color=CARD_HOVER, text_color=TEXT,
+            font=ui_font(size=13),
+            command=lambda label: self._pick_theme_from(win, label))
+        switch.pack(fill="x", padx=16, pady=(8, 0))
+        switch.set(_THEME_LABELS[self.theme_mode])
+        ctk.CTkLabel(win, text="「跟随系统」每 5 秒采样一次 Windows 的浅色/深色设置，"
+                               "所以会有一小段延迟；手动选浅色或深色则会被记住。",
+                     text_color=MUTED, font=ui_font(size=11), justify="left",
+                     anchor="w", wraplength=380).pack(fill="x", padx=16, pady=(6, 14))
+        self._dialog_rows(win, (
+            ("关于本软件…",
+             "版本信息、检查软件更新、GitHub 主页、反馈邮箱、数据目录。",
+             self.open_about, None),
+        ))
+
+    def _pick_theme_from(self, win, label):
+        """Close the settings dialog, then change the theme.
+
+        Order matters: _apply_theme tears the whole window down and builds it
+        again, so a dialog left open across that call would be the one thing on
+        screen the new palette never reached.
+        """
+        win.destroy()
+        self._on_theme_pick(label)
 
     def open_about(self):
         """The system-level door: version, update check, links, and the data dir.
@@ -2877,14 +3117,17 @@ class App(ctk.CTk):
              "在它上面点右键可以彻底取消日期限制，之后普通「同步」也会收老游戏。\n"
              "「下载封面」：补下缺的封面缩略图。正常「同步」自带封面，这个只是用来"
              "补老库里的存量欠账，或者哪张图当时没抓到。\n"
-             "「补齐热度」：热度是后加的功能，早先入库的老游戏没算过。点它给这批"
-             "老游戏补上热度值，纯本地计算，不联网，几秒就完。\n"
+             "「补齐热度」：早先入库的老游戏没抓到浏览/点赞/评论，热度就一直很低。"
+             "点它会把这几款游戏的详情页重新抓一遍，补齐三项值再算热度——"
+             "这一步是联网的，需要梯子，每轮 %d 款、约三分钟，可以随时停止，"
+             "再点就接着补。\n"
              "「全量重建」：按标签把站点重爬一遍，慢得多，拿到的数据和「同步」一样，"
-             "只有增量同步明显出问题时才需要跑。")
+             "只有增量同步明显出问题时才需要跑。" % METRICS_PER_RUN)
 
         body("Q：右上角那颗齿轮是干什么的？", color=MUTED)
-        body("A：打开「关于」——版本信息、检查软件更新、GitHub 主页、反馈邮箱、"
-             "数据目录都在里面。设一次的工具在左侧栏的「更多工具…」里，"
+        body("A：打开「设置」——浅色/深色/跟随系统在这里切，"
+             "「关于本软件…」也在里面（版本信息、检查软件更新、GitHub 主页、"
+             "反馈邮箱、数据目录）。设一次的工具在左侧栏的「更多工具…」里，"
              "和这个是两个不同的门。")
 
         body("Q：封面显示灰色方块？", color=MUTED)
@@ -3279,22 +3522,40 @@ class App(ctk.CTk):
             self.queue.put(("covers_done", self._fail("封面下载", exc)))
 
     def do_heat(self):
+        """Two passes under one button: recompute locally, then re-fetch.
+
+        The local pass is seconds and the network pass is minutes, so the
+        order matters - and it has to keep running even when there is nothing
+        left to recompute, which is why the gate tests both counts rather
+        than only heat.
+        """
         if self.busy:
             return
         gaps = slg_db.data_gaps(self.conn)
-        if not gaps["heat"]:
+        if not (gaps["metrics"] or gaps["heat"]):
             self._set_progress("热度都补齐了")
             return
         self._run_job("补热度…", self._heat_worker)
 
     def _heat_worker(self):
+        import slg_scrape
         try:
             with slg_db.session() as conn:
-                done = slg_db.backfill_heat(
+                recomputed = slg_db.backfill_heat(
                     conn, log=self._log,
                     on_progress=lambda d, total: self.queue.put(
+                        ("progress", "重算热度 %d/%d" % (d, total))))
+                if recomputed:
+                    self.queue.put(("progress", "重算热度完成 · %d 款" % recomputed))
+                fetcher = slg_scrape.Fetcher(log=self._log,
+                                             should_stop=self._stop.is_set)
+                summary = slg_scrape.backfill_metrics(
+                    conn, fetcher, limit=METRICS_PER_RUN, log=self._log,
+                    should_stop=self._stop.is_set,
+                    on_progress=lambda d, total, url: self.queue.put(
                         ("progress", "补齐热度 %d/%d" % (d, total))))
-            self.queue.put(("done", "补齐热度完成 · %d 款" % done))
+            self.queue.put(("done", "补齐热度 · 补全 %d 款 · 还剩 %d 款"
+                            % (summary["filled"], summary["remaining"])))
         except Exception as exc:  # noqa: BLE001
             self.queue.put(("done", self._fail("补齐热度", exc)))
 

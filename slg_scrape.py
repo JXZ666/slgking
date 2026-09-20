@@ -68,9 +68,14 @@ _TITLE_LINK = re.compile(
 _COVER = re.compile(r'data-src="(https://dikgames\.com/wp-content/uploads/[^"]+)"')
 _PUBDATE = re.compile(r'itemprop="datePublished"\s+datetime="([^"]+)"')
 _RATING = re.compile(r'"ratingValue":\s*"?([\d.]+)')
-_VIEWS = re.compile(r'gp-meta-views">([\d,]+)\s+views<')
-_LIKES = re.compile(r'gp-meta-likes">([\d,]+)\s+likes<')
-_COMMENTS = re.compile(r'comments-link"[^>]*>\s*([\d,]+)\s*Comments<')
+# The noun is singular at one: the site writes '1 view', '0 like', '1 Comment'
+# and 'No Comments' for the low counts that most of the catalogue sits at. A
+# hardcoded plural matched none of those, so the three columns stayed NULL for
+# every game that was not already popular - and because the rating comes from
+# JSON-LD and always matched, a quiet game showed a score and nothing else.
+_VIEWS = re.compile(r'gp-meta-views">([\d,]+)\s+views?<')
+_LIKES = re.compile(r'gp-meta-likes">([\d,]+)\s+likes?<')
+_COMMENTS = re.compile(r'comments-link"[^>]*>\s*([\d,]+|No)\s+Comments?<', re.I)
 _VERSION_LINE = re.compile(r'Version:\s*([^<\n]{0,24})')
 _DEV_LINE = re.compile(r'Developer:\s*([^<\n]{0,40})')
 # Elementor numbers its tab instances per page, so the id is not a site-wide
@@ -194,6 +199,21 @@ def _parse_int(text):
     if not text:
         return None
     return int(text.replace(",", ""))
+
+
+def _parse_count(text):
+    """Like _parse_int, but the site's word for zero reads as zero.
+
+    A count element that is present and says 'No Comments' is a real
+    0, and storing NULL for it would be wrong in the one place it matters:
+    the metrics backfill would re-fetch the page forever. Kept separate from
+    _parse_int, whose None means 'the element was not there at all' - that
+    distinction is what lets a genuine layout change stay visible as a gap
+    instead of being quietly recorded as zero.
+    """
+    if text and text.strip().lower() == "no":
+        return 0
+    return _parse_int(text)
 
 
 _clean_title = slg_db.clean_site_title
@@ -335,9 +355,9 @@ def parse_detail_page(page):
         "cover_url": _sized_cover(cover.group(1)) if cover else None,
         "title": _clean_title(_clean(title.group(1))) if title else None,
         "last_updated": published.group(1)[:10] if published else None,
-        "site_views": _parse_int(views.group(1)) if views else None,
-        "site_likes": _parse_int(likes.group(1)) if likes else None,
-        "site_comments": _parse_int(comments.group(1)) if comments else None,
+        "site_views": _parse_count(views.group(1)) if views else None,
+        "site_likes": _parse_count(likes.group(1)) if likes else None,
+        "site_comments": _parse_count(comments.group(1)) if comments else None,
     }
 
 
@@ -814,6 +834,56 @@ def enrich(conn, fetcher, limit=200, log=print, on_progress=None,
     return {"filled": done, "covers": covers}
 
 
+def backfill_metrics(conn, fetcher, limit=500, log=print, on_progress=None,
+                     should_stop=None):
+    """Re-read detail pages for games whose popularity counts are missing.
+
+    Separate from enrich rather than a flag on it: the WHERE differs, this
+    needs one request per game where enrich needs two (it also fetches the
+    cover), it writes three columns and nothing else, and enrich's
+    rollback-on-stop cover unwind has no meaning here. Threading a
+    metrics_only flag through enrich would put a conditional in each of those.
+
+    Counts already in the row are not a reason to skip a game - a page can
+    carry views but not likes. Only the row's own gaps decide the queue, and
+    _metrics_gap_sql is the single definition of what a gap is, shared with
+    the number the maintenance dialog shows.
+
+    A game that parses to no counts at all is counted and reported rather
+    than silently seeded with zeros: absent metrics are the symptom the
+    regex fix was for, and inventing a 0 would hide the next layout change
+    exactly the way the old plural-only patterns hid this one.
+    """
+    rows = slg_db.metrics_gap_rows(conn, limit)
+    done, missing = 0, 0
+    for row in rows:
+        if should_stop and should_stop():
+            break
+        page = fetcher.get(row["url"])
+        if not page:
+            slg_db.note_fetch_failure(conn, row["id"])
+            conn.commit()
+            continue
+        slg_db.clear_fetch_failures(conn, row["id"])
+        detail = parse_detail_page(page)
+        if (detail["site_views"] is None and detail["site_likes"] is None
+                and detail["site_comments"] is None):
+            missing += 1
+            log("  ! %s 三项指标都没解析到（站点结构可能变了）" % row["slug"])
+        slg_db.upsert_detail(
+            conn, row["id"], site_views=detail["site_views"],
+            site_likes=detail["site_likes"],
+            site_comments=detail["site_comments"])
+        conn.commit()
+        done += 1
+        if on_progress:
+            on_progress(done, len(rows), row["url"])
+    remaining = slg_db.metrics_gap_count(conn)
+    log("热度指标补全 %d/%d · 未解析到 %d 款 · 还剩 %d 款"
+        % (done, len(rows), missing, remaining))
+    return {"filled": done, "missing": missing, "remaining": remaining}
+
+
 # --- CLI -----------------------------------------------------------------------
 
 def _main(argv=None):
@@ -840,6 +910,8 @@ def _main(argv=None):
     parser.add_argument("--max-pages", type=int, default=None)
     parser.add_argument("--enrich", type=int, default=0, metavar="N",
                         help="额外补全 N 款游戏的详情（评分/简介）")
+    parser.add_argument("--metrics", type=int, default=0, metavar="N",
+                        help="为 N 款缺数据的游戏重抓浏览/点赞/评论")
     parser.add_argument("--covers", type=int, default=0, metavar="N",
                         help="额外下载 N 张封面")
     parser.add_argument("--list-tags", action="store_true", help="列出全部标签")
@@ -896,6 +968,8 @@ def _main(argv=None):
             download_covers(conn, limit=args.covers, log=print)
         if args.enrich:
             enrich(conn, fetcher, args.enrich)
+        if args.metrics:
+            backfill_metrics(conn, fetcher, args.metrics)
     finally:
         conn.close()
     return 0

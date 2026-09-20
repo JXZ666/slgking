@@ -62,8 +62,11 @@ def main():
     app = slg_gui.App(notify=False)
     app.geometry("1280x820")
     app.update()
+    # len(app._card_pool), not list.winfo_children(): the empty-state label is
+    # built once as a child of the list and stays there unpacked, so counting
+    # children is always one more than the number of cards.
     print("rows from find_games: %d, cards on screen: %d"
-          % (len(app.rows), len(app.list.winfo_children())))
+          % (len(app.rows), len(app._card_pool)))
 
     def report(title, fn, rounds=3):
         print("  %-16s: %7.1f ms" % (title, timeit(app, fn, rounds)))
@@ -79,39 +82,60 @@ def main():
         app._card_pool, app._pool_gid = [], []
         app._cards, app._card_meta = {}, {}
         app._card_title, app._widget_gid = {}, {}
-        app._more_btn = app._empty_label = None
+        app._pager = app._pager_parts = app._empty_label = None
+        app.page = 1
         app.refresh()
 
-    print("\n--- cold build, %d cards from nothing ---" % slg_gui.PAGE)
+    pages = -(-len(app.rows) // slg_gui.PAGE_SIZE)
+    print("\n--- cold build, %d cards from nothing ---" % slg_gui.PAGE_SIZE)
     report("cold render", cold, rounds=2)
-    print("  Tk children     : %d" % len(app.list.winfo_children()))
+    print("  cards built     : %d" % len(app._card_pool))
 
-    for shown in (slg_gui.PAGE, 480):
-        # set_view and toggle_tag both reset `shown` back to PAGE, so `shown` is
-        # set after the view, not before. Sorting keeps `shown`, which is why it
-        # is the operation measured at both sizes.
-        app.set_view(None)
-        app.shown = shown
-        app.refresh()
-        app.update()
-        print("\n--- %d cards on screen ---" % shown)
-        print("  Tk children     : %d" % len(app.list.winfo_children()))
+    # PAGE_SIZE is a fit, not a preference, so it is measured here: a card is
+    # cover-driven, the cover is scaled by the display's factor, and the page
+    # only looks right if the whole page lands above the fold. Scrolling is what
+    # pagination replaced, so slack going negative is a regression even though
+    # nothing raises.
+    viewport = app.list._parent_canvas.winfo_height()
+    card_h = app._card_pool[0]["frame"].winfo_height() + 4  # + the card's pady
+    print("  scaling         : %.2f, card %d px, viewport %d px"
+          % (app.list._get_widget_scaling(), card_h, viewport))
+    print("  page slack      : %d px (%d of %d cards fit)"
+          % (viewport - card_h * slg_gui.PAGE_SIZE, viewport // card_h,
+             slg_gui.PAGE_SIZE))
+    print("  pager visible   : %s" % bool(app._pager.winfo_ismapped()))
 
-        labels = itertools.cycle(SORT_LABELS)
-        report("sort change", lambda: app._on_sort(next(labels)))
-        report("view switch", lambda: app.set_view("want"))
 
-    # 显示更多 appends a page, so it pays a cold build for that page - the pool
-    # has nothing to reuse for widgets that do not exist yet. This is the last
-    # remaining lag the pool cannot remove.
-    print("\n--- 显示更多, one press at a time ---")
+    # One page is the whole list now, so the per-interaction numbers are what
+    # the user feels. Pagination also turns the old "how many cards are on
+    # screen" knob into a fixed cost: refresh() always slices PAGE_SIZE rows.
     app.set_view(None)
-    app.shown = slg_gui.PAGE
+    app.page = 1
     app.refresh()
     app.update()
-    for page in range(1, 5):
-        report("press %d" % page, app._more, rounds=1)
+    print("\n--- %d games over %d pages, %d per page ---"
+          % (len(app.rows), pages, slg_gui.PAGE_SIZE))
     print("  cards on screen : %d" % len(app._card_pool))
+
+    labels = itertools.cycle(SORT_LABELS)
+    report("sort change", lambda: app._on_sort(next(labels)))
+    report("view switch", lambda: app.set_view("want"))
+
+    # Turning the page is the cost the old scrolling list paid on every wheel
+    # tick. The pool replaces all six widgets rather than building new ones, so
+    # this should land near a sort change rather than near a cold build.
+    app.set_view(None)
+    app.page = 1
+    app.refresh()
+    app.update()
+    print("\n--- page turning ---")
+    report("page next", lambda: app._goto_page(app.page + 1))
+    report("page prev", lambda: app._goto_page(app.page - 1))
+    # The worst case a typed page number can ask for: straight to page 100, so
+    # find_games has to walk 594 rows to reach the six it returns.
+    report("jump to 100", lambda: app._goto_page(100))
+    print("  cards on screen : %d" % len(app._card_pool))
+    print("  page after a jump: %d of %d" % (app.page, pages))
 
     app.destroy()
 

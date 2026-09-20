@@ -643,6 +643,33 @@ def missing_cover_files(conn, ttl=_COVER_GAP_TTL):
         return count
 
 
+# One definition of "this game's popularity counts are still unknown", shared
+# by the number the maintenance dialog shows and the queue the backfill walks.
+# Defined twice they drift, and the dialog ends up reading 热度已齐 while rows
+# sit unread - which is the shape of the bug this counter exists to expose.
+_METRICS_GAP_SQL = (
+    "FROM games WHERE url IS NOT NULL AND fetch_failures < 3"
+    " AND (site_views IS NULL OR site_likes IS NULL OR site_comments IS NULL)")
+
+
+def metrics_gap_count(conn):
+    return conn.execute("SELECT COUNT(*) " + _METRICS_GAP_SQL).fetchone()[0]
+
+
+def metrics_gap_rows(conn, limit=None):
+    """Games whose views/likes/comments are still unknown.
+
+    fetch_failures leads the ordering because a page that failed last run is
+    the likeliest to fail again, and sorting it behind the healthy rows keeps
+    one dead page from consuming the head of every run.
+    """
+    sql = ("SELECT id, slug, url " + _METRICS_GAP_SQL
+           + " ORDER BY fetch_failures ASC, last_updated DESC")
+    if limit is None:
+        return conn.execute(sql).fetchall()
+    return conn.execute(sql + " LIMIT ?", (limit,)).fetchall()
+
+
 def data_gaps(conn):
     """How much of the catalogue is still missing each enrichable field.
 
@@ -663,6 +690,7 @@ def data_gaps(conn):
         "heat": one("SELECT COUNT(*) FROM games WHERE heat IS NULL"
                     " AND (rating IS NOT NULL OR site_views IS NOT NULL"
                     "      OR site_likes IS NOT NULL OR site_comments IS NOT NULL)"),
+        "metrics": metrics_gap_count(conn),
     }
 
 

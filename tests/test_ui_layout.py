@@ -484,17 +484,62 @@ class SidebarFit(unittest.TestCase):
                 self.app.refresh()
 
     def test_changing_sort_resets_the_page_cursor(self):
-        # Every other state-change handler resets shown; _on_sort was the one
-        # that did not, so a sort change kept the old "load more" cursor.
+        # Every other state-change handler resets the page; _on_sort was the one
+        # that did not, so a sort change left the user deep in a list whose
+        # order had just changed under them.
         try:
             with mock.patch.object(slg_db, "find_games", return_value=[]):
-                self.app.shown = 10 * slg_gui.PAGE
+                self.app.page = 3
                 self.app._on_sort("名称")
-                self.assertEqual(self.app.shown, slg_gui.PAGE)
+                self.assertEqual(self.app.page, 1)
         finally:
             with mock.patch.object(slg_db, "find_games", return_value=[]):
                 self.app.sort = "score"
                 self.app.sort_desc = slg_gui.SORT_DEFAULT_DESC["score"]
+                self.app.refresh()
+
+    def test_turning_the_page_clamps_to_the_catalogue(self):
+        # A page number past the end is a click on 下一页 from the last page, or
+        # a typed jump. Either way it lands on a real page rather than an empty
+        # one - _page_slice() of an out-of-range page is [] and the list would
+        # go blank with no way back.
+        try:
+            games = [self._fake_game(i) for i in range(20)]
+            with mock.patch.object(slg_db, "find_games", return_value=games):
+                with mock.patch.object(self.app, "_render_filterbar"), \
+                        mock.patch.object(self.app, "_render_stats"), \
+                        mock.patch.object(self.app, "_render_detail_if_stale"):
+                    pages = self.app._page_count()
+                    self.app.page = pages + 5
+                    self.app._clamp_page()
+                    self.assertEqual(self.app.page, pages)
+                    self.app.page = 0
+                    self.app._clamp_page()
+                    self.assertEqual(self.app.page, 1)
+        finally:
+            with mock.patch.object(slg_db, "find_games", return_value=[]):
+                self.app.page = 1
+                self.app.refresh()
+
+    def test_a_page_holds_exactly_the_page_size(self):
+        # The slice and the pool have to agree: _sync_cards indexes the pool by
+        # position in the list it is handed, so a slice that disagreed with
+        # PAGE_SIZE would either leave cards hidden or build more than a page.
+        try:
+            games = [self._fake_game(i) for i in range(slg_gui.PAGE_SIZE * 3)]
+            with mock.patch.object(slg_db, "find_games", return_value=games):
+                with mock.patch.object(self.app, "_render_filterbar"), \
+                        mock.patch.object(self.app, "_render_stats"), \
+                        mock.patch.object(self.app, "_render_detail_if_stale"):
+                    self.app.page = 2
+                    self.app.refresh()
+                    page = self.app._page_slice()
+                    self.assertEqual(len(page), slg_gui.PAGE_SIZE)
+                    self.assertEqual(len(self.app._card_pool), slg_gui.PAGE_SIZE)
+                    self.assertEqual(page[0]["id"], games[slg_gui.PAGE_SIZE]["id"])
+        finally:
+            with mock.patch.object(slg_db, "find_games", return_value=[]):
+                self.app.page = 1
                 self.app.refresh()
 
     def test_the_detail_panel_carries_the_no_download_notice(self):
@@ -720,7 +765,7 @@ class SidebarFit(unittest.TestCase):
         self.app._card_meta = {}
         self.app._card_title = {}
         self.app._card_slot = {}
-        self.app._more_btn = None
+        self.app._pager = self.app._pager_parts = None
         self.app._empty_label = None
         self.app._rendered_ids = []
         self.app.selected = None
@@ -757,8 +802,16 @@ class SidebarFit(unittest.TestCase):
                                   return_value={g["id"]: ["netorare"] for g in games}), \
                 mock.patch.object(self.app, "_render_filterbar"), \
                 mock.patch.object(self.app, "_render_stats"), \
-                mock.patch.object(self.app, "_render_detail_if_stale"):
-            self.app.shown = len(games)
+                mock.patch.object(self.app, "_render_detail_if_stale"), \
+                mock.patch.object(slg_gui, "PAGE_SIZE",
+                                  max(slg_gui.PAGE_SIZE, len(games))):
+            # Page size is widened to the fixture rather than the fixture cut
+            # down to the page: these tests reach for _card_pool[5] and
+            # _card_pool[7], and a page of six would leave those slots
+            # unbuilt. The app never renders more than a page - that is the
+            # whole change - so the mock is the only way to say "show all of
+            # this" here.
+            self.app.page = 1
             self.app.refresh()
         # Tk only delivers a synthesised click to a widget it has already
         # mapped, and a freshly built card is not mapped until the geometry
@@ -771,7 +824,7 @@ class SidebarFit(unittest.TestCase):
         # measuring these fake cards instead.
         with mock.patch.object(self.app, "_render_stats"), \
                 mock.patch.object(self.app, "_render_detail_if_stale"):
-            self.app.shown = slg_gui.PAGE
+            self.app.page = 1
             self.app.refresh()
 
     def _click(self, card):
@@ -849,9 +902,11 @@ class SidebarFit(unittest.TestCase):
             self._finish()
 
     def test_repeated_empty_and_nonempty_renders_do_not_leak_widgets(self):
-        # Both the "no matches" label and the 显示更多 button used to be built
+        # Both the "no matches" label and its counterpart used to be built
         # fresh on every render and left behind on the ones that did not need
         # them, so a few searches grew the list's child count without bound.
+        # The pager is outside the list for this reason too: it is a sibling in
+        # the body grid, not a child that comes and goes with the page.
         self._pool_reset()
         try:
             self._render([self._fake_game(i) for i in range(4)])
@@ -870,7 +925,7 @@ class SidebarFit(unittest.TestCase):
     def _select(self, game):
         """Put `game` in the panel with the fake catalogue behind it."""
         self.app.rows = [game]
-        self.app.shown = 1
+        self.app.page = 1
         self.app.select(game)
 
     def _panel_game(self, gid, **overrides):
@@ -928,7 +983,7 @@ class SidebarFit(unittest.TestCase):
         try:
             bare = self._panel_game(1, overview="", url="")
             self.app.rows = [bare]
-            self.app.shown = 1
+            self.app.page = 1
             with mock.patch.object(slg_gui.threading, "Thread") as thread:
                 self.app.select(bare)
                 self.app._set_overview_lang(bare, "中文")
@@ -998,7 +1053,13 @@ class SidebarFit(unittest.TestCase):
             self.app._set_overview_lang(game, "原文")
             self.assertEqual(self.app._detail_parts["title"].cget("text"),
                              game["title"])
-            self.app._set_overview_lang(game, "中文")
+            # Switching to 中文 with nothing cached would start a real
+            # translation thread, and its failure lands in app.queue whenever
+            # it feels like it - usually after this test has torn down, where
+            # it shows up as an extra _overview_result in whichever test runs
+            # next. Nothing here is about the request, so it does not run.
+            with mock.patch.object(slg_gui.threading, "Thread"):
+                self.app._set_overview_lang(game, "中文")
             self.assertEqual(self.app._detail_parts["title"].cget("text"),
                              "手改的名字")
 
@@ -1011,6 +1072,90 @@ class SidebarFit(unittest.TestCase):
         finally:
             slg_gui.load_title_translations(self.app.conn)
             self.app.selected = None
+            self._finish()
+
+    def test_a_multi_line_note_round_trips(self):
+        # The 评价 field is a Textbox now. It was a CTkEntry, which wraps
+        # tkinter.Entry and so could not wrap at all - a review longer than
+        # the panel just scrolled sideways out of view.
+        self._pool_reset()
+        gid = None
+        try:
+            # _set_note writes through slg_db.set_state, and state.game_id is a
+            # foreign key to games(id) - the made-up 9000 the other panel tests
+            # use is refused outright. The suite points LOCALAPPDATA at a temp
+            # directory, so this row is not the user's catalogue, and it is
+            # deleted below so a later test counting the list does not see it.
+            gid, _ = slg_db.upsert_game(self.app.conn, "note-roundtrip",
+                                        "https://x/note-roundtrip", "Note Roundtrip")
+            self.app.conn.commit()
+            game = self._panel_game(0, note="第一行\n第二行")
+            game["id"] = gid
+            self._select(game)
+            box = self.app._detail_parts["note_entry"]
+            self.assertEqual(box.get("1.0", "end-1c"), "第一行\n第二行")
+            box.delete("1.0", "end")
+            box.insert("1.0", "改过的\n两行\n三行")
+            self.app._set_note()
+            # On self.selected, not `game`: select() keeps a dict() copy so the
+            # status and rating buttons can write back into a mutable object.
+            self.assertEqual(self.app.selected["note"], "改过的\n两行\n三行")
+            stored = slg_db.get_state(self.app.conn, gid)["note"]
+            self.assertEqual(stored, "改过的\n两行\n三行")
+            # No trailing newline: a Textbox's get() ends with one it made
+            # itself, and storing it puts a blank last line in every review.
+            self.assertFalse(stored.endswith("\n"))
+        finally:
+            if gid is not None:
+                self.app.conn.execute("DELETE FROM games WHERE id = ?", (gid,))
+                self.app.conn.commit()
+            self._finish()
+
+    def test_escape_puts_the_stored_note_back(self):
+        self._pool_reset()
+        try:
+            game = self._panel_game(0, note="原来的")
+            self._select(game)
+            box = self.app._detail_parts["note_entry"]
+            box.delete("1.0", "end")
+            box.insert("1.0", "打了一半又反悔")
+            self.app._cancel_note_edit()
+            self.assertEqual(box.get("1.0", "end-1c"), "原来的")
+        finally:
+            self._finish()
+
+    def test_the_note_field_wraps(self):
+        # What the bug report was actually about. CTkEntry has no wrap
+        # setting to give; the Textbox has one, and word wrapping is it.
+        self._pool_reset()
+        try:
+            self._select(self._panel_game(0))
+            box = self.app._detail_parts["note_entry"]
+            self.assertEqual(str(box.cget("wrap")), "word")
+        finally:
+            self._finish()
+
+    def test_the_note_block_says_how_to_save_it(self):
+        # Asked for by name: tell the user that this is how it saves. The key
+        # is not guessable - Enter inserts a newline in a Textbox where it used
+        # to submit an Entry - so without the hint a written review looks
+        # unsavable and the box reads as broken.
+        self._pool_reset()
+        try:
+            self._select(self._panel_game(0))
+            row = self.app._detail_parts["note_row"]
+            texts = []
+            for child in row.winfo_children():
+                try:
+                    texts.append(child.cget("text"))
+                except Exception:  # noqa: BLE001 - most widgets have no text
+                    pass
+            self.assertTrue(any("Ctrl+Enter" in t for t in texts if t),
+                            "没有任何地方告诉用户怎么保存：%s" % texts)
+            self.assertIn("保存", texts, "没有保存按钮：%s" % texts)
+            # And the block is actually on screen, not just built.
+            self.assertIn("note_row", self.app._detail_shown)
+        finally:
             self._finish()
 
     def test_clearing_a_hand_typed_name_brings_the_translation_back(self):
@@ -1197,8 +1342,8 @@ class SidebarFit(unittest.TestCase):
             # refresh that follows it, so what matters is that the one in hand
             # is alive rather than a frame from the old window.
             self.assertTrue(self.app._empty_label.winfo_exists())
-            self.assertTrue(self.app._more_btn is None
-                            or self.app._more_btn.winfo_exists())
+            self.assertTrue(self.app._pager is None
+                            or self.app._pager.winfo_exists())
         finally:
             with mock.patch.object(slg_db, "set_pref"):
                 self.app._apply_theme(original)
@@ -1446,7 +1591,7 @@ class SidebarFit(unittest.TestCase):
         try:
             with mock.patch.object(slg_db, "data_gaps",
                                    return_value={"covers": 7, "overview": 3,
-                                                 "heat": 5}):
+                                                 "heat": 0, "metrics": 5}):
                 self.app.open_maintenance()
                 win = self._dialog("同步与维护")
                 self.assertIsNotNone(win, "维护弹窗没打开")

@@ -236,5 +236,53 @@ class ParseDetailMetrics(unittest.TestCase):
         self.assertEqual(got["site_views"], 1234567)
 
 
+class ParseDetailMetricsAtOne(unittest.TestCase):
+    """The counters at the low end, where the site drops the plural.
+
+    Verbatim from the live pages, and the reason most of the catalogue had a
+    rating and nothing else: 'views' / 'likes' / 'Comments' were hardcoded,
+    '1 view' and '0 like' and 'No Comments' matched none of them, and a failed
+    match is a None that upsert_detail will not write over the NULL.
+    """
+
+    def _page(self, views, likes, comments):
+        return (
+            '<html><body>'
+            '<span class="gp-post-meta gp-meta-views">%s</span>'
+            '<span class="gp-post-meta gp-meta-likes">%s</span>'
+            '<a href="https://dikgames.com/g/#comments" class="comments-link" >%s</a>'
+            '</body></html>' % (views, likes, comments))
+
+    def test_singular_forms_are_read(self):
+        got = slg_scrape.parse_detail_page(self._page("1 view", "1 like", "1 Comment"))
+        self.assertEqual(got["site_views"], 1)
+        self.assertEqual(got["site_likes"], 1)
+        self.assertEqual(got["site_comments"], 1)
+
+    def test_a_zero_like_is_a_zero_not_a_gap(self):
+        # 0 and NULL are different answers: NULL puts the row back in the
+        # backfill queue forever, because nothing can tell "no likes" from
+        # "could not read the likes".
+        got = slg_scrape.parse_detail_page(self._page("0 view", "0 like", "No Comments"))
+        self.assertEqual(got["site_views"], 0)
+        self.assertEqual(got["site_likes"], 0)
+        self.assertEqual(got["site_comments"], 0)
+
+    def test_the_no_wording_is_read_in_any_case(self):
+        got = slg_scrape.parse_detail_page(self._page("1 view", "0 like", "no comments"))
+        self.assertEqual(got["site_comments"], 0)
+
+    def test_an_absent_element_is_still_a_gap(self):
+        # The other half of the contract: the site omitting the span must stay
+        # NULL so the next layout change shows up as a gap rather than as a
+        # catalogue that quietly reads zero everywhere.
+        got = slg_scrape.parse_detail_page(
+            '<html><body><span class="gp-post-meta gp-meta-views">1 view</span>'
+            '</body></html>')
+        self.assertEqual(got["site_views"], 1)
+        self.assertIsNone(got["site_likes"])
+        self.assertIsNone(got["site_comments"])
+
+
 if __name__ == "__main__":
     unittest.main()

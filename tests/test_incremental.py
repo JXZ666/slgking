@@ -799,5 +799,149 @@ class Heat(unittest.TestCase):
         self.assertEqual(slg_db.data_gaps(self.conn)["heat"], 0)
 
 
+class MetricsGaps(unittest.TestCase):
+    """The counter and the queue behind 补齐热度 have to be the same set.
+
+    Defined separately they drift, and the dialog ends up reading 热度已齐
+    while rows sit unread - which is what the old local-only backfill did,
+    because it cleared the counter without ever fetching anything.
+    """
+
+    def setUp(self):
+        self.conn = slg_db.connect(":memory:")
+        self.gid, _ = slg_db.upsert_game(self.conn, slug="g", url="u", title="G")
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_a_row_with_no_metrics_is_a_gap(self):
+        self.assertEqual(slg_db.metrics_gap_count(self.conn), 1)
+        self.assertEqual([r["id"] for r in slg_db.metrics_gap_rows(self.conn)],
+                         [self.gid])
+
+    def test_partial_metrics_are_still_a_gap(self):
+        # Views alone is the common shape: the page carried one counter and
+        # not the others, so the row has to stay in the queue.
+        slg_db.upsert_detail(self.conn, self.gid, site_views=48300)
+        self.assertEqual(slg_db.metrics_gap_count(self.conn), 1)
+
+    def test_all_three_metrics_close_the_gap(self):
+        slg_db.upsert_detail(self.conn, self.gid, site_views=48300,
+                             site_likes=0, site_comments=0)
+        self.assertEqual(slg_db.metrics_gap_count(self.conn), 0)
+        self.assertEqual(slg_db.metrics_gap_rows(self.conn), [])
+
+    def test_a_parked_row_drops_out_of_the_queue(self):
+        for _ in range(3):
+            slg_db.note_fetch_failure(self.conn, self.gid)
+        self.conn.commit()
+        self.assertEqual(slg_db.metrics_gap_count(self.conn), 0)
+
+    def test_limit_bounds_the_run(self):
+        for i in range(5):
+            slg_db.upsert_game(self.conn, slug="s%d" % i, url="u%d" % i,
+                               title="T%d" % i)
+        self.conn.commit()
+        self.assertEqual(len(slg_db.metrics_gap_rows(self.conn, limit=2)), 2)
+        self.assertEqual(slg_db.metrics_gap_count(self.conn), 6)
+
+
+class BackfillMetrics(unittest.TestCase):
+    """slg_scrape.backfill_metrics: one request per game, no covers."""
+
+    def setUp(self):
+        self.conn = slg_db.connect(":memory:")
+        self.gid, _ = slg_db.upsert_game(self.conn, slug="g", url="https://dikgames.com/g/",
+                                         title="G")
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _page(self, views, likes, comments):
+        return ('<html><body>'
+                '<span class="gp-post-meta gp-meta-views">%s</span>'
+                '<span class="gp-post-meta gp-meta-likes">%s</span>'
+                '<a href="https://dikgames.com/g/#comments" class="comments-link" >%s</a>'
+                '</body></html>' % (views, likes, comments))
+
+    def _fetcher(self, pages):
+        fetcher = mock.Mock()
+        fetcher.get = lambda url: pages.get(url)
+        return fetcher
+
+    def _row(self):
+        return self.conn.execute(
+            "SELECT site_views, site_likes, site_comments, heat FROM games"
+            " WHERE id = ?", (self.gid,)).fetchone()
+
+    def test_it_writes_the_three_counters_and_the_heat(self):
+        pages = {"https://dikgames.com/g/": self._page("48,300 views",
+                                                       "25 likes", "12 Comments")}
+        summary = slg_scrape.backfill_metrics(
+            self.conn, self._fetcher(pages), log=lambda *_: None)
+        self.assertEqual(summary["filled"], 1)
+        self.assertEqual(summary["remaining"], 0)
+        row = self._row()
+        self.assertEqual((row["site_views"], row["site_likes"],
+                          row["site_comments"]), (48300, 25, 12))
+        # upsert_detail recomputes heat, so the column follows for free.
+        self.assertEqual(row["heat"], slg_db.compute_heat(None, 48300, 25, 12))
+
+    def test_the_singular_forms_reach_the_database(self):
+        # End to end for the bug that started this: the parse now yields 0 and
+        # 1, so the column stops being NULL and the row leaves the queue.
+        pages = {"https://dikgames.com/g/": self._page("1 view", "0 like",
+                                                       "No Comments")}
+        summary = slg_scrape.backfill_metrics(
+            self.conn, self._fetcher(pages), log=lambda *_: None)
+        self.assertEqual(summary["filled"], 1)
+        self.assertEqual(summary["remaining"], 0)
+        row = self._row()
+        self.assertEqual((row["site_views"], row["site_likes"],
+                          row["site_comments"]), (1, 0, 0))
+
+    def test_a_page_with_nothing_parsed_is_counted_and_stays_a_gap(self):
+        # The honest outcome when the site changes shape: reported, not a
+        # silent zero, and the row stays in the queue so the next run tries
+        # again instead of the count claiming success.
+        pages = {"https://dikgames.com/g/": "<html><body>nope</body></html>"}
+        summary = slg_scrape.backfill_metrics(
+            self.conn, self._fetcher(pages), log=lambda *_: None)
+        self.assertEqual(summary["filled"], 1)
+        self.assertEqual(summary["missing"], 1)
+        self.assertEqual(summary["remaining"], 1)
+
+    def test_a_dead_page_is_noted_as_a_failure(self):
+        summary = slg_scrape.backfill_metrics(
+            self.conn, self._fetcher({}), log=lambda *_: None)
+        self.assertEqual(summary["filled"], 0)
+        self.assertEqual(summary["remaining"], 1)
+        self.assertEqual(self.conn.execute(
+            "SELECT fetch_failures FROM games WHERE id = ?",
+            (self.gid,)).fetchone()["fetch_failures"], 1)
+
+    def test_stop_before_the_first_request_does_no_work(self):
+        pages = {"https://dikgames.com/g/": self._page("1 view", "0 like",
+                                                       "No Comments")}
+        summary = slg_scrape.backfill_metrics(
+            self.conn, self._fetcher(pages), log=lambda *_: None,
+            should_stop=lambda: True)
+        self.assertEqual(summary["filled"], 0)
+        self.assertIsNone(self._row()["site_views"])
+
+    def test_it_never_fetches_a_cover(self):
+        # One request per game is the whole reason this is separate from
+        # enrich, which needs two and would take twice as long per run.
+        pages = {"https://dikgames.com/g/": self._page("1 view", "0 like",
+                                                       "No Comments")}
+        slg_scrape.backfill_metrics(self.conn, self._fetcher(pages),
+                                    log=lambda *_: None)
+        cover = self.conn.execute("SELECT cover_file FROM games WHERE id = ?",
+                                  (self.gid,)).fetchone()["cover_file"]
+        self.assertIsNone(cover)
+
+
 if __name__ == "__main__":
     unittest.main()
