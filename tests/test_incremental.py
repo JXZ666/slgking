@@ -762,6 +762,42 @@ class Heat(unittest.TestCase):
         self.assertEqual(rows[0]["id"], self.gid)
         self.assertEqual(rows[1]["id"], other)
 
+    def _seed_metrics_without_heat(self):
+        # A pre-heat-column row: metrics landed before the heat column existed,
+        # so heat was never computed. Written via SQL to skip _recompute_heat.
+        self.conn.execute(
+            "UPDATE games SET rating = 7.0, site_views = 10000,"
+            " site_likes = 5, site_comments = 2 WHERE id = ?", (self.gid,))
+        self.conn.commit()
+        self.assertIsNone(self._heat())
+
+    def test_backfill_heat_fills_rows_with_metrics(self):
+        self._seed_metrics_without_heat()
+        done = slg_db.backfill_heat(self.conn, log=lambda *_: None)
+        self.assertEqual(done, 1)
+        self.assertEqual(self._heat(), slg_db.compute_heat(7.0, 10000, 5, 2))
+
+    def test_backfill_heat_skips_rows_without_metrics(self):
+        done = slg_db.backfill_heat(self.conn, log=lambda *_: None)
+        self.assertEqual(done, 0)
+        self.assertIsNone(self._heat())
+
+    def test_backfill_heat_leaves_computed_rows_alone(self):
+        slg_db.upsert_detail(self.conn, self.gid, rating=7.3,
+                             site_views=48300, site_likes=25, site_comments=12)
+        before = self._heat()
+        done = slg_db.backfill_heat(self.conn, log=lambda *_: None)
+        self.assertEqual(done, 0)
+        self.assertEqual(self._heat(), before)
+
+    def test_data_gaps_counts_only_metric_heat_gaps(self):
+        # No metrics -> not a "补齐热度" target, stays out of the count.
+        self.assertEqual(slg_db.data_gaps(self.conn)["heat"], 0)
+        self._seed_metrics_without_heat()
+        self.assertEqual(slg_db.data_gaps(self.conn)["heat"], 1)
+        slg_db.backfill_heat(self.conn, log=lambda *_: None)
+        self.assertEqual(slg_db.data_gaps(self.conn)["heat"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

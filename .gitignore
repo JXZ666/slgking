@@ -12,6 +12,11 @@ data/
 *.db-wal
 *.db-shm
 
+# Promo film. tools/make_promo.py and tools/shot_dialogs.py are tracked; the
+# frames they render are build output - the mp4 alone is megabytes of dead
+# weight in git, and every shot in it is reproducible from the script.
+promo/
+
 # Throwaway
 *.log
 __pycache__/

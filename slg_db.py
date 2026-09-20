@@ -438,6 +438,31 @@ def _recompute_heat(conn, game_id):
     conn.execute("UPDATE games SET heat = ? WHERE id = ?", (heat, game_id))
 
 
+def backfill_heat(conn, log=print, on_progress=None):
+    """Compute heat for rows that carry metrics but a NULL heat column.
+
+    Rows migrated in before the heat column existed keep rating/views/likes/
+    comments while heat stays NULL, and enrich never revisits them (its WHERE
+    tests the metric columns, not heat). This is a local pass - no network -
+    over exactly those rows, so it finishes in seconds.
+    """
+    rows = conn.execute(
+        "SELECT id FROM games WHERE heat IS NULL"
+        " AND (rating IS NOT NULL OR site_views IS NOT NULL"
+        "      OR site_likes IS NOT NULL OR site_comments IS NOT NULL)"
+        " ORDER BY last_updated DESC").fetchall()
+    done = 0
+    for i, (game_id,) in enumerate(rows):
+        _recompute_heat(conn, game_id)
+        done += 1
+        if on_progress is not None:
+            on_progress(done, len(rows))
+    if done:
+        conn.commit()
+    log("补齐热度 %d/%d" % (done, len(rows)))
+    return done
+
+
 def upsert_detail(conn, game_id, rating=None, version=None, developer=None,
                   overview=None, site_views=None, site_likes=None,
                   site_comments=None):
@@ -635,6 +660,9 @@ def data_gaps(conn):
         "rating": one("SELECT COUNT(*) FROM games WHERE rating IS NULL"),
         "overview": one("SELECT COUNT(*) FROM games WHERE overview IS NULL"
                         " OR TRIM(overview) = ''"),
+        "heat": one("SELECT COUNT(*) FROM games WHERE heat IS NULL"
+                    " AND (rating IS NOT NULL OR site_views IS NOT NULL"
+                    "      OR site_likes IS NOT NULL OR site_comments IS NOT NULL)"),
     }
 
 

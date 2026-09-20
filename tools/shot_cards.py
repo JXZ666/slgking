@@ -1,6 +1,6 @@
 """Photograph the window so card changes can be looked at, not guessed.
 
-    python tools/shot_cards.py [--demo] [outdir]
+    python tools/shot_cards.py [--demo] [--title NAME] [outdir]
 
 Writes one PNG per theme into `outdir` (default: the temp dir) and prints the
 paths. Four views: the card list, the detail panel, the help document, and the
@@ -13,8 +13,13 @@ to the mask. The window is up for a few seconds and then closes itself.
 
 `--demo` swaps the real library for an invented one, because the real covers and
 titles are not something a public README should carry. See build_demo_library.
+
+`--title NAME` photographs the sidebar header under a different name than the
+source declares, for promo material that must not carry the app's own wording.
+It patches the global; slg_gui.py is untouched.
 """
 
+import contextlib
 import os
 import sys
 import tempfile
@@ -230,13 +235,22 @@ def scroll_to(frame, fraction):
 
 
 def main():
-    argv = [a for a in sys.argv[1:] if a != "--demo"]
-    outdir = argv[0] if argv else tempfile.mkdtemp(prefix="slgshot-")
+    args = sys.argv[1:]
+    title = args[args.index("--title") + 1] if "--title" in args else None
+    rest = [a for i, a in enumerate(args)
+            if a not in ("--demo", "--title")
+            and not (i > 0 and args[i - 1] == "--title")]
+    outdir = rest[0] if rest else tempfile.mkdtemp(prefix="slgshot-")
     os.makedirs(outdir, exist_ok=True)
-    if "--demo" in sys.argv[1:]:
+    if "--demo" in args:
         print("demo library:", build_demo_library())
+    # The sidebar header is the app's own label, so the only way to photograph
+    # it under the name the promo uses is to swap the global before the window
+    # is built. The source keeps its name; the screenshot wears the promo's.
+    titled = (mock.patch.object(slg_gui, "APP_TITLE", title) if title
+              else contextlib.nullcontext())
     # Nothing here may touch the user's preferences, the theme poll included.
-    with mock.patch.object(slg_db, "set_pref"):
+    with mock.patch.object(slg_db, "set_pref"), titled:
         app = slg_gui.App(notify=False)
         app.geometry("1180x760+40+40")
         app.update()

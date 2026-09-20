@@ -29,7 +29,7 @@ import slg_scrape
 import slg_translate
 import slg_update
 
-APP_VERSION = "0.17.0"
+APP_VERSION = "0.17.5"
 # The sidebar shows the number and nothing else. build_stamp() still carries
 # the channel and the build time, but it belongs on the 关于 page now: a
 # timestamp in the corner of every screen was answering a question the user
@@ -2408,7 +2408,7 @@ class App(ctk.CTk):
         of explanation attached. Identical styling on all three, so what tells
         them apart is the text and nothing else.
         """
-        win = self._new_dialog("同步与维护", "440x460")
+        win = self._new_dialog("同步与维护", "440x560")
         gaps = slg_db.data_gaps(self.conn)
         entries = (
             ("全量重建…",
@@ -2421,6 +2421,9 @@ class App(ctk.CTk):
             ("补齐历史…",
              "收下日期闸门之前的老游戏。右键这颗按钮 = 取消日期闸门。",
              self.do_backfill, self._forget_sync_since),
+            ("补齐热度（%d）" % gaps["heat"] if gaps["heat"] else "热度已齐",
+             "给有数据的老游戏补上热度值。纯本地计算，不联网，几秒就完。",
+             self.do_heat, None),
         )
         # The dialog cannot normally be opened mid-job - _start_job disables the
         # button that leads here - but the job may have started from the sync
@@ -2866,7 +2869,7 @@ class App(ctk.CTk):
              "已经抓到的部分会保存，下次接着来。正在飞行中的那一个网页请求要等它"
              "返回，通常不到一秒。")
 
-        body("Q：左下角「更多…」里面那三个是干什么的？", color=MUTED)
+        body("Q：左下角「更多…」里面那几个是干什么的？", color=MUTED)
         body("A：都是不常用的维护动作，点开每个下面都有一句说明。\n"
              "「补齐历史…」：站点有一批好几年前的老游戏，本库一直没收。日常「同步」"
              "默认只收新出的，老的那些会跳过——否则每次同步都去啃老库，最新的游戏"
@@ -2874,6 +2877,8 @@ class App(ctk.CTk):
              "在它上面点右键可以彻底取消日期限制，之后普通「同步」也会收老游戏。\n"
              "「下载封面」：补下缺的封面缩略图。正常「同步」自带封面，这个只是用来"
              "补老库里的存量欠账，或者哪张图当时没抓到。\n"
+             "「补齐热度」：热度是后加的功能，早先入库的老游戏没算过。点它给这批"
+             "老游戏补上热度值，纯本地计算，不联网，几秒就完。\n"
              "「全量重建」：按标签把站点重爬一遍，慢得多，拿到的数据和「同步」一样，"
              "只有增量同步明显出问题时才需要跑。")
 
@@ -3272,6 +3277,26 @@ class App(ctk.CTk):
             self.queue.put(("covers_done", "封面下载 %d 张" % done))
         except Exception as exc:  # noqa: BLE001
             self.queue.put(("covers_done", self._fail("封面下载", exc)))
+
+    def do_heat(self):
+        if self.busy:
+            return
+        gaps = slg_db.data_gaps(self.conn)
+        if not gaps["heat"]:
+            self._set_progress("热度都补齐了")
+            return
+        self._run_job("补热度…", self._heat_worker)
+
+    def _heat_worker(self):
+        try:
+            with slg_db.session() as conn:
+                done = slg_db.backfill_heat(
+                    conn, log=self._log,
+                    on_progress=lambda d, total: self.queue.put(
+                        ("progress", "补齐热度 %d/%d" % (d, total))))
+            self.queue.put(("done", "补齐热度完成 · %d 款" % done))
+        except Exception as exc:  # noqa: BLE001
+            self.queue.put(("done", self._fail("补齐热度", exc)))
 
     def do_rebuild(self):
         """The original tag walk, kept only as a fallback.

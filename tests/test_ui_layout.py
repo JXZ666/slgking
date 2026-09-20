@@ -1442,19 +1442,21 @@ class SidebarFit(unittest.TestCase):
             self.app.selected = None
             self._finish()
 
-    def test_the_maintenance_dialog_lists_all_three_chores(self):
+    def test_the_maintenance_dialog_lists_all_four_chores(self):
         try:
             with mock.patch.object(slg_db, "data_gaps",
-                                   return_value={"covers": 7, "overview": 3}):
+                                   return_value={"covers": 7, "overview": 3,
+                                                 "heat": 5}):
                 self.app.open_maintenance()
                 win = self._dialog("同步与维护")
                 self.assertIsNotNone(win, "维护弹窗没打开")
                 texts = [b.cget("text") for b in self._buttons_in(win)]
-            for label in ("全量重建", "下载封面", "补齐历史"):
+            for label in ("全量重建", "下载封面", "补齐历史", "补齐热度"):
                 self.assertTrue(any(t.startswith(label) for t in texts), texts)
             # Computed when the dialog opens, so a stale number in a window the
             # user cannot see is not possible.
             self.assertIn("下载封面（7）", texts)
+            self.assertIn("补齐热度（5）", texts)
         finally:
             self._close("同步与维护")
 
