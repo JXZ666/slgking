@@ -7,7 +7,10 @@ a = Analysis(
     binaries=[],
     # The window sets its own icon at runtime, so the .ico has to be inside the
     # bundle - slg_gui.asset_path reads it from sys._MEIPASS.
-    datas=[('assets/slgking.ico', 'assets')],
+    datas=[('assets/slgking.ico', 'assets'),
+           ('assets/tag_zh.json', 'assets'),
+           ('assets/seed/slgking.db', 'assets/seed'),
+           ('assets/seed/covers', 'assets/seed/covers')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

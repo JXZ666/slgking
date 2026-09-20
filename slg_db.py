@@ -6,17 +6,19 @@ it, which is the one requirement that got its own question in the interview.
 """
 
 import hashlib
+import json
 import math
 import os
 import re
+import shutil
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime
 
-STATUSES = ("want", "downloaded", "playing")
-STATUS_LABELS = {"want": "想玩", "downloaded": "已下载", "playing": "正在玩"}
+STATUSES = ("want", "downloaded")
+STATUS_LABELS = {"want": "想玩", "downloaded": "已下载"}
 
 # The site stamps its own name onto the end of every og:title, so a game the
 # detail page named arrives as 'Eternum [v0.9.5] [Caribdis] - dikgames' while
@@ -95,6 +97,17 @@ CREATE TABLE IF NOT EXISTS weights (
     tag_id       INTEGER PRIMARY KEY REFERENCES tags(id) ON DELETE CASCADE,
     weight       REAL    NOT NULL DEFAULT 0,
     sample_count INTEGER NOT NULL DEFAULT 0
+);
+
+-- Developer and engine affinities, the same shrinkage estimate the tag weights
+-- use but keyed by a free-text name instead of a tag id. A game's developer and
+-- engine are two more signals about taste that a plain tag list cannot carry.
+CREATE TABLE IF NOT EXISTS affinities (
+    kind         TEXT NOT NULL,          -- 'developer' or 'engine'
+    name         TEXT NOT NULL,
+    weight       REAL    NOT NULL DEFAULT 0,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (kind, name)
 );
 
 CREATE TABLE IF NOT EXISTS exclusions (
@@ -198,6 +211,25 @@ def db_path():
     return os.path.join(app_dir(), "slgking.db")
 
 
+def install_seed_db(db_src, covers_src=None):
+    """Copy the bundled seed library into place on a first run.
+
+    Called only when db_path() does not exist yet, so it can never overwrite a
+    library the user has already built. The seed gives a fresh install a few
+    hundred games - and their covers - to browse before the first sync. The
+    caller (slg_gui) resolves the source paths from the bundle; this side stays
+    packaging-agnostic.
+    """
+    os.makedirs(app_dir(), exist_ok=True)
+    shutil.copyfile(db_src, db_path())
+    if covers_src and os.path.isdir(covers_src):
+        os.makedirs(covers_dir(), exist_ok=True)
+        for name in os.listdir(covers_src):
+            src = os.path.join(covers_src, name)
+            if os.path.isfile(src):
+                shutil.copy2(src, os.path.join(covers_dir(), name))
+
+
 def connect(path=None):
     conn = sqlite3.connect(path or db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
@@ -269,6 +301,14 @@ def _migrate(conn):
                          (clean_site_title(row["title"]), row["id"]))
         conn.commit()
     _repair_site_suffixed_translations(conn)
+    # The "playing" status was retired: the sidebar view that filtered on it is
+    # gone, so fold any rows still marked with it into "downloaded". Idempotent -
+    # once migrated there are no "playing" rows left to match.
+    if conn.execute("SELECT 1 FROM state WHERE status = 'playing'"
+                    " LIMIT 1").fetchone():
+        conn.execute("UPDATE state SET status = 'downloaded'"
+                     " WHERE status = 'playing'")
+        conn.commit()
 
 
 def _repair_site_suffixed_translations(conn):
@@ -535,10 +575,18 @@ def find_games(conn, include=(), exclude=(), search=None, statuses=None,
     sql = """
         SELECT g.*, s.status, s.note, s.my_rating, l.folder_path, l.folder_version,
                l.has_translation, l.has_fontpatch,
-               COALESCE(g.rating, 0)
-             + 2.0 * COALESCE((SELECT AVG(w.weight) FROM game_tags gt
-                               JOIN weights w ON w.tag_id = gt.tag_id
-                               WHERE gt.game_id = g.id), 0) AS score
+               COALESCE((SELECT AVG(my_rating - 3.0) FROM state
+                         WHERE my_rating IS NOT NULL), 0)
+             + (COALESCE(g.rating, 0)
+                - COALESCE((SELECT AVG(rating) FROM games
+                            WHERE rating IS NOT NULL), 0))
+             + COALESCE((SELECT SUM(w.weight) FROM game_tags gt
+                         JOIN weights w ON w.tag_id = gt.tag_id
+                         WHERE gt.game_id = g.id), 0)
+             + COALESCE((SELECT weight FROM affinities
+                         WHERE kind = 'developer' AND name = g.developer), 0)
+             + COALESCE((SELECT weight FROM affinities
+                         WHERE kind = 'engine' AND name = g.engine), 0) AS score
         FROM games g
         LEFT JOIN state s ON s.game_id = g.id
         LEFT JOIN local l ON l.game_id = g.id
@@ -723,6 +771,12 @@ ENGINE_UNTRANSLATED = "untranslated"
 # changed source text, and refuse to be overwritten (set_auto_translation).
 ENGINE_MANUAL = "manual"
 
+# The engine reported for a row imported from the bundled tag seed
+# (assets/tag_zh.json). It marks the translation as a shipped default rather
+# than a per-install machine translation: the two behave identically for
+# display, but the tag lets a future "reset to defaults" tell them apart.
+ENGINE_SEED = "seed"
+
 
 def src_hash(text):
     """Cache key for a piece of source text. Truncated: this only has to spot
@@ -841,6 +895,40 @@ def set_translation(conn, kind, ref, src_text, text, engine=None, lang=TAG_LANG)
         " (kind, ref, lang, src_hash, text, engine, updated_at) VALUES (?,?,?,?,?,?,?)",
         (kind, str(ref), lang, src_hash(src_text), text, engine, _now()))
     conn.commit()
+
+
+def import_seed_tag_translations(conn, path, lang=TAG_LANG):
+    """Import the bundled tag seed (assets/tag_zh.json) into `translations`.
+
+    Shipped defaults for users who have no translation API: the ~120 tag slugs
+    are rendered on every card, so a fresh install would otherwise show English
+    slugs until the user wired up a paid engine. The seed is the author's own
+    machine translation, exported from his db.
+
+    INSERT OR IGNORE means the seed only fills gaps - it never overwrites a
+    translation the user already has, and a hand-typed row in manual_translations
+    (which always wins at read time) is left completely alone. Returns the number
+    of rows actually imported.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    now = _now()
+    inserted = 0
+    for slug, text in data.items():
+        if not slug or not text:
+            continue
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO translations"
+            " (kind, ref, lang, src_hash, text, engine, updated_at) VALUES (?,?,?,?,?,?,?)",
+            ("tag", str(slug), lang, src_hash(slug), text, ENGINE_SEED, now))
+        inserted += cur.rowcount
+    conn.commit()
+    return inserted
 
 
 def tag_translations(conn, lang=TAG_LANG):
@@ -976,14 +1064,23 @@ def rates_histogram(conn):
 # --- preference weights --------------------------------------------------------
 
 def recompute_weights(conn):
-    """Derive per-tag weights from the star ratings.
+    """Derive per-tag weights and per-developer/engine affinities from ratings.
 
-    Each rated game contributes (rating - 3) to every tag it carries, so the
-    scale stays symmetrical around 'no opinion'. The result is an average with
-    a shrinkage term, not a sum, so a tag seen twice cannot outrank one seen
-    two hundred times.
+    Each rated game contributes (rating - 3) to every tag it carries, and to its
+    developer and engine, so the scale stays symmetrical around 'no opinion'.
+    The result is an average with a shrinkage term, not a sum, so a tag (or
+    studio) seen twice cannot outrank one seen two hundred times.
+
+    Tag weights are then scaled by inverse document frequency: a tag that turns
+    up on nearly every game (3dcg, big-tits) is weak evidence of taste, while a
+    rare one (ntr, monster) is strong. The IDF lives in `weight` itself so the
+    sort query stays a plain SUM with no correlated COUNT behind it.
     """
     conn.execute("DELETE FROM weights")
+    conn.execute("DELETE FROM affinities")
+    total_games = conn.execute("SELECT COUNT(*) FROM games").fetchone()[0] or 1
+    doc_freq = {r["tag_id"]: r["n"] for r in conn.execute(
+        "SELECT tag_id, COUNT(*) AS n FROM game_tags GROUP BY tag_id").fetchall()}
     rows = conn.execute("""
         SELECT gt.tag_id, SUM(s.my_rating - 3.0) AS total, COUNT(*) AS n
         FROM state s
@@ -993,8 +1090,29 @@ def recompute_weights(conn):
     """).fetchall()
     conn.executemany(
         "INSERT INTO weights (tag_id, weight, sample_count) VALUES (?,?,?)",
-        [(r["tag_id"], r["total"] / (r["n"] + SHRINK), r["n"]) for r in rows])
+        [(r["tag_id"],
+          (r["total"] / (r["n"] + SHRINK))
+          * (1.0 + math.log(total_games / float(doc_freq.get(r["tag_id"], 1)))),
+          r["n"]) for r in rows])
+    _recompute_affinity(conn, "developer")
+    _recompute_affinity(conn, "engine")
     conn.commit()
+
+
+def _recompute_affinity(conn, kind):
+    """Fill `affinities` for one column (developer or engine) of `games`.
+
+    `kind` is also the column name, so the caller never passes user input here -
+    the string is interpolated into the SQL as a trusted literal.
+    """
+    rows = conn.execute(
+        "SELECT %s AS name, SUM(s.my_rating - 3.0) AS total, COUNT(*) AS n"
+        " FROM state s JOIN games g ON g.id = s.game_id"
+        " WHERE s.my_rating IS NOT NULL AND %s IS NOT NULL AND %s != ''"
+        " GROUP BY %s" % (kind, kind, kind, kind)).fetchall()
+    conn.executemany(
+        "INSERT INTO affinities (kind, name, weight, sample_count) VALUES (?,?,?,?)",
+        [(kind, r["name"], r["total"] / (r["n"] + SHRINK), r["n"]) for r in rows])
 
 
 def weight_table(conn, limit=40):

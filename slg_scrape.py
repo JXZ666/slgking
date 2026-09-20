@@ -146,6 +146,33 @@ class Fetcher:
                 return True
             time.sleep(min(left, 0.1))
 
+    def _get_retry_throttled(self, url, binary):
+        """Retry a 429/503 with capped exponential backoff until it recovers.
+
+        A long background sync is exactly where the site starts throttling, so
+        this is the one request that gets more than its single retry. Bounded
+        on both ends: at most five extra tries and a 60s ceiling, so a site
+        that is properly down still hands control back to the caller.
+        """
+        wait = self.delay * 2
+        for _ in range(5):
+            if not self._wait(wait):
+                return None
+            try:
+                raw = http_get(url)
+                self._last = time.time()
+                self.count += 1
+                return raw if binary else raw.decode("utf-8", "replace")
+            except urllib.error.HTTPError as exc:
+                if exc.code in (429, 503):
+                    wait = min(wait * 2, 60.0)
+                    continue
+                return None
+            except (urllib.error.URLError, OSError, gzip.BadGzipFile,
+                    http.client.HTTPException):
+                return None
+        return None
+
     def get(self, url, retries=1, binary=False):
         for attempt in range(retries + 1):
             if self.stopped():
@@ -161,6 +188,16 @@ class Fetcher:
             # HTTPException is not an OSError, so a truncated chunked response
             # (IncompleteRead) used to escape this and kill the whole sync
             # partway through - one flaky page cost every page after it.
+            except urllib.error.HTTPError as exc:
+                if exc.code in (429, 503):
+                    self.log("  ! %s (%s %s) · 被限流，退避重试"
+                             % (url, exc.code, exc.reason))
+                    return self._get_retry_throttled(url, binary)
+                self.log("  ! %s (%s)" % (url, exc))
+                if attempt == retries:
+                    return None
+                if not self._wait(self.delay * 2):
+                    return None
             except (urllib.error.URLError, OSError, gzip.BadGzipFile,
                     http.client.HTTPException) as exc:
                 self.log("  ! %s (%s)" % (url, exc))
@@ -522,7 +559,7 @@ def _fetch_cover(fetcher, conn, game_id, slug, url, log):
     return True
 
 
-def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, since=None,
+def sync_incremental(conn, fetcher, new_limit=None, since=None,
                      on_progress=None, log=print, should_stop=None):
     """Update the catalogue from the sitemaps instead of walking tags.
 
@@ -544,9 +581,9 @@ def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, since=None,
     while treating it as changed would mean 1274 detail fetches to learn
     nothing.
 
-    new_limit rations the first run. The library has never held more than a
-    third of the site, so discovery would otherwise be a 20-minute stall on
-    the user's first click; capped, each sync finishes in minutes and the
+    new_limit, when set, rations a single run. None means "ingest the whole
+    backlog in one sitting" - what a user who wants to leave the sync running
+    in the background asks for. The stop button still lands mid-run; the
     remainder is simply still there next time.
 
     since, if given as 'YYYY-MM-DD', drops site entries older than that - but
@@ -591,8 +628,12 @@ def sync_incremental(conn, fetcher, new_limit=NEW_PER_RUN, since=None,
     # user's own library is already tracking. New games wait their turn.
     changed_todo = [item for item in todo if not item[2]]
     new_todo = [item for item in todo if item[2]]
-    deferred = max(0, len(new_todo) - new_limit)
-    todo = changed_todo + new_todo[:new_limit]
+    if new_limit is None:
+        deferred = 0
+        todo = changed_todo + new_todo
+    else:
+        deferred = max(0, len(new_todo) - new_limit)
+        todo = changed_todo + new_todo[:new_limit]
     changed = len(changed_todo)
     log("sitemap %d 款 · 首次登记 %d · 本次抓 %d（变动 %d / 新增 %d，余 %d 款留到下次）"
         % (len(index), adopted, len(todo), changed, len(todo) - changed, deferred))
@@ -771,7 +812,8 @@ def enrich(conn, fetcher, limit=200, log=print, on_progress=None,
     """Fill in rating, overview, tags and cover for games that lack them.
 
     Capped per run so a first sync is not a 20-minute wall - run it again and
-    it picks up where it stopped.
+    it picks up where it stopped. Pass limit=None to drain the whole backlog
+    in one sitting.
 
     The detail page is a superset of the listing page, so this takes the tags
     and the og:image too. The thumbnail is fetched here as well as in the
@@ -792,7 +834,7 @@ def enrich(conn, fetcher, limit=200, log=print, on_progress=None,
         # re-consuming a slot every run.
         " ORDER BY (cover_file IS NULL) DESC, fetch_failures ASC, last_updated DESC"
         " LIMIT ?",
-        (limit,)).fetchall()
+        (-1 if limit is None else limit,)).fetchall()
     done, covers = 0, 0
     for row in rows:
         if should_stop and should_stop():

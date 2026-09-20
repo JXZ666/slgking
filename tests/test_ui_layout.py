@@ -1411,9 +1411,9 @@ class SidebarFit(unittest.TestCase):
 
     # --- which language the panel opens in -----------------------------------
 
-    def test_the_panel_opens_on_the_chinese_the_card_already_shows(self):
-        # The list said 中文 and the panel said English for the same game, which
-        # reads as the translation having silently gone missing.
+    def test_the_panel_opens_on_the_original_even_when_a_translation_exists(self):
+        # A cached Chinese title must not pre-select 中文: the panel always
+        # opens on 原文.
         self._pool_reset()
         try:
             game = self._panel_game(0)
@@ -1422,42 +1422,36 @@ class SidebarFit(unittest.TestCase):
             slg_gui.load_title_translations(self.app.conn)
             self._select(game)
             self.assertEqual(self.app._detail_parts["title"].cget("text"),
-                             "缓存的中文名")
+                             game["title"])
         finally:
             slg_db.delete_translation(self.app.conn, "title", game["id"])
             slg_gui.load_title_translations(self.app.conn)
             self.app.selected = None
             self._finish()
 
-    def test_the_chosen_language_survives_the_next_game(self):
-        # 中文 used to be reset by every selection, so a reader who wanted
-        # Chinese had to flip the switch again for every single game.
+    def test_the_language_resets_to_original_on_the_next_game(self):
+        # Flipping to 中文 is per-panel only: the next game reopens on 原文
+        # instead of inheriting the last choice.
         self._pool_reset()
         try:
-            with mock.patch.object(slg_db, "set_pref") as set_pref:
-                self._select(self._panel_game(0, overview="One."))
+            self._select(self._panel_game(0, overview="One."))
+            with mock.patch.object(slg_gui.threading, "Thread"):
                 self.app._set_overview_lang(self.app.selected, "中文")
-            self.assertTrue(set_pref.called, "语言选择没有存进 prefs")
-            self.assertEqual(set_pref.call_args[0][2], "中文")
-            self.assertEqual(self.app._detail_lang, "中文")
             self._select(self._panel_game(1, overview="Two."))
-            self.assertEqual(self.app._detail_parts["ov_seg"].get(), "中文")
+            self.assertEqual(self.app._detail_parts["ov_seg"].get(), "原文")
         finally:
-            self.app._detail_lang = "原文"
             self.app.selected = None
             self._finish()
 
-    def test_restoring_a_remembered_language_spends_no_request(self):
-        # _fill_detail runs on every click in the list. Asking the translator
-        # from there would turn browsing into a hundred API calls.
+    def test_opening_a_game_spends_no_request(self):
+        # _fill_detail runs on every click in the list and opens on 原文, so
+        # browsing must never fire a translation request.
         self._pool_reset()
         try:
-            self.app._detail_lang = "中文"
             with mock.patch.object(slg_gui.threading, "Thread") as thread:
                 self._select(self._panel_game(0, overview="Nothing cached."))
             self.assertFalse(thread.called, "被动填充发出了翻译请求")
         finally:
-            self.app._detail_lang = "原文"
             self.app.selected = None
             self._finish()
 

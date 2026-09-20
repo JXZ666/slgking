@@ -21,7 +21,7 @@ import slg_db  # noqa: E402
 import slg_gui  # noqa: E402
 
 COUNT = 1000
-SORT_LABELS = ("推荐分", "站内评分", "最近更新", "名称")
+SORT_LABELS = ("按xp推荐", "站内评分", "最近更新", "名称")
 
 
 def seed():

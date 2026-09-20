@@ -29,7 +29,7 @@ import slg_scrape
 import slg_translate
 import slg_update
 
-APP_VERSION = "0.18.0"
+APP_VERSION = "0.19.0"
 # The sidebar shows the number and nothing else. build_stamp() still carries
 # the channel and the build time, but it belongs on the 关于 page now: a
 # timestamp in the corner of every screen was answering a question the user
@@ -45,13 +45,24 @@ CONTACT_MAILTO = "mailto:" + CONTACT_EMAIL
 # comes from, and two copies of that URL is one copy that goes stale.
 SITE_URL = slg_scrape.BASE
 SITE_LABEL = "游戏官网 · dikgames.com"
+# The site is English-first and most games ship untranslated; pointing users at
+# LunaTranslator (real-time machine translation) plus the author's own RenPy
+# tooling is the one referral that both helps and fits the "retrieval only" line.
+LUNA_URL = "https://docs.lunatranslator.org/zh/"
+LUNA_LABEL = "露娜翻译器 LunaTranslator"
+RPYKIT_URL = "https://github.com/JXZ666/SLG-Renpy-Toolkit"
+RPYKIT_LABEL = "RenPy 汉化小工具 · SLG-Renpy-Toolkit"
 PREF_THEME = "theme"
 PREF_FREE_NOTICE = "free_notice_seen"
+# First-launch onboarding: shown once, then reachable again from 设置.
+PREF_WELCOME_SEEN = "welcome_seen"
+# Bundled tag seed: imported once so a user who deletes a translation on purpose
+# doesn't have it silently restored on the next launch.
+PREF_SEED_TAGS_IMPORTED = "seed_tags_imported_v1"
 # Where the games live on this machine. Asked for once and remembered, because
 # slg_scan used to ship one hard-coded path - the author's own - so the button
 # did nothing on anybody else's computer.
 PREF_SCAN_ROOT = "scan_root"
-PREF_DETAIL_LANG = "detail_lang"
 PREF_SYNC_SINCE = "sync_since"
 
 
@@ -175,7 +186,7 @@ METRICS_PER_RUN = 150
 
 # Each field opens the way it reads: the best score, the best rating and the
 # newest update first, but names from A. The arrow button flips from there.
-SORT_FIELDS = {"推荐分": "score", "站内评分": "rating",
+SORT_FIELDS = {"按xp推荐": "score", "站内评分": "rating",
                "最近更新": "updated", "名称": "title", "热度": "heat"}
 SORT_DEFAULT_DESC = {"score": True, "rating": True, "updated": True,
                      "title": False, "heat": True}
@@ -198,7 +209,7 @@ GENERIC_TAGS = {
     "visual-novel", "vaginal-sex", "oral-sex", "handjob", "teasing",
 }
 
-VIEWS = [("全部", None), ("想玩", "want"), ("已下载", "downloaded"), ("正在玩", "playing")]
+VIEWS = [("全部", None), ("想玩", "want"), ("已下载", "downloaded")]
 
 _THEME_LABELS = {"light": "浅色", "dark": "深色", "system": "跟随系统"}
 
@@ -518,7 +529,23 @@ class App(ctk.CTk):
         except Exception:  # noqa: BLE001 - a missing icon is not worth a crash
             pass
 
+        # A fresh install has an empty library until the first sync; copy the
+        # bundled seed (a few hundred games + covers) in so there is something
+        # to browse immediately. Gated on the db file not existing yet, so an
+        # existing library is never touched.
+        if notify and not os.path.exists(slg_db.db_path()):
+            seed_db = asset_path("seed/slgking.db")
+            if os.path.exists(seed_db):
+                slg_db.install_seed_db(seed_db, asset_path("seed/covers"))
         self.conn = slg_db.connect()
+        # notify is off for the packaging smoke test and the test harness, which
+        # both expect an empty library; a real session imports the shipped tag
+        # seed once so users without a translation API still see Chinese tags.
+        if notify and not slg_db.get_pref(self.conn, PREF_SEED_TAGS_IMPORTED):
+            seed = asset_path("tag_zh.json")
+            if os.path.exists(seed):
+                slg_db.import_seed_tag_translations(self.conn, seed)
+            slg_db.set_pref(self.conn, PREF_SEED_TAGS_IMPORTED, "1")
         load_tag_translations(self.conn)
         load_title_translations(self.conn)
         # Resolved before the first widget exists, so the opening frame is
@@ -586,10 +613,6 @@ class App(ctk.CTk):
         self._title_inflight = set()
         self._ov_label = None     # the overview text widget currently on screen
         self._ov_seg = None
-        # Which language the panel reads in. Remembered across games and across
-        # restarts: it is a standing preference about the user, not a property of
-        # one game.
-        self._detail_lang = slg_db.get_pref(self.conn, PREF_DETAIL_LANG) or "原文"
         self._title_label = None  # the name at the top of the detail panel
         self._title_note = None   # why that name is still English, if it is
         # The detail panel's widgets, built once and repointed at each game.
@@ -632,8 +655,10 @@ class App(ctk.CTk):
         self.after(5000, self._poll_system)
         # notify is off for the packaging smoke test: the dialog is modal and
         # would sit there blocking the mainloop it is meant to be checking.
+        if notify and not slg_db.get_pref(self.conn, PREF_WELCOME_SEEN):
+            self.after(300, self._show_welcome)
         if notify and not slg_db.get_pref(self.conn, PREF_FREE_NOTICE):
-            self.after(300, self._show_free_notice)
+            self.after(600, self._show_free_notice)
         # Late enough that it never delays the window appearing, and skipped
         # entirely by the smoke test, which is not a user session.
         if notify:
@@ -756,6 +781,63 @@ class App(ctk.CTk):
             parent=self)
         slg_db.set_pref(self.conn, PREF_FREE_NOTICE, "1")
 
+    def _show_welcome(self):
+        """First-launch onboarding, reachable again from 设置.
+
+        The one thing a brand-new user cannot guess is *why* the app is worth
+        three clicks - that it learns their xp from the star ratings and pushes
+        matching games. This says so up front, and the pref gate above only lets
+        it pop on the first run; opening it from 设置 never re-arms the gate.
+        """
+        slg_db.set_pref(self.conn, PREF_WELCOME_SEEN, "1")
+        win = self._new_dialog("欢迎使用 SLG黄游大王", "540x600")
+        ctk.CTkLabel(win, text="欢迎使用 SLG黄游大王", text_color=TEXT,
+                     font=ui_font(size=18, weight="bold")).pack(pady=(18, 2))
+        ctk.CTkLabel(
+            win, text="免费 · 帮你整理检索 dikgames 游戏，并学习你的 xp 口味、推送对口游戏。",
+            text_color=MUTED, font=ui_font(size=12), justify="left", anchor="w",
+            wraplength=480).pack(fill="x", padx=24, pady=(0, 12))
+
+        body = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+
+        def _section(title, text):
+            ctk.CTkLabel(body, text=title, text_color=ACCENT, anchor="w",
+                         font=ui_font(size=14, weight="bold")).pack(
+                fill="x", padx=8, pady=(10, 2))
+            ctk.CTkLabel(body, text=text, text_color=TEXT, anchor="w",
+                         justify="left", wraplength=460,
+                         font=ui_font(size=12)).pack(fill="x", padx=8, pady=(0, 4))
+
+        _section("它是什么",
+                 "把 dikgames 的全部游戏抓进本地，可搜索、可按标签筛选、可标记想玩/已下载。")
+        _section("它会学习你的 xp",
+                 "给玩过的游戏打 1–5 星，软件会从你喜欢/不喜欢的标签、开发商和引擎里，"
+                 "学出你的口味——这是它和普通游戏列表最大的区别。")
+        _section("按 xp 推荐",
+                 "顶栏「按xp推荐」排序会把最对你胃口的游戏排到最前，越用越准。")
+
+        ctk.CTkLabel(body, text="三步上手", text_color=ACCENT, anchor="w",
+                     font=ui_font(size=14, weight="bold")).pack(
+            fill="x", padx=8, pady=(14, 2))
+        steps = (
+            "第 1 步　点「同步 dikgames」抓取游戏目录（建议开梯子）。",
+            "第 2 步　点开任意游戏，在右侧点星星打分。",
+            "第 3 步　用标签筛选 + 「按xp推荐」找新游戏。",
+        )
+        for s in steps:
+            ctk.CTkLabel(body, text=s, text_color=TEXT, anchor="w", justify="left",
+                         wraplength=460, font=ui_font(size=12)).pack(
+                fill="x", padx=8, pady=1)
+        ctk.CTkLabel(body, text="以后想再看这份说明，点右上角 ⚙ → 查看新手引导。",
+                     text_color=MUTED, anchor="w", justify="left", wraplength=460,
+                     font=ui_font(size=11)).pack(fill="x", padx=8, pady=(12, 6))
+
+        ctk.CTkButton(win, text="开始使用", height=38, corner_radius=8,
+                      fg_color=ACCENT, text_color=ON_ACCENT, hover_color=CARD,
+                      font=ui_font(size=14), command=win.destroy).pack(
+            fill="x", padx=24, pady=(0, 16))
+
     def _set_progress(self, text):
         """progress_label is recreated on a theme switch, so guard the write.
 
@@ -809,7 +891,7 @@ class App(ctk.CTk):
         main.grid_rowconfigure(2, weight=1)
 
         self._build_toolbar(main)
-        self._build_filterbar(main)
+        self._build_filterbar()
 
         body = ctk.CTkFrame(main, fg_color="transparent")
         body.grid(row=2, column=0, sticky="nsew")
@@ -953,8 +1035,8 @@ class App(ctk.CTk):
         _section(nav, "工具")
         # The two routine tools stay out here: 标签库 for filtering, and
         # 检查更新 for "which of my local games has a newer build on the site".
-        # The set-once-then-forget ones (标签译名/偏好权重/翻译设置/扫描本地目录)
-        # live behind 更多工具…, and the toolbar gear opens 设置 instead.
+        # The set-once-then-forget ones (标签译名/偏好权重/翻译设置/扫描本地目录/
+        # 游戏汉化工具) live behind 更多工具…, and the toolbar gear opens 设置.
         for text, command in (("标签库…", self.open_tag_picker),
                               ("检查更新", self.do_updates),
                               ("更多工具…", self.open_tools)):
@@ -968,8 +1050,9 @@ class App(ctk.CTk):
 
     def _build_toolbar(self, parent):
         bar = ctk.CTkFrame(parent, fg_color="transparent")
-        bar.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        bar.grid(row=0, column=0, sticky="ew", pady=(0, 0))
         bar.grid_columnconfigure(0, weight=1)
+        self.toolbar = bar
 
         # The "搜索" caption is gone and the text is centred: the caption only
         # pushed the placeholder into the left edge, and with the whole row to
@@ -1001,7 +1084,7 @@ class App(ctk.CTk):
         right.grid(row=0, column=1, padx=(20, 0), sticky="e")
 
         self.sort_menu = ctk.CTkOptionMenu(
-            right, values=["推荐分", "站内评分", "最近更新", "名称", "热度"], width=116,
+            right, values=["按xp推荐", "站内评分", "最近更新", "名称", "热度"], width=116,
             height=38, corner_radius=8, fg_color=CARD, text_color=TEXT,
             button_color=CHIP, button_hover_color=CARD_HOVER,
             command=self._on_sort)
@@ -1039,7 +1122,7 @@ class App(ctk.CTk):
         # against, and the 8px that used to separate them read as the search box
         # floating above the header instead of heading it.
         self.vpn_notice = ctk.CTkFrame(bar, fg_color=CHIP, corner_radius=8)
-        self.vpn_notice.grid(row=1, column=0, columnspan=2, sticky="ew")
+        self.vpn_notice.grid(row=1, column=0, columnspan=1, sticky="ew")
         inner = _centred_row(self.vpn_notice, row=0, column=0, sticky="ew")
         ctk.CTkLabel(inner, text="建议开启梯子（VPN / 代理）后使用本软件",
                      text_color=TEXT, font=ui_font(size=12)
@@ -1056,11 +1139,14 @@ class App(ctk.CTk):
         # handler, and the switch destroys that button.
         self.after(1, lambda: self._apply_theme(mode))
 
-    def _build_filterbar(self, parent):
-        self.filterbar = ctk.CTkFrame(parent, fg_color="transparent")
-        self.filterbar.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        # Same centre axis as the notice strip above it, so the two rows read as
-        # one column instead of one hugging the left edge and one spanning it.
+    def _build_filterbar(self):
+        # Lives inside the toolbar's column 0 (the search box column), not on
+        # `main`: that way `_centred_row` centres the 筛选 row on the same axis
+        # as the search box and the notice strip, which sit in that same column
+        # while the sort controls take the column to their right.
+        self.filterbar = ctk.CTkFrame(self.toolbar, fg_color="transparent")
+        self.filterbar.grid(row=2, column=0, columnspan=1, sticky="ew",
+                            pady=(12, 10))
         self.filterbar_inner = _centred_row(self.filterbar, row=0, column=0,
                                            sticky="ew")
 
@@ -1848,8 +1934,8 @@ class App(ctk.CTk):
         # request=False: restoring a cached language costs no API call, and
         # spending one per click on the list is not something a passive fill
         # should do.
-        p["ov_seg"].set(self._detail_lang)
-        self._apply_lang(game, self._detail_lang, request=False)
+        p["ov_seg"].set("原文")
+        self._apply_lang(game, "原文", request=False)
         self._layout_detail(bool(game["url"]))
 
     def _show_title(self, text):
@@ -1874,9 +1960,7 @@ class App(ctk.CTk):
             label.configure(text=EMPTY_OVERVIEW, text_color=MUTED)
 
     def _set_overview_lang(self, game, value):
-        """The user picked a language. Remember it for the next game too."""
-        self._detail_lang = value
-        slg_db.set_pref(self.conn, PREF_DETAIL_LANG, value)
+        """The user picked a language for this panel."""
         seg = self._ov_seg
         if seg is not None and seg.winfo_exists() and seg.get() != value:
             seg.set(value)
@@ -2067,7 +2151,7 @@ class App(ctk.CTk):
     def _build_detail_status(self, d, parts):
         row = ctk.CTkFrame(d, fg_color="transparent")
         buttons = {}
-        for label, status in (("想玩", "want"), ("已下载", "downloaded"), ("正在玩", "playing")):
+        for label, status in (("想玩", "want"), ("已下载", "downloaded")):
             btn = ctk.CTkButton(row, text=label, height=30, corner_radius=8,
                                 fg_color=CHIP, text_color=TEXT,
                                 hover_color=CARD_HOVER,
@@ -2402,8 +2486,6 @@ class App(ctk.CTk):
         was filled from, so the two cannot disagree.
         """
         self._ov_seg.set("中文")
-        self._detail_lang = "中文"
-        slg_db.set_pref(self.conn, PREF_DETAIL_LANG, "中文")
         self._show_title(self._zh_title(game) or game["title"])
         self._show_title_note("")
         self._set_ov_text(self._zh_overview(game)
@@ -2436,7 +2518,7 @@ class App(ctk.CTk):
         game["my_rating"] = new or None
         self._sync_star_btns(game)
         # Deliberately no refresh. recompute_weights() does move games around
-        # under 推荐分, but reordering the list out from under the cursor is
+        # under 按xp推荐, but reordering the list out from under the cursor is
         # worse than a sort that settles on the next redraw - and the rating
         # itself is not on the card, so there is nothing stale on screen.
 
@@ -2651,6 +2733,9 @@ class App(ctk.CTk):
                      text_color=MUTED, font=ui_font(size=12), justify="left",
                      anchor="w").pack(fill="x", padx=16, pady=(12, 0))
         entries = (
+            ("游戏汉化工具…",
+             "游戏是英文的？这里有搭配使用的翻译工具。",
+             self.open_translation_tools, None),
             ("标签译名…",
              "给标签写中文名。改完列表和筛选条立刻跟着变。",
              self.open_tag_editor, None),
@@ -2667,6 +2752,41 @@ class App(ctk.CTk):
         state = "disabled" if self.busy else "normal"
         self._dialog_rows(win, entries, state=state)
 
+    def open_translation_tools(self):
+        """The 游戏汉化工具 door: the answer to "my game is in English".
+
+        The two links are the same ones 帮助文档 carries, but here they are the
+        whole point instead of a paragraph buried at the foot of a long page.
+        They are not two alternatives: the toolkit needs Luna, so the dialog
+        walks the user through them in order.
+        """
+        win = self._new_dialog("游戏汉化工具", "480x400")
+        ctk.CTkLabel(win, text="游戏是英文的？按顺序装这两个工具",
+                     text_color=TEXT, anchor="w",
+                     font=ui_font(size=16, weight="bold")).pack(
+            fill="x", padx=20, pady=(18, 0))
+        ctk.CTkLabel(win, text="dikgames 是英文流站点，绝大多数游戏没有官方中文，"
+                               "下载到英文版是正常的，不是文件坏了。",
+                     text_color=MUTED, font=ui_font(size=12), justify="left",
+                     anchor="w", wraplength=420).pack(
+            fill="x", padx=20, pady=(8, 0))
+        ctk.CTkLabel(win, text="第 1 步 · 下载露娜翻译器（必须先装）",
+                     text_color=TEXT, font=ui_font(size=12, weight="bold"),
+                     justify="left", anchor="w").pack(
+            fill="x", padx=20, pady=(14, 4))
+        _link_button(win, LUNA_LABEL, LUNA_URL).pack(fill="x", padx=20, pady=(0, 4))
+        ctk.CTkLabel(win, text="开源免费，边玩边实时机翻游戏文本。",
+                     text_color=MUTED, font=ui_font(size=11), justify="left",
+                     anchor="w").pack(fill="x", padx=20, pady=(0, 12))
+        ctk.CTkLabel(win, text="第 2 步 · 下载作者的汉化小工具（搭配露娜使用）",
+                     text_color=TEXT, font=ui_font(size=12, weight="bold"),
+                     justify="left", anchor="w").pack(
+            fill="x", padx=20, pady=(0, 4))
+        _link_button(win, RPYKIT_LABEL, RPYKIT_URL).pack(fill="x", padx=20, pady=(0, 4))
+        ctk.CTkLabel(win, text="配合露娜翻译器，把 RenPy 游戏做成离线汉化。",
+                     text_color=MUTED, font=ui_font(size=11), justify="left",
+                     anchor="w").pack(fill="x", padx=20, pady=(0, 18))
+
     def open_settings(self):
         """The gear's door: the theme switch, with 关于 one row inside it.
 
@@ -2676,7 +2796,7 @@ class App(ctk.CTk):
         moved in here and the sort controls moved up into the space, which also
         left room for the gear beside them.
         """
-        win = self._new_dialog("设置", "420x310")
+        win = self._new_dialog("设置", "420x360")
         ctk.CTkLabel(win, text="主题", text_color=TEXT, anchor="w",
                      font=ui_font(size=14, weight="bold")).pack(
             fill="x", padx=16, pady=(16, 0))
@@ -2694,6 +2814,9 @@ class App(ctk.CTk):
                      text_color=MUTED, font=ui_font(size=11), justify="left",
                      anchor="w", wraplength=380).pack(fill="x", padx=16, pady=(6, 14))
         self._dialog_rows(win, (
+            ("查看新手引导…",
+             "重新打开首次启动时的那份功能简介和使用说明。",
+             self._show_welcome, None),
             ("关于本软件…",
              "版本信息、检查软件更新、GitHub 主页、反馈邮箱、数据目录。",
              self.open_about, None),
@@ -2735,6 +2858,10 @@ class App(ctk.CTk):
 
         _link_button(win, GITHUB_LABEL, GITHUB_URL).pack(
             fill="x", padx=24, pady=(10, 4))
+        _link_button(win, LUNA_LABEL, LUNA_URL).pack(
+            fill="x", padx=24, pady=4)
+        _link_button(win, RPYKIT_LABEL, RPYKIT_URL).pack(
+            fill="x", padx=24, pady=4)
         _link_button(win, "反馈 / 建议：%s" % CONTACT_EMAIL, CONTACT_MAILTO).pack(
             fill="x", padx=24, pady=4)
         ctk.CTkButton(win, text="打开数据目录", height=36, corner_radius=8,
@@ -2757,7 +2884,8 @@ class App(ctk.CTk):
 
     def open_weights(self):
         win = self._new_dialog("偏好权重", "420x560")
-        ctk.CTkLabel(win, text="从你的五星评分里算出来的标签倾向\n正数 = 你喜欢，负数 = 你不喜欢",
+        ctk.CTkLabel(win, text="从你的五星评分里算出来的标签倾向（已按标签稀缺度加权）\n"
+                               "正数 = 你喜欢，负数 = 你不喜欢",
                      text_color=MUTED, font=ui_font(size=12),
                      justify="left").pack(pady=10, anchor="w", padx=16)
         frame = ctk.CTkScrollableFrame(win, fg_color="transparent")
@@ -3153,6 +3281,14 @@ class App(ctk.CTk):
              "任何下载。想下载游戏请前往游戏官网，或者自己去找下载地址。\n"
              "检索到的信息和游戏的版权都归原站点与作者所有。", color=DANGER_TEXT)
 
+        head("下载的游戏是英文的怎么办")
+        body("dikgames 是英文流站点，站上绝大多数游戏都没有官方中文，下载到"
+             "英文版本是正常的，不是文件坏了。想看懂，按顺序装这两个工具：\n"
+             "1. 露娜翻译器（LunaTranslator）：开源免费，边玩边实时机翻游戏文本；\n"
+             "2. 作者的 RenPy 汉化小工具：搭配露娜翻译器，把 RenPy 游戏做成离线汉化。")
+        _link_button(frame, LUNA_LABEL, LUNA_URL).pack(fill="x", padx=8, pady=(0, 4))
+        _link_button(frame, RPYKIT_LABEL, RPYKIT_URL).pack(fill="x", padx=8, pady=(0, 6))
+
         head("关于")
         body("作者 · %s" % AUTHOR, color=MUTED)
         # The button rather than a bare link: someone who opens 帮助文档 looking
@@ -3451,16 +3587,16 @@ class App(ctk.CTk):
         try:
             with slg_db.session() as conn:
                 summary = slg_scrape.sync_incremental(
-                    conn, fetcher, since=since, log=self._log,
+                    conn, fetcher, new_limit=None, since=since, log=self._log,
                     should_stop=self._stop.is_set,
                     on_progress=lambda i, n, title: self.queue.put(
                         ("progress", "抓详情 %d/%d · %s" % (i, n, title))))
                 # Games that predate the rating/overview columns get topped up
-                # here rather than in a separate chore. Capped and resumable, so
-                # a sync stays minutes and the next one continues where this
-                # stopped.
+                # here rather than in a separate chore. Uncapped: a single sync
+                # drains the whole backlog, which is what a user who leaves it
+                # running in the background wants.
                 filled = slg_scrape.enrich(
-                    conn, fetcher, limit=ENRICH_PER_SYNC, log=self._log,
+                    conn, fetcher, limit=None, log=self._log,
                     should_stop=self._stop.is_set,
                     on_progress=lambda d, total, url: self.queue.put(
                         ("progress", "补全详情 %d/%d" % (d, total))))
