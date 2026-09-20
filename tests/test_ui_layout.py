@@ -1334,35 +1334,34 @@ class SidebarFit(unittest.TestCase):
         for gone in ("covers_btn", "rebuild_btn", "backfill_btn"):
             self.assertFalse(hasattr(self.app, gone), gone)
 
-    def test_the_gear_is_visible_and_leads_to_the_settings(self):
-        # The toolbar gear and 设置… in the sidebar are two doors to one dialog;
-        # the gear is the one that is on screen at every window size.
-        self._assert_has_height("⚙", "设置齿轮")
+    def test_the_gear_is_visible_and_leads_to_the_about_page(self):
+        # The toolbar gear opens 关于 (version/update/links); the set-once tools
+        # live behind 更多工具… in the sidebar - two different doors now.
+        self._assert_has_height("⚙", "关于齿轮")
         try:
-            self.app.open_settings()
-            self.assertIsNotNone(self._dialog("设置"), "设置弹窗没打开")
+            self.app.open_about()
+            self.assertIsNotNone(self._dialog("关于"), "关于弹窗没打开")
         finally:
-            self._close("设置")
+            self._close("关于")
 
-    def test_the_settings_dialog_holds_the_set_once_entries(self):
-        # These four used to be sidebar rows, where they outnumbered the two
-        # controls anyone touches twice.
+    def test_the_tools_dialog_holds_the_set_once_entries(self):
+        # These four are set-once tools, out of the sidebar's routine column.
         try:
-            self.app.open_settings()
-            win = self._dialog("设置")
-            self.assertIsNotNone(win, "设置弹窗没打开")
+            self.app.open_tools()
+            win = self._dialog("更多工具")
+            self.assertIsNotNone(win, "更多工具弹窗没打开")
             texts = [b.cget("text") for b in self._buttons_in(win)]
-            for label in ("标签译名…", "偏好权重…", "翻译设置…", "检查更新"):
+            for label in ("标签译名…", "偏好权重…", "翻译设置…", "扫描本地目录…"):
                 self.assertIn(label, texts)
         finally:
-            self._close("设置")
+            self._close("更多工具")
 
     def test_the_tool_group_no_longer_lists_the_set_once_entries(self):
-        # 标签库 and the local scan are the two that stayed; the moved four must
-        # be out of the column, not merely also reachable from the dialog.
+        # 标签库 and 检查更新 are the two routine tools that stayed; the
+        # set-once four (including the local scan) moved into 更多工具….
         self.assertTrue(self._find("标签库…"), "标签库 被一起搬走了")
-        self.assertTrue(self._find("扫描本地目录"), "扫描本地目录 被一起搬走了")
-        for label in ("标签译名…", "偏好权重…", "翻译设置…", "检查更新"):
+        self.assertTrue(self._find("检查更新"), "检查更新 被一起搬走了")
+        for label in ("标签译名…", "偏好权重…", "翻译设置…", "扫描本地目录"):
             self.assertEqual(self._find(label), [], "%s 还留在左侧栏" % label)
 
     def test_the_version_label_is_just_the_version(self):

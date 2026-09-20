@@ -29,7 +29,7 @@ import slg_scrape
 import slg_translate
 import slg_update
 
-APP_VERSION = "0.15.0"
+APP_VERSION = "0.16.0"
 # The sidebar shows the number and nothing else. build_stamp() still carries
 # the channel and the build time, but it belongs on the 关于 page now: a
 # timestamp in the corner of every screen was answering a question the user
@@ -537,6 +537,7 @@ class App(ctk.CTk):
         self._ov_text = None
         self._tag_editor = None   # the open 标签译名 dialog, if there is one
         self._settings_status = None
+        self._about_status = None
         self.tag_btn = None
         self._engine_seg = None   # the settings dialog's engine switch
         # What refresh() last put on screen, so a sync that changed nothing
@@ -606,7 +607,6 @@ class App(ctk.CTk):
         # invalidate themselves; clearing everything here re-decoded every
         # downloaded thumbnail, which is the bulk of the work of a repaint.
         self._build()
-        self._paint_scan_button()
         self._repaint_update_notice()
         if self.busy:
             self._start_job(self._job_label)
@@ -663,9 +663,9 @@ class App(ctk.CTk):
         # Blanking them here would leave a live window whose buttons had nothing
         # to write through.
         self.view_buttons = {}
-        self.stat_label = self.progress_label = None
+        self.stat_label = self.progress_label = self.progress_bar = None
         self.search_entry = self.settings_btn = None
-        self.sync_btn = self.maintenance_btn = self.scan_btn = None
+        self.sync_btn = self.maintenance_btn = None
         self.update_label = None
 
     def _poll_system(self):
@@ -698,6 +698,25 @@ class App(ctk.CTk):
         label = self.progress_label
         if label is not None and label.winfo_exists():
             label.configure(text=text[:60])
+
+    def _tick_progress(self):
+        """Advance the indeterminate bar while busy; settle to 0 when idle.
+
+        Rescheduled by after() while a job runs. The phase is a transient
+        attribute rather than a real field - it only means anything mid-job.
+        """
+        bar = self.progress_bar
+        if bar is None or not bar.winfo_exists():
+            return
+        if self.busy:
+            phase = getattr(self, "_progress_phase", 0.0) + 0.07
+            if phase > 1.0:
+                phase = 0.0
+            self._progress_phase = phase
+            bar.set(phase)
+            self.after(80, self._tick_progress)
+        else:
+            bar.set(0)
 
     def _ui(self, widget, **kwargs):
         """configure() a widget that may no longer exist.
@@ -785,6 +804,14 @@ class App(ctk.CTk):
                                            wraplength=166, justify="left")
         self.progress_label.pack(pady=(0, 10))
 
+        # A thin indeterminate bar, animated only while a job runs. set(0) is
+        # invisible, so it sits here idle without adding a flickering empty row.
+        self.progress_bar = ctk.CTkProgressBar(
+            header, height=4, corner_radius=2, fg_color=CHIP,
+            progress_color=ACCENT)
+        self.progress_bar.pack(fill="x", padx=18, pady=(0, 10))
+        self.progress_bar.set(0)
+
         # Built here, packed only when a check finds something. The sidebar is
         # the one column that has already been squeezed to zero once, so this
         # goes in with an explicit after= rather than by re-packing the header.
@@ -845,25 +872,16 @@ class App(ctk.CTk):
 
         _rule(nav)
         _section(nav, "工具")
-        # Four rows, not seven. 标签译名/偏好权重/翻译设置/检查更新 are all set-
-        # once-then-forget, and as a list that long they buried the two that are
-        # actually routine (标签库 and the scan) among ones nobody clicks twice.
-        # They live behind 设置… now, which is also where the gear in the
-        # toolbar leads.
+        # The two routine tools stay out here: 标签库 for filtering, and
+        # 检查更新 for "which of my local games has a newer build on the site".
+        # The set-once-then-forget ones (标签译名/偏好权重/翻译设置/扫描本地目录)
+        # live behind 更多工具…, and the toolbar gear opens 关于 instead.
         for text, command in (("标签库…", self.open_tag_picker),
-                              ("设置…", self.open_settings)):
+                              ("检查更新", self.do_updates),
+                              ("更多工具…", self.open_tools)):
             ctk.CTkButton(nav, text=text, height=34, corner_radius=8,
                           fg_color="transparent", text_color=TEXT, hover_color=CARD,
                           anchor="w", command=command).pack(fill="x", padx=12, pady=2)
-        # This one shows which folder it will walk, so "why did it find nothing"
-        # has an answer on screen. Right-click picks a different one - the same
-        # gesture the tag chips use, so it is already in the user's hands.
-        self.scan_btn = ctk.CTkButton(
-            nav, text="扫描本地目录", height=34, corner_radius=8,
-            fg_color="transparent", text_color=TEXT, hover_color=CARD,
-            anchor="w", command=self.do_scan)
-        self.scan_btn.pack(fill="x", padx=12, pady=2)
-        self.scan_btn.bind("<Button-3>", lambda e: self.pick_scan_root())
         ctk.CTkButton(nav, text="帮助文档", height=34, corner_radius=8,
                       fg_color="transparent", text_color=TEXT, hover_color=CARD,
                       anchor="w", command=self.open_help).pack(fill="x", padx=12,
@@ -890,8 +908,27 @@ class App(ctk.CTk):
         right = ctk.CTkFrame(bar, fg_color="transparent")
         right.grid(row=0, column=1, padx=(20, 0), sticky="e")
 
+        # Theme + gear on top: the theme is the thing a user flips most often
+        # and the gear is a one-keystroke "about/update" door, so they sit above
+        # the sort controls instead of below them.
+        theme_row = ctk.CTkFrame(right, fg_color="transparent")
+        theme_row.pack(fill="x")
+        self.settings_btn = ctk.CTkButton(
+            theme_row, text="⚙", width=36, height=30, corner_radius=8,
+            fg_color=CARD, text_color=TEXT, hover_color=CARD_HOVER,
+            font=ui_font(size=14), command=self.open_about)
+        self.settings_btn.pack(side="right", padx=(6, 0))
+        self.theme_switch = ctk.CTkSegmentedButton(
+            theme_row, values=[_THEME_LABELS[m] for m in ("light", "dark", "system")],
+            height=30, corner_radius=8, fg_color=CARD, selected_color=ACCENT,
+            selected_hover_color=ACCENT, unselected_color=CARD,
+            unselected_hover_color=CARD_HOVER, text_color=TEXT,
+            font=ui_font(size=12), command=self._on_theme_pick)
+        self.theme_switch.pack(side="left", fill="x", expand=True)
+        self.theme_switch.set(_THEME_LABELS[self.theme_mode])
+
         sort_row = ctk.CTkFrame(right, fg_color="transparent")
-        sort_row.pack(fill="x")
+        sort_row.pack(fill="x", pady=(6, 0))
         ctk.CTkLabel(sort_row, text="排序", text_color=MUTED,
                      font=ui_font(size=13)).pack(side="left", padx=(0, 8))
         self.sort_menu = ctk.CTkOptionMenu(
@@ -906,24 +943,6 @@ class App(ctk.CTk):
             hover_color=CARD_HOVER, font=ui_font(size=15),
             command=self._toggle_sort_dir)
         self.sort_dir_btn.pack(side="left", padx=(6, 0))
-
-        theme_row = ctk.CTkFrame(right, fg_color="transparent")
-        theme_row.pack(fill="x", pady=(6, 0))
-        # Same height and corner radius as the sort controls beside it, so the
-        # row of three reads as one toolbar instead of three unrelated gadgets.
-        self.settings_btn = ctk.CTkButton(
-            theme_row, text="⚙", width=36, height=30, corner_radius=8,
-            fg_color=CARD, text_color=TEXT, hover_color=CARD_HOVER,
-            font=ui_font(size=14), command=self.open_settings)
-        self.settings_btn.pack(side="right", padx=(6, 0))
-        self.theme_switch = ctk.CTkSegmentedButton(
-            theme_row, values=[_THEME_LABELS[m] for m in ("light", "dark", "system")],
-            height=30, corner_radius=8, fg_color=CARD, selected_color=ACCENT,
-            selected_hover_color=ACCENT, unselected_color=CARD,
-            unselected_hover_color=CARD_HOVER, text_color=TEXT,
-            font=ui_font(size=12), command=self._on_theme_pick)
-        self.theme_switch.pack(side="left", fill="x", expand=True)
-        self.theme_switch.set(_THEME_LABELS[self.theme_mode])
 
         # Permanent and deliberately not dismissible. It lives inside the
         # toolbar rather than in a row of its own on `main` so that a theme
@@ -1739,7 +1758,7 @@ class App(ctk.CTk):
             engine = config.build()
             if not config.api_key and engine.needs_key:
                 raise slg_translate.TranslateError(
-                    "还没填 API Key。点工具栏的齿轮 ⚙（或左侧「设置…」）→「翻译设置…」填一下。")
+                    "还没填 API Key。点左侧栏的「更多工具…」→「翻译设置…」填一下。")
             text = slg_translate.translate_overview(game["overview"], config.api_key,
                                                    config.model, engine=engine)
             slg_db.set_auto_translation(conn, "overview", game["id"],
@@ -1767,7 +1786,7 @@ class App(ctk.CTk):
             engine = config.build()
             if not config.api_key and engine.needs_key:
                 raise slg_translate.TranslateError(
-                    "还没填 API Key。点工具栏的齿轮 ⚙（或左侧「设置…」）→「翻译设置…」填一下。")
+                    "还没填 API Key。点左侧栏的「更多工具…」→「翻译设置…」填一下。")
             title = slg_translate.translate_title(game["title"], config.api_key,
                                                  config.model, engine=engine)
         except slg_translate.TitleGuardError as exc:
@@ -2208,8 +2227,8 @@ class App(ctk.CTk):
     def _dialog_rows(self, win, entries, state="normal"):
         """A dialog body of rows: one button over one blurb, identically styled.
 
-        同步与维护 and 设置 are the same shape and only differ in their text and
-        one optional right-click - so the loop lives here instead of twice.
+        同步与维护 and 更多工具 are the same shape and only differ in their text
+        and one optional right-click - so the loop lives here instead of twice.
         """
         for text, blurb, command, on_right in entries:
             btn = ctk.CTkButton(
@@ -2326,20 +2345,23 @@ class App(ctk.CTk):
         state = "disabled" if self.busy else "normal"
         self._dialog_rows(win, entries, state=state)
 
-    def open_settings(self):
-        """The things you set once, behind one door.
+    def open_tools(self):
+        """The set-once tools, behind one door.
 
         Same shape as 同步与维护 and for the same reason: none of these is what
         the window is for, and as four more rows in the sidebar's 工具 group
-        they pushed the two controls that are routine out of the part of the
-        column a new user reads. Reached from the gear in the toolbar and from
-        设置… in the sidebar; both land here.
+        they buried the routine controls. The toolbar gear no longer lands here
+        - it opens 关于, the system-level door.
 
         Each row closes this window before opening its own, so the two dialogs
         cannot stack - and the next visit rebuilds the list, which is what keeps
         the numbers in the blurbs below honest.
         """
-        win = self._new_dialog("设置", "440x420")
+        root = self.scan_root()
+        scan_blurb = ("把本地游戏库对上号，记录版本号。右键换文件夹。\n当前：%s"
+                      % os.path.basename(root)) if root else \
+                     "把本地游戏库对上号，记录版本号。点它或右键先选文件夹。"
+        win = self._new_dialog("更多工具", "440x480")
         ctk.CTkLabel(win, text="都是设一次就不用再管的东西。\n"
                                "同步与维护在左侧栏的「更多…」里。",
                      text_color=MUTED, font=ui_font(size=12), justify="left",
@@ -2354,11 +2376,58 @@ class App(ctk.CTk):
             ("翻译设置…",
              "配置名称和简介用的翻译引擎与密钥。",
              self.open_translate_settings, None),
-            ("检查更新",
-             "去 GitHub 看看有没有新版本。每 24 小时自动查一次。",
-             self.do_updates, None),
+            ("扫描本地目录…",
+             scan_blurb,
+             self.do_scan, self.pick_scan_root),
         )
-        self._dialog_rows(win, entries)
+        state = "disabled" if self.busy else "normal"
+        self._dialog_rows(win, entries, state=state)
+
+    def open_about(self):
+        """The system-level door: version, update check, links, and the data dir.
+
+        Distinct from 更多工具… on purpose - that dialog holds the set-once
+        translation/tag/scan tools, while this one is about the app itself.
+        """
+        win = self._new_dialog("关于", "440x480")
+        ctk.CTkLabel(win, text=APP_TITLE, text_color=TEXT,
+                     font=ui_font(size=18, weight="bold")).pack(pady=(18, 0))
+        ctk.CTkLabel(win, text="作者 · %s" % AUTHOR, text_color=MUTED,
+                     font=ui_font(size=12)).pack()
+        ctk.CTkLabel(win, text="版本 " + build_stamp(), text_color=MUTED,
+                     font=ui_font(size=12)).pack(pady=(2, 12))
+
+        self._about_status = ctk.CTkLabel(win, text="", text_color=ACCENT,
+                                          font=ui_font(size=12), wraplength=380,
+                                          justify="left")
+        self._about_status.pack(fill="x", padx=24, pady=(0, 8))
+        ctk.CTkButton(win, text="检查软件更新", height=36, corner_radius=8,
+                      fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+                      font=ui_font(size=13),
+                      command=lambda: self._start_update_check(force=True)
+                      ).pack(fill="x", padx=24, pady=(0, 4))
+
+        _link_button(win, GITHUB_LABEL, GITHUB_URL).pack(
+            fill="x", padx=24, pady=(10, 4))
+        _link_button(win, "反馈 / 建议：%s" % CONTACT_EMAIL, CONTACT_MAILTO).pack(
+            fill="x", padx=24, pady=4)
+        ctk.CTkButton(win, text="打开数据目录", height=36, corner_radius=8,
+                      fg_color="transparent", text_color=TEXT, hover_color=CARD,
+                      font=ui_font(size=13),
+                      command=self._open_data_dir).pack(
+            fill="x", padx=24, pady=(4, 0))
+
+        ctk.CTkLabel(win, text="本软件完全免费。没有收费版、没有付费激活、没有隐藏收费入口。\n"
+                               "如果你是通过付费渠道拿到它的，请立即举报。",
+                     text_color=DANGER_TEXT, font=ui_font(size=11), wraplength=380,
+                     justify="left").pack(fill="x", padx=24, pady=(16, 16))
+
+    @staticmethod
+    def _open_data_dir():
+        try:
+            os.startfile(slg_db.app_dir())
+        except OSError:
+            pass
 
     def open_weights(self):
         win = self._new_dialog("偏好权重", "420x560")
@@ -2582,18 +2651,6 @@ class App(ctk.CTk):
                                              wraplength=450, justify="left")
         self._settings_status.grid(row=6, column=0, sticky="ew", pady=(10, 0))
 
-        # Deliberately not called "检查更新": the sidebar already has a button
-        # by that name, and it means "which of my local games have a newer
-        # build on dikgames". Two different questions, two different words.
-        ctk.CTkLabel(frame, text="软件更新", text_color=TEXT, anchor="w",
-                     font=ui_font(size=13)).grid(row=7, column=0, sticky="ew",
-                                                 pady=(22, 4))
-        ctk.CTkButton(frame, text="检查软件更新", height=34, corner_radius=8,
-                      fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
-                      font=ui_font(size=13),
-                      command=lambda: self._start_update_check(force=True)
-                      ).grid(row=8, column=0, sticky="ew")
-
         def paint():
             """Re-apply everything that depends on the engine choice."""
             free = engine_seg.get() == "免费机翻"
@@ -2694,7 +2751,7 @@ class App(ctk.CTk):
         head("常见问题")
 
         body("Q：翻译要怎么开？", color=MUTED)
-        body("A：点工具栏的齿轮 ⚙（或者左侧栏的「设置…」）→「翻译设置…」，有两条路。\n"
+        body("A：点左侧栏的「更多工具…」→「翻译设置…」，有两条路。\n"
              "· 免费机翻：什么都不用填，选上就能用，简介和游戏名都翻。质量一般，"
              "偶尔会被 Google 限流，过几分钟再试。\n"
              "· AI 翻译：填一个 OpenAI 兼容接口的 Key（DeepSeek、硅基流动、Kimi、"
@@ -2709,7 +2766,7 @@ class App(ctk.CTk):
         body("Q：为什么标签只能用 AI 翻？", color=MUTED)
         body("A：标签是全库共用的固定术语，一百多张卡片都显示同一份。机翻每次给的"
              "译法都不一样（netorare 这轮叫「寝取」下轮叫「NTR」），整个库会读起来"
-             "前后矛盾。所以标签翻译需要 AI 引擎——在「设置…」→「翻译设置…」里选一个服务商，"
+             "前后矛盾。所以标签翻译需要 AI 引擎——在「更多工具…」→「翻译设置…」里选一个服务商，"
              "填好 Key，然后点「翻译标签」就行，一趟大概花 1 分钱。")
 
         body("Q：为什么有些游戏名还是英文？", color=MUTED)
@@ -2738,23 +2795,23 @@ class App(ctk.CTk):
              "只有增量同步明显出问题时才需要跑。")
 
         body("Q：右上角那颗齿轮是干什么的？", color=MUTED)
-        body("A：收纳设一次就不用再管的东西——「标签译名…」给标签写中文名，"
-             "「偏好权重…」看你自己的口味，「翻译设置…」配翻译引擎，「检查更新」"
-             "去 GitHub 看有没有新版。左侧栏的「设置…」是同一个门。")
+        body("A：打开「关于」——版本信息、检查软件更新、GitHub 主页、反馈邮箱、"
+             "数据目录都在里面。设一次的工具在左侧栏的「更多工具…」里，"
+             "和这个是两个不同的门。")
 
         body("Q：封面显示灰色方块？", color=MUTED)
         body("A：说明这张封面还没下载。正常「同步」会把封面一起抓下来，所以先再点一次"
              "同步；还是灰的就点左下角「更多…」→「下载封面」补，让它慢慢跑完。")
 
         body("Q：「扫描本地目录」扫哪里？", color=MUTED)
-        body("A：第一次点它会让你选一个文件夹，选完就记住了，按钮上写着它当前认的路径。"
-             "想换一个，在那颗按钮上点右键重新选。\n"
+        body("A：在左侧栏「更多工具…」→「扫描本地目录…」里，第一次点它会让你选一个"
+             "文件夹，选完就记住了。想换一个，在那行上点右键重新选。\n"
              "选中文件夹之后，库里同名（或近似同名）的游戏会被标成「已下载」，"
              "并记下本地版本号，方便和站点上的最新版对比。")
 
         body("Q：搜索、筛选、标签库之间的区别？", color=MUTED)
         body("A：搜索栏按游戏名找；卡片上的标签或「标签库…」里的左键加入筛选、右键排除；"
-             "「设置…」→「偏好权重…」会按你打过的五星评分算出你倾向的标签。")
+             "「更多工具…」→「偏好权重…」会按你打过的五星评分算出你倾向的标签。")
 
         body("Q：深色主题里的「跟随系统」是怎么工作的？", color=MUTED)
         body("A：程序每 5 秒采样一次 Windows 的浅色/深色设置，变了就跟着换，"
@@ -2942,6 +2999,9 @@ class App(ctk.CTk):
         status = self._settings_status
         if status is not None and status.winfo_exists():
             status.configure(text="发现新版本 %s" % release["version"])
+        about = self._about_status
+        if about is not None and about.winfo_exists():
+            about.configure(text="发现新版本 %s" % release["version"])
 
     def _repaint_update_notice(self):
         """Put the notice back on a sidebar that was just rebuilt."""
@@ -2982,13 +3042,14 @@ class App(ctk.CTk):
         # goes.
         self._ui(self.sync_btn, text="停止", state="normal",
                  command=self._cancel_job)
-        # 设置… and 翻译设置… are behind dialogs now, so these reach whichever
+        # 更多工具… and 翻译设置… are behind dialogs now, so these reach whichever
         # window is open - usually none, and that is fine: the entry point the
         # user could click to start a second job is the sync button, which is
         # disabled above.
         self._ui(self.maintenance_btn, state="disabled")
         self._ui(self.settings_btn, state="disabled")
         self._set_progress(label)
+        self.after(0, self._tick_progress)
 
     def _cancel_job(self):
         """Ask the running worker to stop. It stops at its next checkpoint."""
@@ -3010,6 +3071,9 @@ class App(ctk.CTk):
         self._ui(self.maintenance_btn, state="normal")
         self._ui(self.settings_btn, state="normal")
         self._set_progress(message)
+        bar = self.progress_bar
+        if bar is not None and bar.winfo_exists():
+            bar.set(0)
         self._refresh_tag_button()
         if refill:
             self._invalidate_cards()
@@ -3173,16 +3237,7 @@ class App(ctk.CTk):
             initialdir=self.scan_root() or os.path.expanduser("~"), parent=self)
         if chosen:
             slg_db.set_pref(self.conn, PREF_SCAN_ROOT, os.path.normpath(chosen))
-            self._paint_scan_button()
         return self.scan_root()
-
-    def _paint_scan_button(self):
-        if self.scan_btn is None or not self.scan_btn.winfo_exists():
-            return
-        root = self.scan_root()
-        self.scan_btn.configure(
-            text="扫描本地目录（%s）" % os.path.basename(root) if root
-            else "扫描本地目录（右键选文件夹）")
 
     def do_scan(self):
         if self.busy:
@@ -3224,7 +3279,7 @@ class App(ctk.CTk):
         frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         if not behind:
             ctk.CTkLabel(frame, text="没有发现更新。\n"
-                                     "（没数据的话先在左侧点「扫描本地目录」建立台账）",
+                                     "（没数据的话先点左侧「更多工具…」→「扫描本地目录…」建立台账）",
                          text_color=MUTED, justify="left").pack(pady=40)
         for row in behind:
             card = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=8)
