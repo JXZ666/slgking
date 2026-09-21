@@ -402,7 +402,7 @@ class SidebarFit(unittest.TestCase):
         return False
 
     def test_the_game_site_link_is_visible(self):
-        self._assert_has_height(slg_gui.SITE_LABEL, "游戏官网按钮")
+        self._assert_has_height(slg_gui.SITE_LABEL, "数据来源按钮")
 
     def _content_bounds(self, frame):
         """Left and right pixel edges of the labelled widgets inside `frame`."""
@@ -552,6 +552,129 @@ class SidebarFit(unittest.TestCase):
     def test_the_vpn_notice_points_at_the_scrapers_own_base_url(self):
         # Two copies of the URL is one copy that goes stale.
         self.assertEqual(slg_gui.SITE_URL, "https://dikgames.com")
+
+    # --- the feedback group --------------------------------------------------
+
+    def test_the_group_number_is_plain_digits(self):
+        # It gets pasted straight into QQ's search box, so a dash or a space
+        # copied along with it is a bug the user has to clean up by hand.
+        self.assertTrue(slg_gui.QQ_GROUP.isdigit(),
+                        "群号里有非数字字符：%r" % slg_gui.QQ_GROUP)
+        self.assertIn(slg_gui.QQ_GROUP, slg_gui.QQ_GROUP_LABEL)
+
+    def test_the_group_chip_is_in_the_empty_slot_below_the_gear(self):
+        # The point of the slot: it is under the sort controls, and it is
+        # outside the notice band. A chip that drifted into the band would drag
+        # that band's centred contents off the window's axis, which the centring
+        # test below would then blame on the band.
+        self.app.update()
+        chip, gear = self.app.qq_chip, self.app.settings_btn
+        self.assertFalse(self._inside(chip, self.app.vpn_notice),
+                         "小卡跑进说明条里了")
+        self.assertAlmostEqual(
+            chip.winfo_rootx() + chip.winfo_width(),
+            gear.winfo_rootx() + gear.winfo_width(), delta=2,
+            msg="小卡右缘没和齿轮右缘对齐")
+        self.assertAlmostEqual(
+            chip.winfo_rooty(), self.app.vpn_notice.winfo_rooty(), delta=2,
+            msg="小卡没和说明条顶边对齐")
+
+    def test_the_group_number_is_visible_at_the_minimum_size(self):
+        # Scoped to the toolbar: the same digits live in 关于, 帮助文档 and the
+        # detail panel, so an unscoped search would pass even with the chip
+        # collapsed to nothing.
+        hits = [hit for hit in self._find(slg_gui.QQ_GROUP)
+                if self._inside(hit, self.app.toolbar)]
+        self.assertTrue(hits, "工具栏上找不到反馈群号")
+        self._assert_has_height(slg_gui.QQ_GROUP_LABEL, "反馈群号小卡")
+
+    def test_copying_the_group_number_reaches_the_clipboard(self):
+        self.app._copy_value(slg_gui.QQ_GROUP)
+        self.app.update()
+        self.assertEqual(self.app.clipboard_get(), slg_gui.QQ_GROUP)
+
+    def test_the_copy_flashes_and_then_puts_the_button_back(self):
+        # A silent copy leaves the user wondering whether the click landed. Both
+        # halves matter: the check mark is √ rather than ✓ because the latter is
+        # an empty box in 雅黑, and the button must not keep saying 已复制.
+        #
+        # `after` is captured rather than waited on: the real delay is 1.2s, and
+        # a test that sleeps through it is a test nobody runs.
+        button = self.app.qq_btn
+        scheduled = []
+        with mock.patch.object(self.app, "after",
+                               side_effect=lambda ms, fn: scheduled.append(fn)):
+            self.app._copy_value(slg_gui.QQ_GROUP, button,
+                                 slg_gui.QQ_GROUP_LABEL)
+        self.app.update()
+        self.assertEqual(button.cget("text"), "已复制 √")
+        self.assertEqual(self.app.clipboard_get(), slg_gui.QQ_GROUP)
+
+        self.assertTrue(scheduled, "没有安排还原回调")
+        for callback in scheduled:
+            callback()
+        self.app.update()
+        self.assertEqual(button.cget("text"), slg_gui.QQ_GROUP_LABEL)
+
+    def test_a_stale_flash_callback_survives_a_theme_switch(self):
+        # The restore lands 1.2s later, and a theme switch in between rebuilds
+        # the toolbar - so the callback runs against a button Tcl has already
+        # deleted. The winfo_exists guard is the only thing between that and a
+        # TclError traceback with the user's name on it.
+        button = self.app.qq_btn
+        scheduled = []
+        with mock.patch.object(self.app, "after",
+                               side_effect=lambda ms, fn: scheduled.append(fn)):
+            self.app._copy_value(slg_gui.QQ_GROUP, button,
+                                 slg_gui.QQ_GROUP_LABEL)
+        with mock.patch.object(slg_db, "set_pref"):
+            self.app._apply_theme("dark")
+        self.app.update()
+        self.assertFalse(button.winfo_exists(), "按钮没被主题切换重建")
+
+        for callback in scheduled:
+            callback()  # must not raise
+        with mock.patch.object(slg_db, "set_pref"):
+            self.app._apply_theme("light")
+        self.app.update()
+
+    def test_the_group_number_is_in_the_about_dialog(self):
+        self.app.open_about()
+        try:
+            self.app.update()
+            win = self._dialog("关于")
+            self.assertIsNotNone(win, "关于弹窗没打开")
+            hits = [hit for hit in self._find(slg_gui.QQ_GROUP)
+                    if self._inside(hit, win)]
+            self.assertTrue(hits, "关于弹窗里没有群号")
+        finally:
+            self._close("关于")
+
+    def test_the_group_number_is_in_the_help_document(self):
+        self.app.open_help()
+        try:
+            self.app.update()
+            win = self._dialog("帮助文档")
+            self.assertIsNotNone(win, "帮助文档没打开")
+            hits = [hit for hit in self._find(slg_gui.QQ_GROUP)
+                    if self._inside(hit, win)]
+            self.assertTrue(hits, "帮助文档里没有群号")
+        finally:
+            self._close("帮助文档")
+
+    def test_the_group_number_is_in_the_detail_panel(self):
+        # The panel is the one screen every game shows, so the group belongs
+        # next to the feedback email at its foot.
+        self._pool_reset()
+        try:
+            self._select(self._panel_game(0))
+            self.app.update()
+            hits = [hit for hit in self._find(slg_gui.QQ_GROUP)
+                    if self._inside(hit, self.app._detail_parts["feedback"])]
+            self.assertTrue(hits, "详情面板底部没有群号")
+        finally:
+            self.app.selected = None
+            self._finish()
 
     # --- theme ---------------------------------------------------------------
 
@@ -1508,6 +1631,79 @@ class SidebarFit(unittest.TestCase):
             win.destroy()
             self.app.update()
 
+    def _help_lines(self):
+        """Every label text in 帮助文档, in the order it was packed.
+
+        The doc is a single scrolling column of labels with no structure of its
+        own, so pack order is the only thing that says where a section sits.
+
+        Only the customtkinter widgets are read: every CTkLabel wraps a plain
+        tkinter.Label carrying the same text, so walking raw children reports
+        each line twice - and the inner one is not the widget that was packed.
+        """
+        self.app.open_help()
+        win = self._dialog("帮助文档")
+        self.assertIsNotNone(win, "帮助文档没打开")
+        lines = []
+
+        def walk(widget):
+            for child in widget.winfo_children():
+                if type(child).__module__.startswith("customtkinter"):
+                    try:
+                        text = child.cget("text")
+                    except Exception:  # noqa: BLE001 - most widgets have no text
+                        text = None
+                    if isinstance(text, str):
+                        lines.append(text)
+                walk(child)
+
+        walk(win)
+        return lines
+
+    def test_the_help_doc_opens_with_the_three_step_ladder(self):
+        # The three clicks that make the app worth using lived only in the
+        # first-run welcome, which is gone by the time anyone needs reminding.
+        try:
+            lines = self._help_lines()
+        finally:
+            self._close("帮助文档")
+        steps = [t for t in lines if t.startswith(("第 1 步", "第 2 步", "第 3 步"))]
+        self.assertEqual(len(steps), 3, lines[:12])
+        index = [lines.index(s) for s in steps]
+        self.assertEqual(index, sorted(index), "三步的顺序乱了")
+        self.assertLess(lines.index("三步上手"), lines.index("这个软件是什么"),
+                        "三步上手 应该在开篇")
+
+    def test_the_help_faq_is_grouped(self):
+        # Twelve answers in a flat run meant the one you wanted was found by
+        # scrolling, not by looking.
+        try:
+            lines = self._help_lines()
+        finally:
+            self._close("帮助文档")
+        start = lines.index("常见问题")
+        end = lines.index("下载的游戏是英文的怎么办")
+        for group in ("同步与数据", "翻译", "界面与设置"):
+            self.assertIn(group, lines, lines)
+            self.assertTrue(start < lines.index(group) < end,
+                            "%s 不在常见问题里" % group)
+        self.assertTrue(any(t.startswith("Q：") for t in lines), "问答没了")
+
+    def test_the_help_disclaimers_come_last(self):
+        # The no-download notice used to sit between 常见问题 and the
+        # English-game instructions, interrupting the one part of the doc that
+        # tells someone what to actually do next.
+        try:
+            lines = self._help_lines()
+        finally:
+            self._close("帮助文档")
+        games = lines.index("下载的游戏是英文的怎么办")
+        disclaimer = next(i for i, t in enumerate(lines)
+                          if "不提供任何下载" in t)
+        free = next(i for i, t in enumerate(lines) if "完全免费" in t)
+        self.assertGreater(disclaimer, games, "无下载声明不该夹在教程中间")
+        self.assertGreater(free, disclaimer, "免费声明应该在最后")
+
     def test_the_sidebar_offers_sync_and_one_more_button(self):
         # Four buttons in a column - 28/38/34/28 px tall, two muted and one
         # filled, two left-aligned and one centred - gave a new user no way to
@@ -1516,7 +1712,7 @@ class SidebarFit(unittest.TestCase):
         self.assertIsNotNone(self.app.sync_btn)
         self.assertIsNotNone(self.app.maintenance_btn)
         self.assertIsNotNone(self.app.settings_btn)
-        self._assert_has_height("同步 dikgames", "同步按钮")
+        self._assert_has_height("更新游戏数据", "同步按钮")
         self._assert_has_height("更多", "更多按钮")
         for gone in ("covers_btn", "rebuild_btn", "backfill_btn"):
             self.assertFalse(hasattr(self.app, gone), gone)

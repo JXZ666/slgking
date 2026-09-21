@@ -93,6 +93,21 @@ CREATE TABLE IF NOT EXISTS state (
     updated_at TEXT
 );
 
+-- Named playlists the user curates. A game can sit in any number of them, and
+-- deleting a collection drops its rows but never the games themselves.
+CREATE TABLE IF NOT EXISTS collections (
+    id         INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    created_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS collection_items (
+    collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+    game_id       INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+    added_at      TEXT,
+    PRIMARY KEY (collection_id, game_id)
+);
+
 CREATE TABLE IF NOT EXISTS weights (
     tag_id       INTEGER PRIMARY KEY REFERENCES tags(id) ON DELETE CASCADE,
     weight       REAL    NOT NULL DEFAULT 0,
@@ -536,7 +551,8 @@ def upsert_detail(conn, game_id, rating=None, version=None, developer=None,
 # --- querying ------------------------------------------------------------------
 
 def find_games(conn, include=(), exclude=(), search=None, statuses=None,
-               downloaded_only=False, sort="score", desc=True):
+               downloaded_only=False, collection_id=None,
+               sort="score", desc=True):
     """Games matching a tag intersection (include) minus a tag union (exclude).
 
     include is an AND: every tag listed must be present. exclude is a NOT:
@@ -571,6 +587,11 @@ def find_games(conn, include=(), exclude=(), search=None, statuses=None,
 
     if downloaded_only:
         where.append("l.game_id IS NOT NULL")
+
+    if collection_id is not None:
+        where.append(
+            "g.id IN (SELECT game_id FROM collection_items WHERE collection_id = ?)")
+        params.append(collection_id)
 
     sql = """
         SELECT g.*, s.status, s.note, s.my_rating, l.folder_path, l.folder_version,
@@ -1059,6 +1080,104 @@ def get_state(conn, game_id):
 def rates_histogram(conn):
     return conn.execute("SELECT COUNT(*) AS n FROM state WHERE my_rating IS NOT NULL"
                         ).fetchone()["n"]
+
+
+# --- collections ---------------------------------------------------------------
+
+def list_collections(conn):
+    """All collections, newest first, each with its member count."""
+    return [dict(row) for row in conn.execute(
+        "SELECT c.id, c.name, "
+        "(SELECT COUNT(*) FROM collection_items ci WHERE ci.collection_id = c.id) AS count "
+        "FROM collections c ORDER BY c.id")]
+
+
+def create_collection(conn, name):
+    """Create a collection, or return the id of the one that already has the name."""
+    name = (name or "").strip()
+    if not name:
+        return None
+    conn.execute("INSERT OR IGNORE INTO collections (name, created_at) VALUES (?, ?)",
+                 (name, _now()))
+    conn.commit()
+    row = conn.execute("SELECT id FROM collections WHERE name = ?", (name,)).fetchone()
+    return row["id"] if row else None
+
+
+def delete_collection(conn, collection_id):
+    conn.execute("DELETE FROM collections WHERE id = ?", (collection_id,))
+    conn.commit()
+
+
+def collections_for_game(conn, game_id):
+    """Ids of the collections `game_id` currently belongs to."""
+    return [row["collection_id"] for row in conn.execute(
+        "SELECT collection_id FROM collection_items WHERE game_id = ?", (game_id,))]
+
+
+def set_game_collections(conn, game_id, collection_ids):
+    """Replace the game's collection membership with exactly `collection_ids`."""
+    conn.execute("DELETE FROM collection_items WHERE game_id = ?", (game_id,))
+    for cid in collection_ids:
+        conn.execute(
+            "INSERT OR IGNORE INTO collection_items (collection_id, game_id, added_at)"
+            " VALUES (?, ?, ?)", (cid, game_id, _now()))
+    conn.commit()
+
+
+def remove_from_collection(conn, game_id, collection_id):
+    """Drop one game from one collection; leave the collection itself alone."""
+    conn.execute(
+        "DELETE FROM collection_items WHERE collection_id = ? AND game_id = ?",
+        (collection_id, game_id))
+    conn.commit()
+
+
+# --- backup / restore ----------------------------------------------------------
+
+# The user's own curation, in JSON: ratings/notes/status, tag exclusions,
+# collections and their members, and hand-written translations. prefs (which
+# holds the API key and the sync gate) and the machine-translation cache stay
+# out - neither is something to carry into another machine's library.
+_BACKUP_TABLES = (
+    ("state", ("game_id", "status", "note", "my_rating", "updated_at")),
+    ("exclusions", ("tag", "source")),
+    ("collections", ("id", "name", "created_at")),
+    ("collection_items", ("collection_id", "game_id", "added_at")),
+    ("manual_translations", ("kind", "ref", "lang", "text", "updated_at")),
+)
+
+
+def export_user_data(conn):
+    """All of the user's own data, as a JSON-serialisable dict."""
+    out = {}
+    for table, _cols in _BACKUP_TABLES:
+        out[table] = [dict(r) for r in conn.execute("SELECT * FROM %s" % table)]
+    return out
+
+
+def import_user_data(conn, data):
+    """Overwrite the user's own tables with the backup's contents.
+
+    Children (collection_items) are cleared before their parents (collections),
+    and parents are written back before their children, so the foreign keys
+    never see a dangling reference.
+    """
+    def load(table, cols, records):
+        if not records:
+            return
+        qmarks = ",".join("?" * len(cols))
+        conn.executemany(
+            "INSERT OR REPLACE INTO %s (%s) VALUES (%s)"
+            % (table, ",".join(cols), qmarks),
+            [tuple(r.get(c) for c in cols) for r in records])
+
+    for table in ("collection_items", "state", "exclusions",
+                  "collections", "manual_translations"):
+        conn.execute("DELETE FROM %s" % table)
+    for table, cols in _BACKUP_TABLES:
+        load(table, cols, data.get(table, []))
+    conn.commit()
 
 
 # --- preference weights --------------------------------------------------------

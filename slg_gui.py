@@ -9,6 +9,7 @@ Light, card-based, Win11-ish - the stock tkinter look reads as Windows XP and
 that was the one thing about the previous tools the user actively disliked.
 """
 
+import json
 import os
 import queue
 import sys
@@ -29,7 +30,7 @@ import slg_scrape
 import slg_translate
 import slg_update
 
-APP_VERSION = "0.19.0"
+APP_VERSION = "0.20.0"
 # The sidebar shows the number and nothing else. build_stamp() still carries
 # the channel and the build time, but it belongs on the 关于 page now: a
 # timestamp in the corner of every screen was answering a question the user
@@ -41,10 +42,15 @@ GITHUB_URL = "https://github.com/JXZ666"
 GITHUB_LABEL = "GitHub 主页 · JXZ666"
 CONTACT_EMAIL = "jxzsaikou666@qq.com"
 CONTACT_MAILTO = "mailto:" + CONTACT_EMAIL
+# The group has no join link that works without a key, so the number is offered
+# as copyable text instead of a URL. Bare digits, no dashes or spaces: whatever
+# is on the clipboard has to paste straight into QQ's search box.
+QQ_GROUP = "1124074040"
+QQ_GROUP_LABEL = "反馈建议群 · %s" % QQ_GROUP
 # Taken from the scraper rather than typed again: this is the site the catalogue
 # comes from, and two copies of that URL is one copy that goes stale.
 SITE_URL = slg_scrape.BASE
-SITE_LABEL = "游戏官网 · dikgames.com"
+SITE_LABEL = "数据来源 · dikgames.com"
 # The site is English-first and most games ship untranslated; pointing users at
 # LunaTranslator (real-time machine translation) plus the author's own RenPy
 # tooling is the one referral that both helps and fits the "retrieval only" line.
@@ -131,11 +137,11 @@ DETAIL_W, DETAIL_H = 300, 185
 # cost was never the query - find_games still reads the whole catalogue in
 # single-digit milliseconds - it was the widget count.
 #
-# Seven is the measured fit of the maximized window, and that is the size this
+# Eight is the measured fit of the maximized window, and that is the size this
 # is designed against - a page that fills the screen with no scrolling is what
 # the number is for. A card is cover-driven (79px * 1.5 widget scaling on the
 # machine this was built for, plus its padding and three text lines = 142px),
-# so seven is ~1000px of list.
+# so eight is ~1140px of list.
 #
 # Below that the page simply does not all fit, and that is deliberate: the
 # cards keep their size and the scroll area does the rest. Shrinking them to
@@ -149,7 +155,7 @@ DETAIL_W, DETAIL_H = 300, 185
 # a count that followed the window would silently move the game off the page
 # you just turned to. The pager sits outside the scroll area (see _build), so
 # it is reachable without scrolling whatever this is set to.
-PAGE_SIZE = 7
+PAGE_SIZE = 8
 # The card tagline's wrap width. It is a function of COVER_W - the text column
 # is whatever is left of the list after the cover and its padding - so the two
 # have to move together. It was a literal 430, which silently clipped the
@@ -198,7 +204,7 @@ SORT_ARROW = {True: "↓ 降序", False: "↑ 升序"}
 # "the site has none": the library cannot yet tell "never fetched" from "the
 # site never wrote one", and 968 of 1595 rows were in the first state. Claiming
 # the site had no blurb for those would have been a lie the user could check.
-EMPTY_OVERVIEW = ("暂无简介 — 本站没有提供，或还没抓到（点「同步 dikgames」可补齐）。\n"
+EMPTY_OVERVIEW = ("暂无简介 — 本站没有提供，或还没抓到（点「更新游戏数据」可补齐）。\n"
                   "想自己写一段，点上面的「✎ 改简介」。")
 
 # Nearly every game carries these, so leading with them wastes the three lines
@@ -253,6 +259,24 @@ def _rule(parent):
         fill="x", padx=12, pady=(12, 0))
 
 
+def _nav_button(parent, text, command, active=False, height=34, size=13,
+                **pack_kwargs):
+    """A sidebar nav button: muted by default, filled when `active`.
+
+    The view and tool rows all share this shape; the one-off buttons (同步,
+    the delete-collection danger row) differ enough to stay inline.
+    """
+    btn = ctk.CTkButton(
+        parent, text=text, anchor="w", height=height, corner_radius=8,
+        fg_color=CARD if active else "transparent",
+        text_color=TEXT, hover_color=CARD,
+        font=ui_font(size=size), command=command)
+    pack = {"fill": "x", "padx": 12, "pady": 2}
+    pack.update(pack_kwargs)
+    btn.pack(**pack)
+    return btn
+
+
 def _provider_id(label):
     """The provider id behind an option menu's display name."""
     for row in slg_engines.PROVIDERS:
@@ -272,6 +296,25 @@ def _link_button(parent, text, url, **pack_kwargs):
                            fg_color=CHIP, text_color=ACCENT, hover_color=CARD_HOVER,
                            font=ui_font(size=12), anchor="w",
                            command=lambda u=url: webbrowser.open(u))
+    if pack_kwargs:
+        button.pack(**pack_kwargs)
+    return button
+
+
+def _copy_button(parent, text, value, app, **pack_kwargs):
+    """`_link_button`'s twin, for text that is copied rather than opened.
+
+    Same chrome on purpose: the email link and the group number sit side by side
+    in three different dialogs, and one of them looking like a plain caption
+    would read as the less important of the two.
+
+    The command is attached after construction because the flash needs the
+    button being built, which the lambda cannot close over until it exists.
+    """
+    button = ctk.CTkButton(parent, text=text, height=30, corner_radius=8,
+                           fg_color=CHIP, text_color=ACCENT, hover_color=CARD_HOVER,
+                           font=ui_font(size=12), anchor="w")
+    button.configure(command=lambda: app._copy_value(value, button, text))
     if pack_kwargs:
         button.pack(**pack_kwargs)
     return button
@@ -560,6 +603,7 @@ class App(ctk.CTk):
         self.include, self.exclude = [], []
         self.search = ""
         self.view = None
+        self.collection_id = None
         self.sort = "score"
         self.sort_desc = SORT_DEFAULT_DESC[self.sort]
         self.selected = None
@@ -821,7 +865,7 @@ class App(ctk.CTk):
                      font=ui_font(size=14, weight="bold")).pack(
             fill="x", padx=8, pady=(14, 2))
         steps = (
-            "第 1 步　点「同步 dikgames」抓取游戏目录（建议开梯子）。",
+            "第 1 步　点「更新游戏数据」抓取游戏目录（建议开梯子）。",
             "第 2 步　点开任意游戏，在右侧点星星打分。",
             "第 3 步　用标签筛选 + 「按xp推荐」找新游戏。",
         )
@@ -838,34 +882,21 @@ class App(ctk.CTk):
                       font=ui_font(size=14), command=win.destroy).pack(
             fill="x", padx=24, pady=(0, 16))
 
-    def _set_progress(self, text):
+    def _set_progress(self, text, frac=None):
         """progress_label is recreated on a theme switch, so guard the write.
 
         The drain loop and the worker callbacks both land here, and they can
-        fire between the teardown and the rebuild.
+        fire between the teardown and the rebuild. frac, when given, drives the
+        progress bar so it tracks the real per-game count instead of a fake
+        sweep.
         """
         label = self.progress_label
         if label is not None and label.winfo_exists():
             label.configure(text=text[:60])
-
-    def _tick_progress(self):
-        """Advance the indeterminate bar while busy; settle to 0 when idle.
-
-        Rescheduled by after() while a job runs. The phase is a transient
-        attribute rather than a real field - it only means anything mid-job.
-        """
-        bar = self.progress_bar
-        if bar is None or not bar.winfo_exists():
-            return
-        if self.busy:
-            phase = getattr(self, "_progress_phase", 0.0) + 0.07
-            if phase > 1.0:
-                phase = 0.0
-            self._progress_phase = phase
-            bar.set(phase)
-            self.after(80, self._tick_progress)
-        else:
-            bar.set(0)
+        if frac is not None:
+            bar = self.progress_bar
+            if bar is not None and bar.winfo_exists():
+                bar.set(frac)
 
     def _ui(self, widget, **kwargs):
         """configure() a widget that may no longer exist.
@@ -1001,7 +1032,7 @@ class App(ctk.CTk):
         # cost - and as a column of four differently-sized buttons they gave a
         # new user no way to tell which one they wanted. Sync stays out here
         # because it is the one that is actually routine.
-        self.sync_btn = ctk.CTkButton(actions, text="同步 dikgames", height=38,
+        self.sync_btn = ctk.CTkButton(actions, text="更新游戏数据", height=38,
                                       corner_radius=8, fg_color=ACCENT,
                                       command=self.do_sync)
         self.sync_btn.pack(fill="x", padx=12, pady=(0, 6))
@@ -1020,16 +1051,27 @@ class App(ctk.CTk):
         _section(nav, "浏览")
         self.view_buttons = {}
         for label, status in VIEWS:
-            btn = ctk.CTkButton(
-                nav, text=label, anchor="w", height=36, corner_radius=8,
+            self.view_buttons[status] = _nav_button(
+                nav, label, lambda s=status: self.set_view(s),
                 # CARD for the active view, so a theme rebuild does not come back
                 # with the highlight missing.
-                fg_color=CARD if status == self.view else "transparent",
-                text_color=TEXT, hover_color=CARD,
-                font=ui_font(size=14),
-                command=lambda s=status: self.set_view(s))
-            btn.pack(fill="x", padx=12, pady=2)
-            self.view_buttons[status] = btn
+                active=(status == self.view), height=36, size=14)
+
+        colbox = ctk.CTkFrame(nav, fg_color="transparent")
+        colbox.pack(fill="x", padx=12, pady=(6, 2))
+        self.collection_menu = ctk.CTkOptionMenu(
+            colbox, values=["收藏夹"], height=34, corner_radius=8,
+            fg_color=SIDEBAR, text_color=TEXT, button_color=CHIP,
+            button_hover_color=CARD_HOVER, font=ui_font(size=13),
+            command=self._on_collection)
+        self.collection_menu.pack(fill="x")
+        # Hidden until a specific collection is chosen: it deletes the one the
+        # dropdown is currently on, which is meaningless for the 收藏夹 (all).
+        self.delete_collection_btn = ctk.CTkButton(
+            colbox, text="删除此收藏夹", height=28, corner_radius=8, anchor="w",
+            fg_color="transparent", text_color=DANGER_TEXT, hover_color=CHIP,
+            font=ui_font(size=12), command=self._delete_selected_collection)
+        self._refresh_collection_menu()
 
         _rule(nav)
         _section(nav, "工具")
@@ -1040,13 +1082,31 @@ class App(ctk.CTk):
         for text, command in (("标签库…", self.open_tag_picker),
                               ("检查更新", self.do_updates),
                               ("更多工具…", self.open_tools)):
-            ctk.CTkButton(nav, text=text, height=34, corner_radius=8,
-                          fg_color="transparent", text_color=TEXT, hover_color=CARD,
-                          anchor="w", command=command).pack(fill="x", padx=12, pady=2)
-        ctk.CTkButton(nav, text="帮助文档", height=34, corner_radius=8,
-                      fg_color="transparent", text_color=TEXT, hover_color=CARD,
-                      anchor="w", command=self.open_help).pack(fill="x", padx=12,
-                                                                pady=(2, 10))
+            _nav_button(nav, text, command)
+        _nav_button(nav, "帮助文档", self.open_help, pady=(2, 10))
+
+    def _copy_value(self, value, button=None, restore=None):
+        """Put `value` on the clipboard, and say so on the button that did it.
+
+        The flash rather than a toast: every caller is already a button, and a
+        label appearing somewhere else in the window is easy to miss when the
+        click itself produced no other visible change.
+
+        `winfo_exists` guards the restore - a theme switch rebuilds the toolbar
+        and the dialogs wholesale, so the callback can outlive its own button.
+        """
+        self.clipboard_clear()
+        self.clipboard_append(value)
+        if button is None or not button.winfo_exists():
+            return
+        # √, not ✓: the check mark is an empty box in 雅黑 and 宋体 alike.
+        button.configure(text="已复制 √")
+
+        def restore_text():
+            if button.winfo_exists():
+                button.configure(text=restore)
+
+        self.after(1200, restore_text)
 
     def _build_toolbar(self, parent):
         bar = ctk.CTkFrame(parent, fg_color="transparent")
@@ -1058,14 +1118,11 @@ class App(ctk.CTk):
         # pushed the placeholder into the left edge, and with the whole row to
         # itself the box says what it is without it.
         #
-        # 70 is not a look, it is the row height: sort and the theme switch
-        # used to be stacked beside this box (30 + 6 + 34), and now that the
-        # theme switch has moved into 设置 the sort row has the whole right-hand
-        # side to itself. Growing the box to that height is what puts its lower
-        # edge flush against the notice band below, which is the row's own
-        # bottom edge - see the pady on vpn_notice.
+        # 38 is the sort controls' own height: the box no longer stretches to
+        # fill the row, so it reads as a search field rather than a banner, and
+        # the gap above the notice band below keeps the two from touching.
         self.search_entry = ctk.CTkEntry(
-            bar, placeholder_text="搜索游戏名…", height=70, corner_radius=8,
+            bar, placeholder_text="搜索游戏名…", height=38, corner_radius=8,
             fg_color=CARD, text_color=TEXT, placeholder_text_color=MUTED,
             border_width=1, border_color=CHIP, font=ui_font(size=13),
             justify="center")
@@ -1118,11 +1175,12 @@ class App(ctk.CTk):
         # things inside it sit together on the centre axis instead of being
         # pushed to opposite ends. The stretch of empty blue between them was
         # the whole reason this row looked wrong.
-        # No top padding: this band is what the search box's lower edge is flush
-        # against, and the 8px that used to separate them read as the search box
-        # floating above the header instead of heading it.
+        # A small top gap separates this band from the search box above: with the
+        # box back at the sort row's height, the band no longer has to sit flush
+        # against it to read as the toolbar's own bottom edge.
         self.vpn_notice = ctk.CTkFrame(bar, fg_color=CHIP, corner_radius=8)
-        self.vpn_notice.grid(row=1, column=0, columnspan=1, sticky="ew")
+        self.vpn_notice.grid(row=1, column=0, columnspan=1, sticky="ew",
+                             pady=(8, 0))
         inner = _centred_row(self.vpn_notice, row=0, column=0, sticky="ew")
         ctk.CTkLabel(inner, text="建议开启梯子（VPN / 代理）后使用本软件",
                      text_color=TEXT, font=ui_font(size=12)
@@ -1132,6 +1190,25 @@ class App(ctk.CTk):
                       hover_color=CARD_HOVER, font=ui_font(size=12),
                       command=lambda: webbrowser.open(SITE_URL)
                       ).pack(side="left", pady=6)
+
+        # The group number sits in the band's own row but outside the band, in
+        # the column the sort controls occupy: that cell was empty, and it is
+        # the one place on the toolbar a reader already looks. Outside rather
+        # than appended to the centred group inside, because the band's contents
+        # are pinned to the window's centre axis by a layout test - a third item
+        # in there would drag the other two off it.
+        #
+        # Same tint, corner radius and 28+6*2 height as the band, so the two read
+        # as a pair rather than as a card that happens to sit nearby.
+        self.qq_chip = ctk.CTkFrame(bar, fg_color=CHIP, corner_radius=8)
+        self.qq_chip.grid(row=1, column=1, sticky="e", padx=(8, 0), pady=(8, 0))
+        self.qq_btn = ctk.CTkButton(
+            self.qq_chip, text=QQ_GROUP_LABEL, height=28, corner_radius=6,
+            fg_color="transparent", text_color=ACCENT, hover_color=CARD_HOVER,
+            font=ui_font(size=12),
+            command=lambda: self._copy_value(QQ_GROUP, self.qq_btn,
+                                             QQ_GROUP_LABEL))
+        self.qq_btn.pack(padx=10, pady=6)
 
     def _on_theme_pick(self, label):
         mode = next(m for m, text in _THEME_LABELS.items() if text == label)
@@ -1201,6 +1278,39 @@ class App(ctk.CTk):
         for key, btn in self.view_buttons.items():
             btn.configure(fg_color=CARD if key == status else "transparent")
         self.refresh()
+
+    def _on_collection(self, name):
+        cols = slg_db.list_collections(self.conn)
+        self.collection_id = next((c["id"] for c in cols if c["name"] == name), None)
+        self.page = 1
+        self._sync_delete_collection_btn()
+        self.refresh()
+
+    def _refresh_collection_menu(self):
+        """Repopulate the 收藏夹 dropdown, keeping the current choice."""
+        menu = getattr(self, "collection_menu", None)
+        if menu is None or not menu.winfo_exists():
+            return
+        cols = slg_db.list_collections(self.conn)
+        names = ["收藏夹"] + [c["name"] for c in cols]
+        by_id = {c["id"]: c["name"] for c in cols}
+        menu.configure(values=names)
+        menu.set(by_id.get(self.collection_id, "收藏夹"))
+        self._sync_delete_collection_btn()
+
+    def _sync_delete_collection_btn(self):
+        """Show the 删除此收藏夹 row only when a specific collection is on."""
+        btn = getattr(self, "delete_collection_btn", None)
+        if btn is None or not btn.winfo_exists():
+            return
+        if self.collection_id is not None:
+            btn.pack(fill="x", pady=(4, 0))
+        else:
+            btn.pack_forget()
+
+    def _delete_selected_collection(self):
+        if self.collection_id is not None:
+            self._delete_collection(self.collection_id)
 
     def _on_search(self, event):
         # Rebuilding the list on every keystroke is what made typing feel like
@@ -1278,7 +1388,8 @@ class App(ctk.CTk):
             self.conn, include=self.include, exclude=self.exclude,
             search=self.search or None,
             statuses=[self.view] if self.view else None,
-            downloaded_only=False, sort=self.sort, desc=self.sort_desc)
+            downloaded_only=False, collection_id=self.collection_id,
+            sort=self.sort, desc=self.sort_desc)
         # A filter or a sort handler sets page 1 already; this is for the other
         # way the set can shrink - the tick after a sync emptied the tail, or a
         # drop that took the last row off the last page.
@@ -1546,7 +1657,7 @@ class App(ctk.CTk):
         render and leaked into the list on every non-empty one."""
         if self._empty_label is None:
             self._empty_label = ctk.CTkLabel(
-                self.list, text="没有匹配的游戏。\n左侧点「同步 dikgames」先把站点数据拉下来。",
+                self.list, text="没有匹配的游戏。\n左侧点「更新游戏数据」先把站点数据拉下来。",
                 text_color=MUTED, font=ui_font(size=13), justify="left")
         shown = bool(self._empty_label.winfo_manager())
         if show and not shown:
@@ -1587,8 +1698,10 @@ class App(ctk.CTk):
         # cover_file belongs here for the same reason the three editable fields
         # do: a cover that lands while the panel is open has to show up in it,
         # and downloading covers changes nothing else about the row.
+        # collection_id rides along so the 移出此收藏夹 button appears and
+        # disappears when the user switches collections on the same game.
         return (game["id"], game["status"], game["my_rating"], game["note"],
-                game["cover_file"])
+                game["cover_file"], self.collection_id)
 
     def _render_detail_if_stale(self):
         if self._detail_signature() == self._detail_sig:
@@ -1830,12 +1943,13 @@ class App(ctk.CTk):
         self._title_note = note
         add("title_note", note, fill="x", padx=18, pady=(2, 0))
 
-        add("url", ctk.CTkButton(d, text="在浏览器打开 dikgames 页面", height=30,
-                                 corner_radius=8, fg_color=CHIP, text_color=TEXT,
-                                 hover_color=CARD_HOVER),
-            fill="x", padx=18, pady=(10, 4))
+        order.extend(self._detail_action(
+            d, parts, "url", "在浏览器打开 dikgames 页面", pady=(10, 4)))
 
         order.extend(self._build_detail_share(d, parts))
+        order.extend(self._build_detail_open_folder(d, parts))
+        order.extend(self._build_detail_collect(d, parts))
+        order.extend(self._build_detail_remove_collection(d, parts))
 
         order.extend(self._build_detail_status(d, parts))
         order.extend(self._build_detail_stars(d, parts))
@@ -1867,18 +1981,28 @@ class App(ctk.CTk):
                           "也帮忙推荐给周围的朋友。",
                      text_color=MUTED, font=ui_font(size=11), wraplength=340,
                      justify="left", anchor="w").pack(fill="x")
-        ctk.CTkButton(feedback, text="反馈 / 建议：%s" % CONTACT_EMAIL, height=22,
-                      corner_radius=6, fg_color="transparent", text_color=ACCENT,
-                      hover_color=CHIP, font=ui_font(size=11), anchor="w",
-                      command=lambda: webbrowser.open(CONTACT_MAILTO)
-                      ).pack(anchor="w", pady=(2, 0))
+        # One row per way of reaching the author, same chrome for each: the
+        # panel is the only screen every game shows, so both doors belong here.
+        def foot_link(text):
+            btn = ctk.CTkButton(feedback, text=text, height=22, corner_radius=6,
+                                fg_color="transparent", text_color=ACCENT,
+                                hover_color=CHIP, font=ui_font(size=11),
+                                anchor="w")
+            btn.pack(anchor="w", pady=(2, 0))
+            return btn
+
+        mail = foot_link("反馈 / 建议：%s" % CONTACT_EMAIL)
+        mail.configure(command=lambda: webbrowser.open(CONTACT_MAILTO))
+        qq_text = "反馈建议群 %s（点击复制）" % QQ_GROUP
+        qq = foot_link(qq_text)
+        qq.configure(command=lambda: self._copy_value(QQ_GROUP, qq, qq_text))
         add("feedback", feedback, fill="x", padx=18, pady=(0, 20))
 
         self._detail_parts = parts
         self._detail_order = order
         self._detail_shown = None
 
-    def _layout_detail(self, show_url):
+    def _layout_detail(self, show_url, show_folder=False, show_remove=False):
         """Show, hide and order the panel's blocks.
 
         pack() appends, so a block that comes back lands at the bottom.
@@ -1893,7 +2017,8 @@ class App(ctk.CTk):
         app is broken", and there was nowhere to click 改简介 on a game whose
         translation they wanted to write by hand.
         """
-        wanted = {"url": show_url}
+        wanted = {"url": show_url, "open_folder": show_folder,
+                  "remove_collection": show_remove}
         keys = [key for key, _w, _p in self._detail_order if wanted.get(key, True)]
         if keys == self._detail_shown:
             return
@@ -1913,6 +2038,10 @@ class App(ctk.CTk):
         p["title_note"].configure(text="")
         if game["url"]:
             p["url"].configure(command=lambda u=game["url"]: webbrowser.open(u))
+        folder = game.get("folder_path")
+        if folder:
+            p["open_folder"].configure(
+                command=lambda f=folder: self._open_local_folder(f))
         self._sync_status_btns(game)
         self._sync_star_btns(game)
         self._fill_heat(game)
@@ -1936,7 +2065,8 @@ class App(ctk.CTk):
         # should do.
         p["ov_seg"].set("原文")
         self._apply_lang(game, "原文", request=False)
-        self._layout_detail(bool(game["url"]))
+        self._layout_detail(bool(game["url"]), bool(folder),
+                            self.collection_id is not None)
 
     def _show_title(self, text):
         label = self._title_label
@@ -2156,14 +2286,17 @@ class App(ctk.CTk):
                                 fg_color=CHIP, text_color=TEXT,
                                 hover_color=CARD_HOVER,
                                 command=lambda s=status: self._set_status(s))
-            btn.pack(side="left", padx=3)
+            # fill+expand so the two share the row's width evenly: left-packed
+            # they stayed the same width in fullscreen and left the right half
+            # empty.
+            btn.pack(side="left", fill="x", expand=True, padx=3)
             buttons[status] = btn
         self._status_btns = buttons
         parts["status"] = row
         return [("status", row, {"fill": "x", "padx": 18, "pady": (8, 0)})]
 
     def _sync_status_btns(self, game):
-        """Colour the three status buttons for `game` without rebuilding them.
+        """Colour the two status buttons for `game` without rebuilding them.
 
         A status write used to end in a full refresh, which destroyed and
         recreated the very button the user had just pressed - the highlight
@@ -2220,13 +2353,40 @@ class App(ctk.CTk):
         parts["heat"] = label
         return [("heat", label, {"anchor": "w", "padx": 18, "pady": (10, 0)})]
 
+    def _detail_action(self, d, parts, key, text, command=None, accent=False,
+                       pady=(0, 4)):
+        """A filled detail-panel action button, registered under `key`.
+
+        share/open_folder/collect/url/remove_collection are one widget restyled
+        five times; the constructor's seven kwargs are the thing that drifted.
+        """
+        btn = ctk.CTkButton(d, text=text, height=30, corner_radius=8,
+                            fg_color=CHIP, text_color=ACCENT if accent else TEXT,
+                            hover_color=CARD_HOVER, command=command)
+        parts[key] = btn
+        return [(key, btn, {"fill": "x", "padx": 18, "pady": pady})]
+
     def _build_detail_share(self, d, parts):
-        btn = ctk.CTkButton(d, text="分享截图", height=30, corner_radius=8,
-                            fg_color=CHIP, text_color=ACCENT,
-                            hover_color=CARD_HOVER,
-                            command=self._share_screenshot)
-        parts["share"] = btn
-        return [("share", btn, {"fill": "x", "padx": 18, "pady": (0, 4)})]
+        return self._detail_action(d, parts, "share", "分享截图",
+                                   self._share_screenshot, accent=True)
+
+    def _build_detail_open_folder(self, d, parts):
+        return self._detail_action(d, parts, "open_folder", "打开本地目录",
+                                   accent=True)
+
+    def _build_detail_collect(self, d, parts):
+        return self._detail_action(d, parts, "collect", "收藏夹…",
+                                   self._open_collect_dialog)
+
+    def _build_detail_remove_collection(self, d, parts):
+        return self._detail_action(d, parts, "remove_collection",
+                                   "移出此收藏夹", self._remove_from_collection)
+
+    def _open_local_folder(self, folder):
+        if os.path.isdir(folder):
+            os.startfile(folder)
+        else:
+            messagebox.showinfo("找不到目录", "本地目录已不存在：\n%s" % folder)
 
     def _build_detail_note(self, d, parts):
         """A Textbox, not an Entry. CTkEntry wraps tkinter.Entry, which has no
@@ -2510,6 +2670,21 @@ class App(ctk.CTk):
             self._drop_card(game["id"])
             self._render_stats()
 
+    def _remove_from_collection(self):
+        """Take the selected game out of the collection being browsed.
+
+        The card is dropped in place rather than via a full refresh: under a
+        collection filter the game just left the only view that shows it, which
+        is the same remove-on-status-write case _set_status handles.
+        """
+        game = self.selected
+        if game is None or self.collection_id is None:
+            return
+        slg_db.remove_from_collection(self.conn, game["id"], self.collection_id)
+        self._drop_card(game["id"])
+        self._refresh_collection_menu()
+        self._render_stats()
+
     def _set_rating(self, value):
         game = self.selected
         new = 0 if game["my_rating"] == value else value
@@ -2603,6 +2778,179 @@ class App(ctk.CTk):
             ctk.CTkLabel(win, text=blurb, text_color=MUTED,
                          font=ui_font(size=11), justify="left",
                          wraplength=380).pack(fill="x", padx=22, pady=(2, 0))
+
+    def _open_collect_dialog(self):
+        """Check off which collections the selected game belongs to."""
+        game = self.selected
+        if game is None:
+            return
+        mine = set(slg_db.collections_for_game(self.conn, game["id"]))
+        cols = slg_db.list_collections(self.conn)
+
+        win = self._new_dialog("收藏夹", "360x480")
+        ctk.CTkLabel(win, text="把「%s」加入收藏夹" % self._title_to_show(game),
+                     text_color=TEXT, font=ui_font(size=13, weight="bold"),
+                     wraplength=320, justify="left").pack(
+            fill="x", padx=16, pady=(14, 8))
+
+        box = ctk.CTkScrollableFrame(win, fg_color="transparent", height=250)
+        box.pack(fill="both", expand=True, padx=12, pady=(0, 4))
+        checks = {}
+        if cols:
+            for c in cols:
+                var = tk.BooleanVar(value=(c["id"] in mine))
+                ctk.CTkCheckBox(box, text="%s（%d 款）" % (c["name"], c["count"]),
+                                variable=var, font=ui_font(size=13)
+                                ).pack(fill="x", padx=8, pady=3)
+                checks[c["id"]] = var
+        else:
+            ctk.CTkLabel(box, text="还没有收藏夹。下面输入名字新建一个。",
+                         text_color=MUTED, font=ui_font(size=12)).pack(pady=12)
+
+        entry = ctk.CTkEntry(win, placeholder_text="新建收藏夹名字…", height=32,
+                             corner_radius=8, fg_color=CARD, text_color=TEXT,
+                             placeholder_text_color=MUTED, border_width=1,
+                             border_color=CHIP, font=ui_font(size=13))
+        entry.pack(fill="x", padx=16, pady=(4, 4))
+
+        row = ctk.CTkFrame(win, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(4, 14))
+
+        def add():
+            name = entry.get().strip()
+            if name and slg_db.create_collection(self.conn, name):
+                entry.delete(0, "end")
+                self._refresh_collection_menu()
+                win.destroy()
+                self._open_collect_dialog()
+
+        def save():
+            chosen = [cid for cid, var in checks.items() if var.get()]
+            slg_db.set_game_collections(self.conn, game["id"], chosen)
+            self._refresh_collection_menu()
+            win.destroy()
+            self.refresh()
+
+        ctk.CTkButton(row, text="新建", width=90, height=32, corner_radius=8,
+                      fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+                      command=add).pack(side="left")
+        ctk.CTkButton(row, text="保存", width=90, height=32, corner_radius=8,
+                      fg_color=ACCENT, text_color=ON_ACCENT, hover_color=CARD_HOVER,
+                      command=save).pack(side="right")
+
+    def open_collection_manager(self):
+        """Create and delete collections, from 更多工具."""
+        win = self._new_dialog("管理收藏夹", "360x460")
+        ctk.CTkLabel(win, text="新建或删除收藏夹", text_color=TEXT,
+                     font=ui_font(size=14, weight="bold")).pack(
+            fill="x", padx=16, pady=(14, 8))
+        entry = ctk.CTkEntry(win, placeholder_text="新建收藏夹名字…", height=32,
+                             corner_radius=8, fg_color=CARD, text_color=TEXT,
+                             placeholder_text_color=MUTED, border_width=1,
+                             border_color=CHIP, font=ui_font(size=13))
+        entry.pack(fill="x", padx=16, pady=(0, 4))
+
+        def add():
+            name = entry.get().strip()
+            if name and slg_db.create_collection(self.conn, name):
+                entry.delete(0, "end")
+                self._refresh_collection_menu()
+                win.destroy()
+                self.open_collection_manager()
+
+        ctk.CTkButton(win, text="新建", height=32, corner_radius=8,
+                      fg_color=ACCENT, text_color=ON_ACCENT,
+                      hover_color=CARD_HOVER, command=add).pack(
+            fill="x", padx=16, pady=(0, 8))
+
+        box = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        box.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        cols = slg_db.list_collections(self.conn)
+        if not cols:
+            ctk.CTkLabel(box, text="还没有收藏夹。", text_color=MUTED,
+                         font=ui_font(size=12)).pack(pady=12)
+        for c in cols:
+            row = ctk.CTkFrame(box, fg_color=CARD, corner_radius=8)
+            row.pack(fill="x", padx=6, pady=3)
+            ctk.CTkLabel(row, text="%s · %d 款" % (c["name"], c["count"]),
+                         text_color=TEXT, font=ui_font(size=13)).pack(
+                side="left", padx=12, pady=8)
+            ctk.CTkButton(row, text="删除", width=60, height=26, corner_radius=6,
+                          fg_color="transparent", text_color=DANGER_TEXT,
+                          hover_color=CHIP, font=ui_font(size=12),
+                          command=lambda cid=c["id"]: self._delete_collection_from_manager(
+                              cid, win)).pack(side="right", padx=8)
+
+    def _delete_collection(self, cid):
+        """Delete one collection after confirming; True if it actually went."""
+        if not messagebox.askyesno("删除收藏夹", "确定删除这个收藏夹？其中的游戏不受影响。"):
+            return False
+        slg_db.delete_collection(self.conn, cid)
+        if self.collection_id == cid:
+            self.collection_id = None
+        self._refresh_collection_menu()
+        self.refresh()
+        return True
+
+    def _delete_collection_from_manager(self, cid, win):
+        """The manager's delete: run the shared delete, then refresh its list."""
+        if self._delete_collection(cid):
+            win.destroy()
+            self.open_collection_manager()
+
+    def open_backup(self):
+        """Export or import the user's own data, from 更多工具."""
+        win = self._new_dialog("备份与恢复", "420x360")
+        ctk.CTkLabel(win, text="备份与恢复", text_color=TEXT,
+                     font=ui_font(size=14, weight="bold")).pack(
+            fill="x", padx=20, pady=(18, 4))
+        ctk.CTkLabel(win, text="导出把评分、备注、状态、收藏夹和标签排除存成 json；\n"
+                               "导入用文件覆盖这些数据。不含密钥与机器翻译缓存。",
+                     text_color=MUTED, font=ui_font(size=12), justify="left",
+                     anchor="w").pack(fill="x", padx=20, pady=(0, 12))
+
+        def do_export():
+            path = filedialog.asksaveasfilename(
+                parent=win, title="导出备份", defaultextension=".json",
+                initialfile="slgking-备份-%s.json" % time.strftime("%Y%m%d"),
+                filetypes=[("JSON 文件", "*.json")])
+            if not path:
+                return
+            try:
+                data = slg_db.export_user_data(self.conn)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump({"app": "slgking", "version": 1, "data": data},
+                              f, ensure_ascii=False, indent=2)
+                win.destroy()
+                self._set_progress("已导出到 %s" % path)
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("导出失败", str(exc))
+
+        def do_import():
+            path = filedialog.askopenfilename(
+                parent=win, title="导入备份",
+                filetypes=[("JSON 文件", "*.json")])
+            if not path:
+                return
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                slg_db.import_user_data(self.conn, payload.get("data", payload))
+                win.destroy()
+                self._refresh_collection_menu()
+                self.refresh()
+                self._set_progress("已从备份恢复")
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("导入失败", str(exc))
+
+        ctk.CTkButton(win, text="导出数据", height=38, corner_radius=8,
+                      fg_color=ACCENT, text_color=ON_ACCENT,
+                      hover_color=CARD_HOVER, command=do_export).pack(
+            fill="x", padx=20, pady=(0, 8))
+        ctk.CTkButton(win, text="导入数据", height=38, corner_radius=8,
+                      fg_color=CHIP, text_color=TEXT,
+                      hover_color=CARD_HOVER, command=do_import).pack(
+            fill="x", padx=20, pady=(0, 12))
 
     def open_tag_picker(self):
         """Browse and select tags without losing the window on every click.
@@ -2733,6 +3081,12 @@ class App(ctk.CTk):
                      text_color=MUTED, font=ui_font(size=12), justify="left",
                      anchor="w").pack(fill="x", padx=16, pady=(12, 0))
         entries = (
+            ("管理收藏夹…",
+             "新建或删除收藏夹，整理你的个人游戏库。",
+             self.open_collection_manager, None),
+            ("备份与恢复…",
+             "把评分、备注、收藏、标签排除导出成文件，或从文件恢复。",
+             self.open_backup, None),
             ("游戏汉化工具…",
              "游戏是英文的？这里有搭配使用的翻译工具。",
              self.open_translation_tools, None),
@@ -2838,7 +3192,9 @@ class App(ctk.CTk):
         Distinct from 更多工具… on purpose - that dialog holds the set-once
         translation/tag/scan tools, while this one is about the app itself.
         """
-        win = self._new_dialog("关于", "440x480")
+        # 520 rather than 480: the group row pushed the 完全免费 line past the
+        # bottom edge, and a disclaimer nobody can scroll to is not a disclaimer.
+        win = self._new_dialog("关于", "440x520")
         ctk.CTkLabel(win, text=APP_TITLE, text_color=TEXT,
                      font=ui_font(size=18, weight="bold")).pack(pady=(18, 0))
         ctk.CTkLabel(win, text="作者 · %s" % AUTHOR, text_color=MUTED,
@@ -2863,6 +3219,8 @@ class App(ctk.CTk):
         _link_button(win, RPYKIT_LABEL, RPYKIT_URL).pack(
             fill="x", padx=24, pady=4)
         _link_button(win, "反馈 / 建议：%s" % CONTACT_EMAIL, CONTACT_MAILTO).pack(
+            fill="x", padx=24, pady=4)
+        _copy_button(win, QQ_GROUP_LABEL, QQ_GROUP, self).pack(
             fill="x", padx=24, pady=4)
         ctk.CTkButton(win, text="打开数据目录", height=36, corner_radius=8,
                       fg_color="transparent", text_color=TEXT, hover_color=CARD,
@@ -3164,7 +3522,7 @@ class App(ctk.CTk):
                            / ctk.ScalingTracker.get_window_scaling(win)))))
 
     def open_help(self):
-        win = self._new_dialog("帮助文档", "560x640")
+        win = self._new_dialog("帮助文档", "600x680")
         win.after(120, win.lift)
 
         ctk.CTkLabel(win, text="帮助文档", text_color=TEXT,
@@ -3176,18 +3534,44 @@ class App(ctk.CTk):
         def head(text):
             ctk.CTkLabel(frame, text=text, text_color=ACCENT,
                          font=ui_font(size=14, weight="bold")).pack(
-                anchor="w", padx=8, pady=(14, 4))
+                anchor="w", padx=8, pady=(18, 6))
+
+        def sub(text):
+            ctk.CTkLabel(frame, text=text, text_color=MUTED,
+                         font=ui_font(size=13, weight="bold")).pack(
+                anchor="w", padx=8, pady=(12, 4))
 
         def body(text, color=None):
             ctk.CTkLabel(frame, text=text, text_color=color or TEXT,
-                         font=ui_font(size=13), wraplength=480,
+                         font=ui_font(size=13), wraplength=520,
                          justify="left").pack(anchor="w", padx=8, pady=(0, 6))
+
+        def qa(question, answer):
+            """A question and its answer rendered as one visual unit.
+
+            The question carries the emphasis: it is what someone scrolls the
+            page looking for, so it gets the bold accent treatment while the
+            answer stays plain. Loose gap above the question and a tight one
+            under the answer is what keeps one pair from running into the next.
+            """
+            ctk.CTkLabel(frame, text=question, text_color=ACCENT,
+                         font=ui_font(size=13, weight="bold"), wraplength=520,
+                         justify="left").pack(anchor="w", padx=8, pady=(10, 2))
+            ctk.CTkLabel(frame, text=answer, text_color=TEXT,
+                         font=ui_font(size=13), wraplength=520,
+                         justify="left").pack(anchor="w", padx=8, pady=(0, 8))
+
+        head("三步上手")
+        body("第 1 步　点左下角的「更新游戏数据」，抓取游戏目录（建议先开梯子）。")
+        body("第 2 步　点开任意一款游戏，在右侧用星星给它打分。")
+        body("第 3 步　用标签筛选，再把顶栏排序切成「按xp推荐」，挑下一款要玩的。")
+        body("打分越多，推荐越准——这是它和普通游戏列表最大的区别。", color=MUTED)
 
         head("这个软件是什么")
         body("一个 dikgames 站点游戏的本地资料库。把站上的游戏抓下来存进本地数据库，"
-             "再按标签、评分、下载状态去挑你想玩的那些。")
-        body("数据来自站点的 sitemap，抓完就存在本地，浏览、搜索、筛选都不联网。"
-             "封面图跟着游戏一起抓下来，抓完一款存一款。")
+             "再按标签、评分、下载状态去挑你想玩的那些。数据来自站点的 sitemap，"
+             "抓完就存在本地，浏览、搜索、筛选都不联网；封面图跟着游戏一起抓下来，"
+             "抓完一款存一款。")
         body("数据库和封面不在程序旁边，在 %LOCALAPPDATA%\\slgking\\ 下面："
              "slgking.db 和 covers 文件夹。想备份或换电脑，把那个目录整个带走。"
              "exe 删了数据还在，换台机器数据留在原处。")
@@ -3204,82 +3588,80 @@ class App(ctk.CTk):
 
         head("常见问题")
 
-        body("Q：翻译要怎么开？", color=MUTED)
-        body("A：点左侧栏的「更多工具…」→「翻译设置…」，有两条路。\n"
-             "· 免费机翻：什么都不用填，选上就能用，简介和游戏名都翻。质量一般，"
-             "偶尔会被 Google 限流，过几分钟再试。\n"
-             "· AI 翻译：填一个 OpenAI 兼容接口的 Key（DeepSeek、硅基流动、Kimi、"
-             "智谱、通义、OpenAI 都行），质量明显更好。\n"
-             "译文存在本地数据库里，翻一次就一直有效，不会重复花钱。")
+        sub("同步与数据")
+        qa("Q：同步失败了怎么办？",
+           "A：同步是增量抓取，中断了再点一次「更新游戏数据」就行，"
+           "已经抓到的不会重复抓。站点偶尔抖动，等一会儿再试。")
 
-        body("Q：点了翻译，等很久什么都没有？", color=MUTED)
-        body("A：先看有没有开梯子——翻译接口都在墙外，没开梯子必然连不上。"
-             "现在这种情况会在 8 秒内报「网络错误：连接超时」；如果超过 8 秒还没有任何"
-             "提示，那是 bug，请到 GitHub 上反馈。")
+        qa("Q：同步跑太久，能停吗？",
+           "A：能。任务跑起来之后，左下角那颗按钮会变成「停止」，点一下就停；"
+           "已经抓到的部分会保存，下次接着来。正在飞行中的那一个网页请求要等它"
+           "返回，通常不到一秒。")
 
-        body("Q：为什么标签只能用 AI 翻？", color=MUTED)
-        body("A：标签是全库共用的固定术语，一百多张卡片都显示同一份。机翻每次给的"
-             "译法都不一样（netorare 这轮叫「寝取」下轮叫「NTR」），整个库会读起来"
-             "前后矛盾。所以标签翻译需要 AI 引擎——在「更多工具…」→「翻译设置…」里选一个服务商，"
-             "填好 Key，然后点「翻译标签」就行，一趟大概花 1 分钱。")
+        qa("Q：左下角「更多…」里面那几个是干什么的？",
+           "A：都是不常用的维护动作，点开每个下面都有一句说明。\n"
+           "「补齐历史…」：站点有一批好几年前的老游戏，本库一直没收。日常「同步」"
+           "默认只收新出的，老的那些会跳过——否则每次同步都去啃老库，最新的游戏"
+           "反而要等。点它不设日期限制，一次收一批，点几次就把历史补完了。"
+           "在它上面点右键可以彻底取消日期限制，之后普通「同步」也会收老游戏。\n"
+           "「下载封面」：补下缺的封面缩略图。正常「同步」自带封面，这个只是用来"
+           "补老库里的存量欠账，或者哪张图当时没抓到。\n"
+           "「补齐热度」：早先入库的老游戏没抓到浏览/点赞/评论，热度就一直很低。"
+           "点它会把这几款游戏的详情页重新抓一遍，补齐三项值再算热度——"
+           "这一步是联网的，需要梯子，每轮 %d 款、约三分钟，可以随时停止，"
+           "再点就接着补。\n"
+           "「全量重建」：按标签把站点重爬一遍，慢得多，拿到的数据和「同步」一样，"
+           "只有增量同步明显出问题时才需要跑。" % METRICS_PER_RUN)
 
-        body("Q：为什么有些游戏名还是英文？", color=MUTED)
-        body("A：名字里的版本号（v1.20、EP03）和方括号里的社团名，AI 经常忍不住去改。"
-             "改过的名字会被丢掉，改用原文——这类名字会记一笔「不适合翻译」，"
-             "之后不会再重复请求。简介不受影响，照常翻。")
+        qa("Q：封面显示灰色方块？",
+           "A：说明这张封面还没下载。正常「同步」会把封面一起抓下来，所以先再点一次"
+           "同步；还是灰的就点左下角「更多…」→「下载封面」补，让它慢慢跑完。")
 
-        body("Q：同步失败了怎么办？", color=MUTED)
-        body("A：同步是增量抓取，中断了再点一次「同步 dikgames」就行，"
-             "已经抓到的不会重复抓。站点偶尔抖动，等一会儿再试。")
+        qa("Q：「扫描本地目录」扫哪里？",
+           "A：在左侧栏「更多工具…」→「扫描本地目录…」里，第一次点它会让你选一个"
+           "文件夹，选完就记住了。想换一个，在那行上点右键重新选。\n"
+           "选中文件夹之后，库里同名（或近似同名）的游戏会被标成「已下载」，"
+           "并记下本地版本号，方便和站点上的最新版对比。")
 
-        body("Q：同步跑太久，能停吗？", color=MUTED)
-        body("A：能。任务跑起来之后，左下角那颗按钮会变成「停止」，点一下就停；"
-             "已经抓到的部分会保存，下次接着来。正在飞行中的那一个网页请求要等它"
-             "返回，通常不到一秒。")
+        sub("翻译")
+        qa("Q：翻译要怎么开？",
+           "A：点左侧栏的「更多工具…」→「翻译设置…」，有两条路。\n"
+           "· 免费机翻：什么都不用填，选上就能用，简介和游戏名都翻。质量一般，"
+           "偶尔会被 Google 限流，过几分钟再试。\n"
+           "· AI 翻译：填一个 OpenAI 兼容接口的 Key（DeepSeek、硅基流动、Kimi、"
+           "智谱、通义、OpenAI 都行），质量明显更好。\n"
+           "译文存在本地数据库里，翻一次就一直有效，不会重复花钱。")
 
-        body("Q：左下角「更多…」里面那几个是干什么的？", color=MUTED)
-        body("A：都是不常用的维护动作，点开每个下面都有一句说明。\n"
-             "「补齐历史…」：站点有一批好几年前的老游戏，本库一直没收。日常「同步」"
-             "默认只收新出的，老的那些会跳过——否则每次同步都去啃老库，最新的游戏"
-             "反而要等。点它不设日期限制，一次收一批，点几次就把历史补完了。"
-             "在它上面点右键可以彻底取消日期限制，之后普通「同步」也会收老游戏。\n"
-             "「下载封面」：补下缺的封面缩略图。正常「同步」自带封面，这个只是用来"
-             "补老库里的存量欠账，或者哪张图当时没抓到。\n"
-             "「补齐热度」：早先入库的老游戏没抓到浏览/点赞/评论，热度就一直很低。"
-             "点它会把这几款游戏的详情页重新抓一遍，补齐三项值再算热度——"
-             "这一步是联网的，需要梯子，每轮 %d 款、约三分钟，可以随时停止，"
-             "再点就接着补。\n"
-             "「全量重建」：按标签把站点重爬一遍，慢得多，拿到的数据和「同步」一样，"
-             "只有增量同步明显出问题时才需要跑。" % METRICS_PER_RUN)
+        qa("Q：点了翻译，等很久什么都没有？",
+           "A：先看有没有开梯子——翻译接口都在墙外，没开梯子必然连不上。"
+           "现在这种情况会在 8 秒内报「网络错误：连接超时」；如果超过 8 秒还没有任何"
+           "提示，那是 bug，请到 GitHub 上反馈。")
 
-        body("Q：右上角那颗齿轮是干什么的？", color=MUTED)
-        body("A：打开「设置」——浅色/深色/跟随系统在这里切，"
-             "「关于本软件…」也在里面（版本信息、检查软件更新、GitHub 主页、"
-             "反馈邮箱、数据目录）。设一次的工具在左侧栏的「更多工具…」里，"
-             "和这个是两个不同的门。")
+        qa("Q：为什么标签只能用 AI 翻？",
+           "A：标签是全库共用的固定术语，一百多张卡片都显示同一份。机翻每次给的"
+           "译法都不一样（netorare 这轮叫「寝取」下轮叫「NTR」），整个库会读起来"
+           "前后矛盾。所以标签翻译需要 AI 引擎——在「更多工具…」→「翻译设置…」里选一个服务商，"
+           "填好 Key，然后点「翻译标签」就行，一趟大概花 1 分钱。")
 
-        body("Q：封面显示灰色方块？", color=MUTED)
-        body("A：说明这张封面还没下载。正常「同步」会把封面一起抓下来，所以先再点一次"
-             "同步；还是灰的就点左下角「更多…」→「下载封面」补，让它慢慢跑完。")
+        qa("Q：为什么有些游戏名还是英文？",
+           "A：名字里的版本号（v1.20、EP03）和方括号里的社团名，AI 经常忍不住去改。"
+           "改过的名字会被丢掉，改用原文——这类名字会记一笔「不适合翻译」，"
+           "之后不会再重复请求。简介不受影响，照常翻。")
 
-        body("Q：「扫描本地目录」扫哪里？", color=MUTED)
-        body("A：在左侧栏「更多工具…」→「扫描本地目录…」里，第一次点它会让你选一个"
-             "文件夹，选完就记住了。想换一个，在那行上点右键重新选。\n"
-             "选中文件夹之后，库里同名（或近似同名）的游戏会被标成「已下载」，"
-             "并记下本地版本号，方便和站点上的最新版对比。")
+        sub("界面与设置")
+        qa("Q：搜索、筛选、标签库之间的区别？",
+           "A：搜索栏按游戏名找；卡片上的标签或「标签库…」里的左键加入筛选、右键排除；"
+           "「更多工具…」→「偏好权重…」会按你打过的五星评分算出你倾向的标签。")
 
-        body("Q：搜索、筛选、标签库之间的区别？", color=MUTED)
-        body("A：搜索栏按游戏名找；卡片上的标签或「标签库…」里的左键加入筛选、右键排除；"
-             "「更多工具…」→「偏好权重…」会按你打过的五星评分算出你倾向的标签。")
+        qa("Q：右上角那颗齿轮是干什么的？",
+           "A：打开「设置」——浅色/深色/跟随系统在这里切，"
+           "「关于本软件…」也在里面（版本信息、检查软件更新、GitHub 主页、"
+           "反馈邮箱、数据目录）。设一次的工具在左侧栏的「更多工具…」里，"
+           "和这个是两个不同的门。")
 
-        body("Q：深色主题里的「跟随系统」是怎么工作的？", color=MUTED)
-        body("A：程序每 5 秒采样一次 Windows 的浅色/深色设置，变了就跟着换，"
-             "所以会有一小段延迟。手动选「浅色」或「深色」则会记住，下次打开还是它。")
-
-        head("下载说明")
-        body("本软件只是一个游戏资料检索库，里面没有任何游戏文件，也不提供"
-             "任何下载。想下载游戏请前往游戏官网，或者自己去找下载地址。\n"
-             "检索到的信息和游戏的版权都归原站点与作者所有。", color=DANGER_TEXT)
+        qa("Q：深色主题里的「跟随系统」是怎么工作的？",
+           "A：程序每 5 秒采样一次 Windows 的浅色/深色设置，变了就跟着换，"
+           "所以会有一小段延迟。手动选「浅色」或「深色」则会记住，下次打开还是它。")
 
         head("下载的游戏是英文的怎么办")
         body("dikgames 是英文流站点，站上绝大多数游戏都没有官方中文，下载到"
@@ -3289,7 +3671,10 @@ class App(ctk.CTk):
         _link_button(frame, LUNA_LABEL, LUNA_URL).pack(fill="x", padx=8, pady=(0, 4))
         _link_button(frame, RPYKIT_LABEL, RPYKIT_URL).pack(fill="x", padx=8, pady=(0, 6))
 
-        head("关于")
+        head("声明与关于")
+        body("本软件只是一个游戏资料检索库，里面没有任何游戏文件，也不提供"
+             "任何下载。想下载游戏请前往游戏官网，或者自己去找下载地址。\n"
+             "检索到的信息和游戏的版权都归原站点与作者所有。", color=DANGER_TEXT)
         body("作者 · %s" % AUTHOR, color=MUTED)
         # The button rather than a bare link: someone who opens 帮助文档 looking
         # for the source should not have to spot an 11px underlined label.
@@ -3299,9 +3684,12 @@ class App(ctk.CTk):
         body("本软件完全免费。没有收费版、没有付费激活、没有隐藏收费入口。\n"
              "如果你是通过付费渠道拿到它的，请立即举报。", color=DANGER_TEXT)
         body("用得还行的话，欢迎在 GitHub 点个 star，也帮忙推荐给周围的朋友。"
-             "有想法、有 bug、想要什么功能，发邮件到 %s。" % CONTACT_EMAIL,
+             "有想法、有 bug、想要什么功能，发邮件到 %s，"
+             "或者加反馈建议群 %s。" % (CONTACT_EMAIL, QQ_GROUP),
              color=MUTED)
         _link_button(frame, "发邮件给作者", CONTACT_MAILTO).pack(
+            fill="x", padx=8, pady=(0, 6))
+        _copy_button(frame, "复制反馈群号：%s" % QQ_GROUP, QQ_GROUP, self).pack(
             fill="x", padx=8, pady=(0, 6))
 
     @staticmethod
@@ -3516,7 +3904,9 @@ class App(ctk.CTk):
         self._ui(self.maintenance_btn, state="disabled")
         self._ui(self.settings_btn, state="disabled")
         self._set_progress(label)
-        self.after(0, self._tick_progress)
+        bar = self.progress_bar
+        if bar is not None and bar.winfo_exists():
+            bar.set(0)
 
     def _cancel_job(self):
         """Ask the running worker to stop. It stops at its next checkpoint."""
@@ -3533,7 +3923,7 @@ class App(ctk.CTk):
         """
         self.busy = False
         self._job_label = ""
-        self._ui(self.sync_btn, text="同步 dikgames", state="normal",
+        self._ui(self.sync_btn, text="更新游戏数据", state="normal",
                  command=self.do_sync)
         self._ui(self.maintenance_btn, state="normal")
         self._ui(self.settings_btn, state="normal")
@@ -3590,7 +3980,7 @@ class App(ctk.CTk):
                     conn, fetcher, new_limit=None, since=since, log=self._log,
                     should_stop=self._stop.is_set,
                     on_progress=lambda i, n, title: self.queue.put(
-                        ("progress", "抓详情 %d/%d · %s" % (i, n, title))))
+                        ("progress", ("抓详情 %d/%d · %s" % (i, n, title), i, n))))
                 # Games that predate the rating/overview columns get topped up
                 # here rather than in a separate chore. Uncapped: a single sync
                 # drains the whole backlog, which is what a user who leaves it
@@ -3599,7 +3989,7 @@ class App(ctk.CTk):
                     conn, fetcher, limit=None, log=self._log,
                     should_stop=self._stop.is_set,
                     on_progress=lambda d, total, url: self.queue.put(
-                        ("progress", "补全详情 %d/%d" % (d, total))))
+                        ("progress", ("补全详情 %d/%d" % (d, total), d, total))))
             # Covers now arrive with the games they belong to, so the count is
             # reported here rather than left to the 更多… badge to reveal.
             covers = summary["covers"] + filled["covers"]
@@ -3652,7 +4042,7 @@ class App(ctk.CTk):
                     conn, workers=3, rate=3.0, log=self._log,
                     should_stop=self._stop.is_set,
                     on_progress=lambda d, total: self.queue.put(
-                        ("progress", "封面 %d/%d" % (d, total))))
+                        ("progress", ("封面 %d/%d" % (d, total), d, total))))
             self.queue.put(("covers_done", "封面下载 %d 张" % done))
         except Exception as exc:  # noqa: BLE001
             self.queue.put(("covers_done", self._fail("封面下载", exc)))
@@ -3680,7 +4070,7 @@ class App(ctk.CTk):
                 recomputed = slg_db.backfill_heat(
                     conn, log=self._log,
                     on_progress=lambda d, total: self.queue.put(
-                        ("progress", "重算热度 %d/%d" % (d, total))))
+                        ("progress", ("重算热度 %d/%d" % (d, total), d, total))))
                 if recomputed:
                     self.queue.put(("progress", "重算热度完成 · %d 款" % recomputed))
                 fetcher = slg_scrape.Fetcher(log=self._log,
@@ -3689,7 +4079,7 @@ class App(ctk.CTk):
                     conn, fetcher, limit=METRICS_PER_RUN, log=self._log,
                     should_stop=self._stop.is_set,
                     on_progress=lambda d, total, url: self.queue.put(
-                        ("progress", "补齐热度 %d/%d" % (d, total))))
+                        ("progress", ("补齐热度 %d/%d" % (d, total), d, total))))
             self.queue.put(("done", "补齐热度 · 补全 %d 款 · 还剩 %d 款"
                             % (summary["filled"], summary["remaining"])))
         except Exception as exc:  # noqa: BLE001
@@ -3707,7 +4097,7 @@ class App(ctk.CTk):
         if not messagebox.askyesno(
                 "全量重建",
                 "全量重建会按标签把 dikgames 重爬一遍：约 100 个请求、10 分钟。\n\n"
-                "它拿到的数据和「同步 dikgames」完全一样，只是慢得多。\n"
+                "它拿到的数据和「更新游戏数据」完全一样，只是慢得多。\n"
                 "只有增量同步明显出问题时才需要跑。确定继续吗？"):
             return
         self._run_job("重建中…", self._rebuild_worker)
@@ -3860,7 +4250,11 @@ class App(ctk.CTk):
         if kind == "log":
             self._set_progress(payload)
         elif kind == "progress":
-            self._set_progress(payload)
+            if isinstance(payload, tuple) and len(payload) == 3:
+                text, done, total = payload
+                self._set_progress(text, done / total if total else 0.0)
+            else:
+                self._set_progress(payload)
             self._maybe_refresh()
         elif kind == "done":
             self._end_job(payload)
