@@ -9,6 +9,7 @@ a = Analysis(
     # bundle - slg_gui.asset_path reads it from sys._MEIPASS.
     datas=[('assets/slgking.ico', 'assets'),
            ('assets/tag_zh.json', 'assets'),
+           ('assets/avatar.png', 'assets'),
            ('assets/seed/slgking.db', 'assets/seed'),
            ('assets/seed/covers', 'assets/seed/covers')],
     hiddenimports=[],

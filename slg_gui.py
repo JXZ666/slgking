@@ -24,13 +24,14 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 from PIL import Image, ImageGrab
 
+import slg_comments
 import slg_db
 import slg_engines
 import slg_scrape
 import slg_translate
 import slg_update
 
-APP_VERSION = "0.20.0"
+APP_VERSION = "0.20.5"
 # The sidebar shows the number and nothing else. build_stamp() still carries
 # the channel and the build time, but it belongs on the 关于 page now: a
 # timestamp in the corner of every screen was answering a question the user
@@ -46,7 +47,7 @@ CONTACT_MAILTO = "mailto:" + CONTACT_EMAIL
 # as copyable text instead of a URL. Bare digits, no dashes or spaces: whatever
 # is on the clipboard has to paste straight into QQ's search box.
 QQ_GROUP = "1124074040"
-QQ_GROUP_LABEL = "反馈建议群 · %s" % QQ_GROUP
+QQ_GROUP_LABEL = "交流群 · %s · 欢迎大家加入" % QQ_GROUP
 # Taken from the scraper rather than typed again: this is the site the catalogue
 # comes from, and two copies of that URL is one copy that goes stale.
 SITE_URL = slg_scrape.BASE
@@ -393,6 +394,26 @@ def load_cover(game, width=COVER_W, height=COVER_H):
     return ctk_img
 
 
+def load_avatar(size=72):
+    """The author's avatar, pre-cropped to a transparent circle in assets.
+
+    Cached like load_cover so a theme switch does not re-decode it, and the
+    module-level dict keeps the CTkImage referenced (an unreferenced CTkImage
+    renders blank).
+    """
+    key = ("__avatar__", size)
+    if key in _image_cache:
+        return _image_cache[key]
+    try:
+        img = Image.open(asset_path("avatar.png")).convert("RGBA")
+        img = img.resize((size * 2, size * 2), Image.LANCZOS)
+    except Exception:  # noqa: BLE001 - a missing avatar must not crash the window
+        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    ctk_img = ctk.CTkImage(light_image=img, size=(size, size))
+    _image_cache[key] = ctk_img
+    return ctk_img
+
+
 # Tag slug -> Chinese, filled from the translations table. Held at module level
 # because display_tag() runs once per chip per card, and every one of those
 # would otherwise be a query. Empty until a translation run has happened, which
@@ -690,6 +711,8 @@ class App(ctk.CTk):
         # the notice back on the sidebar it just rebuilt.
         self._update_found = None
         self._update_url = slg_update.RELEASES_URL
+        self._update_notes = ""
+        self._update_dialog_shown = False
 
         self._build()
         self.refresh()
@@ -967,8 +990,9 @@ class App(ctk.CTk):
 
         header = ctk.CTkFrame(bar, fg_color="transparent")
         header.pack(side="top", fill="x")
+        ctk.CTkLabel(header, text="", image=load_avatar(64)).pack(pady=(18, 6))
         ctk.CTkLabel(header, text=APP_TITLE, text_color=TEXT,
-                     font=ui_font(size=19, weight="bold")).pack(pady=(22, 2),
+                     font=ui_font(size=19, weight="bold")).pack(pady=(0, 2),
                                                                    padx=18)
         ctk.CTkLabel(header, text="作者 · %s" % AUTHOR, text_color=MUTED,
                      font=ui_font(size=11)).pack(padx=18)
@@ -1957,6 +1981,7 @@ class App(ctk.CTk):
         order.extend(self._build_detail_note(d, parts))
         order.extend(self._build_detail_tags(d, parts))
         order.extend(self._build_detail_overview(d, parts))
+        order.extend(self._build_detail_comments(d, parts))
 
         # Static, so _detail_signature stays as it is, and _layout_detail shows
         # it unconditionally: only url/ov_* are keyed off a flag there.
@@ -1993,7 +2018,7 @@ class App(ctk.CTk):
 
         mail = foot_link("反馈 / 建议：%s" % CONTACT_EMAIL)
         mail.configure(command=lambda: webbrowser.open(CONTACT_MAILTO))
-        qq_text = "反馈建议群 %s（点击复制）" % QQ_GROUP
+        qq_text = "交流群 %s（点击复制）" % QQ_GROUP
         qq = foot_link(qq_text)
         qq.configure(command=lambda: self._copy_value(QQ_GROUP, qq, qq_text))
         add("feedback", feedback, fill="x", padx=18, pady=(0, 20))
@@ -2055,6 +2080,7 @@ class App(ctk.CTk):
             if game["note"]:
                 p["note_entry"].insert("1.0", game["note"])
         self._fill_detail_tags(game)
+        self._fill_detail_comments(game)
         # The switch remembers what the last game was read in. It used to be
         # forced back to 原文 on every fill, which threw the choice away each
         # time the user picked a new game, and it opened English even for games
@@ -2387,6 +2413,176 @@ class App(ctk.CTk):
             os.startfile(folder)
         else:
             messagebox.showinfo("找不到目录", "本地目录已不存在：\n%s" % folder)
+
+    def _build_detail_comments(self, d, parts):
+        """The comment list for the selected game, rebuilt per game.
+
+        Local comments come from SQLite and always show; remote comments are
+        fetched from LeanCloud in the background and merged in when they land.
+        """
+        head = ctk.CTkFrame(d, fg_color="transparent")
+        ctk.CTkLabel(head, text="评论", text_color=MUTED,
+                     font=ui_font(size=12)).pack(side="left")
+        ctk.CTkButton(head, text="写评论", height=24, width=76, corner_radius=6,
+                      fg_color="transparent", text_color=ACCENT, hover_color=CHIP,
+                      font=ui_font(size=11),
+                      command=self._open_comment_dialog).pack(side="right")
+        box = ctk.CTkFrame(d, fg_color="transparent")
+        parts["comments_head"] = head
+        parts["comments_box"] = box
+        return [("comments_head", head, {"fill": "x", "padx": 18, "pady": (12, 4)}),
+                ("comments_box", box, {"fill": "x", "padx": 18})]
+
+    def _fill_detail_comments(self, game):
+        box = self._detail_parts["comments_box"]
+        for child in box.winfo_children():
+            child.destroy()
+        local = slg_db.list_comments(self.conn, game["slug"])
+        self._render_comments(game, local, [], loading=slg_comments.configured())
+        if slg_comments.configured():
+            slug = game["slug"]
+            threading.Thread(target=self._fetch_comments_worker,
+                             args=(slug,), daemon=True).start()
+
+    def _render_comments(self, game, local, remote, loading=False):
+        box = self._detail_parts["comments_box"]
+        uploaded_ids = {c["cloud_id"] for c in local if c["cloud_id"]}
+        rows = []
+        for c in local:
+            rows.append({"author": c["nickname"] or "匿名", "content": c["content"],
+                         "time": c["created_at"], "own": True,
+                         "local_id": c["id"], "cloud_id": c["cloud_id"]})
+        for c in remote:
+            oid = c.get("objectId")
+            if oid and oid in uploaded_ids:
+                continue
+            rows.append({"author": c.get("nickname") or "匿名",
+                         "content": c.get("content") or "",
+                         "time": c.get("createdAt") or "", "own": False,
+                         "local_id": None, "cloud_id": None})
+        if not rows and not loading:
+            ctk.CTkLabel(box, text="暂无评论，来写第一条吧", text_color=MUTED,
+                         font=ui_font(size=11)).pack(anchor="w", pady=(0, 4))
+        for r in rows:
+            self._comment_row(box, r)
+        if loading:
+            ctk.CTkLabel(box, text="正在加载云端评论…", text_color=MUTED,
+                         font=ui_font(size=11)).pack(anchor="w", pady=(4, 0))
+
+    def _comment_row(self, box, r):
+        frame = ctk.CTkFrame(box, fg_color="transparent")
+        top = ctk.CTkFrame(frame, fg_color="transparent")
+        ctk.CTkLabel(top, text=r["author"], text_color=TEXT,
+                     font=ui_font(size=12, weight="bold")).pack(side="left")
+        t = (r["time"] or "").replace("T", " ")[:16]
+        if t:
+            ctk.CTkLabel(top, text="  " + t, text_color=MUTED,
+                         font=ui_font(size=10)).pack(side="left")
+        if r["own"]:
+            tag = "已上传" if r["cloud_id"] else "仅自己可见"
+            ctk.CTkLabel(top, text=" · " + tag, text_color=MUTED,
+                         font=ui_font(size=10)).pack(side="left")
+            ctk.CTkButton(top, text="删除", width=40, height=18, corner_radius=6,
+                          fg_color="transparent", text_color=MUTED,
+                          hover_color=CHIP, font=ui_font(size=10),
+                          command=lambda lid=r["local_id"], cid=r["cloud_id"]:
+                              self._delete_own_comment(lid, cid)).pack(side="right")
+        else:
+            ctk.CTkLabel(top, text=" · 云端", text_color=MUTED,
+                         font=ui_font(size=10)).pack(side="left")
+        top.pack(fill="x")
+        ctk.CTkLabel(frame, text=r["content"], text_color=TEXT,
+                     font=ui_font(size=12), wraplength=340, justify="left",
+                     anchor="w").pack(fill="x")
+        frame.pack(fill="x", pady=(0, 8))
+
+    def _fetch_comments_worker(self, slug):
+        remote = slg_comments.fetch_comments(slug)
+        self.queue.put(("comments", (slug, remote)))
+
+    def _comments_result(self, slug, remote):
+        game = self.selected
+        if game is None or game["slug"] != slug:
+            return
+        box = self._detail_parts.get("comments_box")
+        if box is None or not box.winfo_exists():
+            return
+        local = slg_db.list_comments(self.conn, slug)
+        if remote is None:
+            # An upload just finished; fetch fresh remote comments.
+            self._render_comments(game, local, [], loading=slg_comments.configured())
+            if slg_comments.configured():
+                threading.Thread(target=self._fetch_comments_worker,
+                                 args=(slug,), daemon=True).start()
+        else:
+            self._render_comments(game, local, remote, loading=False)
+
+    def _delete_own_comment(self, local_id, cloud_id):
+        if cloud_id:
+            threading.Thread(target=slg_comments.delete_comment,
+                             args=(cloud_id,), daemon=True).start()
+        slg_db.delete_comment(self.conn, local_id)
+        if self.selected is not None:
+            self._fill_detail_comments(self.selected)
+
+    def _open_comment_dialog(self):
+        game = self.selected
+        if game is None:
+            return
+        win = self._new_dialog("写评论", "400x420")
+        ctk.CTkLabel(win, text="「%s」" % self._title_to_show(game),
+                     text_color=TEXT, font=ui_font(size=13, weight="bold"),
+                     wraplength=340, justify="left").pack(
+            fill="x", padx=16, pady=(14, 8))
+        box = ctk.CTkTextbox(win, height=180, corner_radius=8, fg_color=BG,
+                             text_color=TEXT, border_color=CHIP, border_width=1,
+                             font=ui_font(size=12), wrap="word")
+        box.pack(fill="x", padx=16)
+        entry = ctk.CTkEntry(win, placeholder_text="昵称（可选）", height=30,
+                             corner_radius=8, fg_color=CARD, text_color=TEXT,
+                             placeholder_text_color=MUTED, border_width=1,
+                             border_color=CHIP, font=ui_font(size=12))
+        entry.pack(fill="x", padx=16, pady=(8, 0))
+        upload = tk.BooleanVar(value=slg_comments.configured())
+        if slg_comments.configured():
+            ctk.CTkCheckBox(win, text="上传到云端，让其他用户也能看到",
+                            variable=upload, font=ui_font(size=12)).pack(
+                anchor="w", padx=16, pady=(10, 4))
+        else:
+            ctk.CTkLabel(win, text="云端评论未配置，评论仅保存在本机。",
+                         text_color=MUTED, font=ui_font(size=11), wraplength=340,
+                         justify="left").pack(anchor="w", padx=16, pady=(10, 4))
+        row = ctk.CTkFrame(win, fg_color="transparent")
+        ctk.CTkButton(row, text="取消", height=32, width=90, corner_radius=8,
+                      fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+                      font=ui_font(size=12), command=win.destroy).pack(side="left")
+        ctk.CTkButton(row, text="发布", height=32, width=90, corner_radius=8,
+                      fg_color=ACCENT, text_color=ON_ACCENT, hover_color=CARD_HOVER,
+                      font=ui_font(size=12),
+                      command=lambda: self._submit_comment(
+                          win, box.get("1.0", "end-1c"), entry.get(),
+                          upload.get())).pack(side="left", padx=(8, 0))
+        row.pack(pady=(8, 12))
+
+    def _submit_comment(self, win, content, nickname, upload):
+        content = (content or "").strip()
+        game = self.selected
+        if not content or game is None:
+            return
+        nickname = (nickname or "").strip() or None
+        local_id = slg_db.add_comment(self.conn, game["slug"], content, nickname)
+        win.destroy()
+        self._fill_detail_comments(game)
+        if upload and slg_comments.configured():
+            slug = game["slug"]
+
+            def worker():
+                cid = slg_comments.upload_comment(slug, content, nickname)
+                if cid:
+                    with slg_db.session() as conn:
+                        slg_db.mark_comment_uploaded(conn, local_id, cid)
+                self.queue.put(("comments", (slug, None)))
+            threading.Thread(target=worker, daemon=True).start()
 
     def _build_detail_note(self, d, parts):
         """A Textbox, not an Entry. CTkEntry wraps tkinter.Entry, which has no
@@ -2759,15 +2955,21 @@ class App(ctk.CTk):
         win.bind("<Escape>", lambda e: win.destroy())
         return win
 
-    def _dialog_rows(self, win, entries, state="normal"):
+    def _dialog_rows(self, win, entries, state="normal", parent=None):
         """A dialog body of rows: one button over one blurb, identically styled.
 
         同步与维护 and 更多工具 are the same shape and only differ in their text
         and one optional right-click - so the loop lives here instead of twice.
+
+        parent separates the two jobs win used to do at once: the rows are built
+        into parent when one is given (更多工具 puts them in a scrollable frame),
+        while the row command still destroys the window - not the frame - so the
+        whole dialog still closes before the next one opens.
         """
+        body = parent if parent is not None else win
         for text, blurb, command, on_right in entries:
             btn = ctk.CTkButton(
-                win, text=text, height=36, corner_radius=8, anchor="w",
+                body, text=text, height=36, corner_radius=8, anchor="w",
                 fg_color="transparent", text_color=TEXT, hover_color=CARD,
                 font=ui_font(size=13), state=state,
                 command=lambda c=command, w=win: (w.destroy(), c()))
@@ -2775,7 +2977,7 @@ class App(ctk.CTk):
                 btn.bind("<Button-3>",
                          lambda e, c=on_right, w=win: (w.destroy(), c()))
             btn.pack(fill="x", padx=16, pady=(10, 0))
-            ctk.CTkLabel(win, text=blurb, text_color=MUTED,
+            ctk.CTkLabel(body, text=blurb, text_color=MUTED,
                          font=ui_font(size=11), justify="left",
                          wraplength=380).pack(fill="x", padx=22, pady=(2, 0))
 
@@ -3075,11 +3277,19 @@ class App(ctk.CTk):
         scan_blurb = ("把本地游戏库对上号，记录版本号。右键换文件夹。\n当前：%s"
                       % os.path.basename(root)) if root else \
                      "把本地游戏库对上号，记录版本号。点它或右键先选文件夹。"
-        win = self._new_dialog("更多工具", "440x480")
+        win = self._new_dialog("更多工具", "440x580")
         ctk.CTkLabel(win, text="都是设一次就不用再管的东西。\n"
                                "同步与维护在左侧栏的「更多…」里。",
                      text_color=MUTED, font=ui_font(size=12), justify="left",
                      anchor="w").pack(fill="x", padx=16, pady=(12, 0))
+        # The intro stays outside the scroll: it is the paragraph that says what
+        # this window is, so it should not scroll away. The rows go in a
+        # scrollable frame instead of straight into the window - the height above
+        # is a literal, and at 150% scaling seven rows need more than it holds,
+        # which is what clipped 扫描本地目录 off the bottom. Adding an eighth row
+        # now costs nothing but a scrollbar.
+        body = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=0, pady=(4, 10))
         entries = (
             ("管理收藏夹…",
              "新建或删除收藏夹，整理你的个人游戏库。",
@@ -3104,7 +3314,7 @@ class App(ctk.CTk):
              self.do_scan, self.pick_scan_root),
         )
         state = "disabled" if self.busy else "normal"
-        self._dialog_rows(win, entries, state=state)
+        self._dialog_rows(win, entries, state=state, parent=body)
 
     def open_translation_tools(self):
         """The 游戏汉化工具 door: the answer to "my game is in English".
@@ -3194,9 +3404,10 @@ class App(ctk.CTk):
         """
         # 520 rather than 480: the group row pushed the 完全免费 line past the
         # bottom edge, and a disclaimer nobody can scroll to is not a disclaimer.
-        win = self._new_dialog("关于", "440x520")
+        win = self._new_dialog("关于", "440x620")
+        ctk.CTkLabel(win, text="", image=load_avatar(84)).pack(pady=(18, 6))
         ctk.CTkLabel(win, text=APP_TITLE, text_color=TEXT,
-                     font=ui_font(size=18, weight="bold")).pack(pady=(18, 0))
+                     font=ui_font(size=18, weight="bold")).pack(pady=(0, 0))
         ctk.CTkLabel(win, text="作者 · %s" % AUTHOR, text_color=MUTED,
                      font=ui_font(size=12)).pack()
         ctk.CTkLabel(win, text="版本 " + build_stamp(), text_color=MUTED,
@@ -3685,11 +3896,11 @@ class App(ctk.CTk):
              "如果你是通过付费渠道拿到它的，请立即举报。", color=DANGER_TEXT)
         body("用得还行的话，欢迎在 GitHub 点个 star，也帮忙推荐给周围的朋友。"
              "有想法、有 bug、想要什么功能，发邮件到 %s，"
-             "或者加反馈建议群 %s。" % (CONTACT_EMAIL, QQ_GROUP),
+             "或者加交流群 %s。" % (CONTACT_EMAIL, QQ_GROUP),
              color=MUTED)
         _link_button(frame, "发邮件给作者", CONTACT_MAILTO).pack(
             fill="x", padx=8, pady=(0, 6))
-        _copy_button(frame, "复制反馈群号：%s" % QQ_GROUP, QQ_GROUP, self).pack(
+        _copy_button(frame, "复制交流群号：%s" % QQ_GROUP, QQ_GROUP, self).pack(
             fill="x", padx=8, pady=(0, 6))
 
     @staticmethod
@@ -3838,9 +4049,10 @@ class App(ctk.CTk):
             self.queue.put(("note", "已是最新版本 %s" % APP_VERSION))
 
     def _show_update(self, release):
-        """The sidebar notice, and the settings line if that dialog is open."""
+        """The sidebar notice, the settings line, and a modal changelog dialog."""
         self._update_found = release
         self._update_url = release["url"]
+        self._update_notes = release.get("body") or ""
         label = self.update_label
         if label is not None and label.winfo_exists():
             label.configure(text="有新版本 %s，点击查看" % release["version"])
@@ -3857,6 +4069,50 @@ class App(ctk.CTk):
         about = self._about_status
         if about is not None and about.winfo_exists():
             about.configure(text="发现新版本 %s" % release["version"])
+        # The dialog fires once per session; _repaint_update_notice calls back
+        # into here on every theme switch and must not re-open a dialog the user
+        # already dismissed.
+        if not self._update_dialog_shown:
+            self._update_dialog_shown = True
+            self._show_update_dialog(release)
+
+    def _show_update_dialog(self, release):
+        """A modal changelog with a download button, shown once per new version.
+
+        The sidebar label alone used to be the whole announcement, which a user
+        glued to the grid would not notice until they happened to read the left
+        rail. The dialog is what actually tells them an update exists.
+        """
+        body = (release.get("body") or "").strip()
+        win = self._new_dialog("发现新版本", "460x520")
+        ctk.CTkLabel(win, text="发现新版本 %s" % release["version"],
+                     text_color=TEXT, font=ui_font(size=16, weight="bold")
+                     ).pack(fill="x", padx=20, pady=(18, 4))
+        if release.get("name"):
+            ctk.CTkLabel(win, text=release["name"], text_color=MUTED,
+                         font=ui_font(size=12), wraplength=400,
+                         justify="left").pack(fill="x", padx=20, pady=(0, 6))
+        if body:
+            notes = ctk.CTkTextbox(win, height=300, corner_radius=8, fg_color=BG,
+                                   text_color=TEXT, border_color=CHIP,
+                                   border_width=1, font=ui_font(size=12),
+                                   wrap="word")
+            notes.insert("1.0", body[:4000])
+            notes.configure(state="disabled")
+            notes.pack(fill="both", expand=True, padx=20, pady=(0, 8))
+        else:
+            ctk.CTkLabel(win, text="本次更新没有附带说明。", text_color=MUTED,
+                         font=ui_font(size=12)).pack(fill="x", padx=20, pady=8)
+        row = ctk.CTkFrame(win, fg_color="transparent")
+        ctk.CTkButton(row, text="稍后", height=32, width=90, corner_radius=8,
+                      fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+                      font=ui_font(size=12), command=win.destroy).pack(side="left")
+        ctk.CTkButton(row, text="前往下载", height=32, width=110, corner_radius=8,
+                      fg_color=ACCENT, text_color=ON_ACCENT, hover_color=CARD_HOVER,
+                      font=ui_font(size=12),
+                      command=lambda: (webbrowser.open(self._update_url),
+                                       win.destroy())).pack(side="left", padx=(8, 0))
+        row.pack(pady=(0, 16))
 
     def _repaint_update_notice(self):
         """Put the notice back on a sidebar that was just rebuilt."""
@@ -4270,6 +4526,8 @@ class App(ctk.CTk):
             self._overview_result(*payload)
         elif kind == "title":
             self._title_result(*payload)
+        elif kind == "comments":
+            self._comments_result(*payload)
 
 
 def build(root, smoke=False):

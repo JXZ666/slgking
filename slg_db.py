@@ -179,6 +179,17 @@ CREATE TABLE IF NOT EXISTS manual_translations (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (kind, ref, lang)
 );
+
+-- User-authored comments on a game. cloud_id is the LeanCloud objectId when the
+-- comment has been uploaded, NULL for a comment the author kept to themselves.
+CREATE TABLE IF NOT EXISTS comments (
+    id         INTEGER PRIMARY KEY,
+    game_slug  TEXT NOT NULL,
+    content    TEXT NOT NULL,
+    nickname   TEXT,
+    cloud_id   TEXT,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -1080,6 +1091,36 @@ def get_state(conn, game_id):
 def rates_histogram(conn):
     return conn.execute("SELECT COUNT(*) AS n FROM state WHERE my_rating IS NOT NULL"
                         ).fetchone()["n"]
+
+
+# --- comments ------------------------------------------------------------------
+
+def add_comment(conn, game_slug, content, nickname=None, cloud_id=None):
+    """Insert a locally-authored comment, returning its local row id."""
+    cur = conn.execute(
+        "INSERT INTO comments (game_slug, content, nickname, cloud_id, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (game_slug, content, nickname, cloud_id, _now()))
+    conn.commit()
+    return cur.lastrowid
+
+
+def mark_comment_uploaded(conn, comment_id, cloud_id):
+    conn.execute("UPDATE comments SET cloud_id = ? WHERE id = ?",
+                 (cloud_id, comment_id))
+    conn.commit()
+
+
+def list_comments(conn, game_slug):
+    """The author's own local comments for a game, oldest first."""
+    return [dict(row) for row in conn.execute(
+        "SELECT id, content, nickname, cloud_id, created_at "
+        "FROM comments WHERE game_slug = ? ORDER BY id", (game_slug,))]
+
+
+def delete_comment(conn, comment_id):
+    conn.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
+    conn.commit()
 
 
 # --- collections ---------------------------------------------------------------

@@ -64,7 +64,10 @@ def latest_release(timeout=8):
         tag = data.get("tag_name") or ""
         if parse_version(tag) is None:
             return None
-        return {"version": tag, "url": data.get("html_url") or RELEASES_URL}
+        return {"version": tag,
+                "url": data.get("html_url") or RELEASES_URL,
+                "name": data.get("name") or tag,
+                "body": data.get("body") or ""}
     except Exception:  # noqa: BLE001 - see the docstring
         return None
 
