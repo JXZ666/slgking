@@ -22,7 +22,7 @@ import webbrowser
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
-from PIL import Image, ImageGrab
+from PIL import Image, ImageGrab, ImageTk
 
 import slg_comments
 import slg_db
@@ -31,7 +31,7 @@ import slg_scrape
 import slg_translate
 import slg_update
 
-APP_VERSION = "0.20.5"
+APP_VERSION = "0.21.0"
 # The sidebar shows the number and nothing else. build_stamp() still carries
 # the channel and the build time, but it belongs on the 关于 page now: a
 # timestamp in the corner of every screen was answering a question the user
@@ -48,6 +48,7 @@ CONTACT_MAILTO = "mailto:" + CONTACT_EMAIL
 # is on the clipboard has to paste straight into QQ's search box.
 QQ_GROUP = "1124074040"
 QQ_GROUP_LABEL = "交流群 · %s · 欢迎大家加入" % QQ_GROUP
+QQ_GROUP_COPY_LABEL = "交流群 %s（点击复制）" % QQ_GROUP
 # Taken from the scraper rather than typed again: this is the site the catalogue
 # comes from, and two copies of that URL is one copy that goes stale.
 SITE_URL = slg_scrape.BASE
@@ -70,7 +71,6 @@ PREF_SEED_TAGS_IMPORTED = "seed_tags_imported_v1"
 # slg_scan used to ship one hard-coded path - the author's own - so the button
 # did nothing on anybody else's computer.
 PREF_SCAN_ROOT = "scan_root"
-PREF_SYNC_SINCE = "sync_since"
 
 
 def asset_path(name):
@@ -172,24 +172,6 @@ REFRESH_GAP = 5.0                    # seconds between refreshes while syncing
 # still draws the final list.
 REFRESH_GAP_BUSY = 20.0
 DRAIN_PER_TICK = 200                 # background messages handled per pump pass
-# Detail pages a single sync will backfill. 968 of 1595 rows were still waiting
-# at 150 a run, which is seven syncs before the oldest game on screen gets a
-# blurb; a sync is three sitemap requests plus this, so the cap was the whole
-# cost and the queue, not the site, was what made it feel stuck.
-#
-# Back down from 400 now that a cover rides along with each page: an enriched
-# game is two requests, not one, and both queue behind the same one-a-second
-# gate. 400 meant a sync could run past ten minutes, which is the stall the
-# raise was meant to fix. At 150 the first run still finishes in minutes and the
-# remainder is still just there next time.
-ENRICH_PER_SYNC = 150
-# Detail pages one 补齐热度 run will re-read. Separate from ENRICH_PER_SYNC
-# because it costs one request per game where enrich costs two - it does not
-# fetch the cover - so the same wall-clock buys twice the progress. 150 keeps
-# a run at about three minutes and it is resumable, which matters more than
-# finishing in one sitting: the backlog is every game ingested before v0.17.0,
-# which is most of the catalogue.
-METRICS_PER_RUN = 150
 
 # Each field opens the way it reads: the best score, the best rating and the
 # newest update first, but names from A. The arrow button flips from there.
@@ -231,12 +213,12 @@ _FONT_CANDIDATES = ("Microsoft YaHei UI", "微软雅黑", "Microsoft YaHei",
 _ui_family = None
 
 
-def ui_font(size, weight="normal"):
-    """The one place a font is built.
+def _resolve_ui_family():
+    """Pick the UI font family once, the first time a font is asked for.
 
-    The family is resolved on first call rather than at import: font.families()
-    needs a live root, and this module is imported before there is one. The
-    fallback is TkDefaultFont's own family, which is already the system UI font.
+    Resolved lazily rather than at import: font.families() needs a live root,
+    and this module is imported before there is one. The fallback is
+    TkDefaultFont's own family, which is already the system UI font.
     """
     global _ui_family
     if _ui_family is None:
@@ -246,7 +228,35 @@ def ui_font(size, weight="normal"):
             have = set()
         _ui_family = (next((f for f in _FONT_CANDIDATES if f in have), None)
                       or tkfont.nametofont("TkDefaultFont").actual()["family"])
-    return ctk.CTkFont(family=_ui_family, size=size, weight=weight)
+    return _ui_family
+
+
+def ui_font(size, weight="normal"):
+    """The one place a font for a widget is built."""
+    return ctk.CTkFont(family=_resolve_ui_family(), size=size, weight=weight)
+
+
+def ui_tkfont(size, weight="normal"):
+    """A plain tkinter font, for canvas text.
+
+    Canvas items take a font rather than a widget, so they cannot use the
+    CTkFont above. Going through the same resolution anyway: it is the only
+    place that knows which installed family has CJK glyphs, and splash text in
+    a font of its own would be the one place that showed it.
+    """
+    return tkfont.Font(family=_resolve_ui_family(), size=size, weight=weight)
+
+
+def _mix(color_a, color_b, t):
+    """Blend two #rrggbb colours; t=0 gives a, t=1 gives b.
+
+    Canvas items have no alpha, so every faint mark in the splash is a real
+    blend against the colour behind it instead of a translucent overlay.
+    """
+    a = [int(color_a[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(color_b[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#%02x%02x%02x" % tuple(
+        int(round(x + (y - x) * t)) for x, y in zip(a, b))
 
 
 def _section(parent, text):
@@ -546,6 +556,10 @@ class FlowFrame(ctk.CTkFrame):
         self._items = list(widgets)
         self._layout()
 
+    def add_item(self, widget):
+        self._items.append(widget)
+        self._layout()
+
     def _on_configure(self, event):
         if abs(event.width - self._width) < 2:
             return  # height-only configure, or the panel did not really move
@@ -581,6 +595,278 @@ class FlowFrame(ctk.CTkFrame):
         self.configure(height=y + bottom)
 
 
+class _Splash(ctk.CTkToplevel):
+    """A borderless loading card shown while the window builds itself.
+
+    The heavy startup - seed copy, db connect, ~480 card widgets - is all
+    synchronous, so a threaded progress bar would not paint until it was over.
+    Everything here is drawn on one canvas for the same reason: a frame costs a
+    few itemconfig()/coords() calls, where rebuilding widgets would cost more
+    than the window it is covering for.
+
+    The animation is the catalogue's own verb - a scan. A line sweeps the card,
+    the logo sits inside a ring that fills with real progress, the title
+    flickers through junk glyphs as if it were still being read, and the bar is
+    a row of cells rather than a smooth fill. Static marks (rules, corner
+    brackets) are drawn once; only the moving parts are touched per frame.
+    """
+
+    # The design is laid out in fractions of the card, not pixels: customtkinter
+    # multiplies the window's size by the display scaling while tk.Canvas
+    # coordinates stay real pixels, so a hard-coded layout is correct at 100%
+    # and cramped at 150%. The fonts get the same scaling factor for the same
+    # reason - a raw canvas font is the one thing CTk does not scale for us.
+    _CELLS = 20
+    _GLYPHS = "01#><*"
+    _LOGO_F = 0.286      # logo centre
+    _TITLE_F = 0.563
+    _VERSION_F = 0.683
+    _BAR_F = 0.825
+    _STATUS_F = 0.913
+    _RING_F = 0.159      # ring radius
+    _MARGIN_F = 0.073    # left/right inset for the bar
+    _ARM_F = 0.039       # corner bracket arm
+
+    def __init__(self, master):
+        super().__init__(master)
+        self.overrideredirect(True)
+        self.geometry("420x260")
+        self.configure(fg_color=BG)
+        self.attributes("-topmost", True)
+
+        # Neon rim: an accent frame just inside the edge. Tk has no drop shadow,
+        # so a 2px accent border is the closest cheap thing to a neon glow.
+        rim = ctk.CTkFrame(self, fg_color=ACCENT, corner_radius=14)
+        rim.pack(fill="both", expand=True, padx=2, pady=2)
+        card = ctk.CTkFrame(rim, fg_color=BG, corner_radius=12)
+        card.pack(fill="both", expand=True, padx=2, pady=2)
+
+        self.canvas = tk.Canvas(card, bg=BG, highlightthickness=0, bd=0)
+        self.canvas.pack(fill="both", expand=True)
+
+        try:
+            self._logo_src = Image.open(asset_path("avatar.png"))
+        except Exception:  # noqa: BLE001 - a missing logo must not block startup
+            self._logo_src = None
+        # Held on self: a PhotoImage the canvas points at is collected the
+        # moment nothing else references it, and the item then draws nothing.
+        self._logo_img = None
+
+        self._frame = 0
+        self._shown = 0.0            # eased toward _target, so a step never snaps
+        self._target = 0.0
+        self._status_text = "正在加载…"
+        self._built = False
+        self._centred = False
+        # Canvas metrics, not self._w/self._h: tkinter keeps its widget path in
+        # _w, and overwriting it makes every later call on this window fail with
+        # "bad window path name".
+        self._cw = self._ch = 0
+        self._ticks = []
+        self._title_chars = []
+        self._make_fonts()
+        self.canvas.bind("<Configure>", self._on_configure)
+        self.after(40, self._tick)
+
+    def _make_fonts(self):
+        """Build the canvas fonts at the display's scaling.
+
+        A raw tk.Canvas gets none of customtkinter's scaling for free, so a
+        22pt title here would come out two thirds the size of the same text in
+        the window behind it on a 150% display. Rebuilt on the first layout call
+        because the scaling factor is not known until the window is mapped.
+        """
+        scale = self._apply_window_scaling(1.0) or 1.0
+        self._title_font = ui_tkfont(int(round(22 * scale)), "bold")
+        self._small_font = ui_tkfont(int(round(12 * scale)))
+        self._pct_font = ui_tkfont(int(round(11 * scale)))
+
+    def _centre(self):
+        """Park the card in the middle of the screen, once it has a size.
+
+        Measured rather than computed from the requested geometry: geometry()
+        takes real pixels for the position but multiplies the size by the display
+        scaling, so (screen - 420) / 2 would land the card half that growth off
+        centre. The window is mapped by now, so winfo_width() is the real size.
+        """
+        w, h = self.winfo_width(), self.winfo_height()
+        if w <= 1 or h <= 1:      # not mapped yet; the next configure retries
+            return
+        self._centred = True
+        self.geometry("+%d+%d" % ((self.winfo_screenwidth() - w) // 2,
+                                  (self.winfo_screenheight() - h) // 2 - 40))
+
+    # --- drawing -------------------------------------------------------------
+
+    def _on_configure(self, event):
+        # Only ever fires once or twice: the window is borderless with a fixed
+        # geometry, so there is nothing to reflow after the first real size.
+        if event.width <= 1 or event.height <= 1:
+            return
+        if not self._centred:
+            # The display scaling is not knowable until the window is mapped,
+            # so the fonts are built for real here and the card is parked.
+            self._make_fonts()
+            self._centre()
+        self._build_scene(event.width, event.height)
+
+    def _build_scene(self, w, h):
+        c = self.canvas
+        c.delete("all")
+        self._cw, self._ch = w, h
+        self._bar_y = h * self._BAR_F
+        self._status_y = h * self._STATUS_F
+        cx = w / 2
+        logo_y = h * self._LOGO_F
+        inset = w * self._MARGIN_F
+
+        # The catalogue's rows, before there is a catalogue to draw. Faint on
+        # purpose: this is backdrop, not content.
+        rule = _mix(BG, ACCENT, 0.10)
+        step = max(6, int(h * 0.040))
+        for y in range(step, int(h) - step, step):
+            c.create_line(w * 0.02, y, w * 0.98, y, fill=rule)
+
+        # HUD corner brackets - the one static mark that reads as game UI
+        # rather than as a loading dialog.
+        bracket = _mix(BG, ACCENT, 0.55)
+        arm = w * self._ARM_F
+        pad = w * 0.015
+        for bx, by, dx, dy in ((pad, pad, 1, 1), (w - pad, pad, -1, 1),
+                               (pad, h - pad, 1, -1), (w - pad, h - pad, -1, -1)):
+            c.create_line(bx, by, bx + dx * arm, by, fill=bracket, width=2)
+            c.create_line(bx, by, bx, by + dy * arm, fill=bracket, width=2)
+
+        # The sweep. Created before the logo so it passes behind it.
+        self._sweep_echo = c.create_line(0, 0, 0, 0, fill=_mix(BG, ACCENT, 0.28))
+        self._sweep = c.create_line(0, 0, 0, 0, fill=ACCENT, width=2)
+
+        # Rings: a track, an arc that fills with real progress, and a highlight
+        # that keeps turning while the work behind it has nothing to report.
+        r = h * self._RING_F
+        box = (cx - r, logo_y - r, cx + r, logo_y + r)
+        c.create_arc(*box, start=0, extent=359, style="arc",
+                     outline=CHIP, width=2)
+        self._ring_spin = c.create_arc(
+            *box, start=0, extent=40, style="arc",
+            outline=_mix(BG, ACCENT, 0.45), width=2)
+        self._ring_fill = c.create_arc(*box, start=90, extent=0, style="arc",
+                                       outline=ACCENT, width=3)
+
+        if self._logo_src is not None:
+            side = int(2 * (r * 0.78))
+            img = self._logo_src.copy()
+            img.thumbnail((side, side))
+            self._logo_img = ImageTk.PhotoImage(img)
+            c.create_image(cx, logo_y, image=self._logo_img)
+
+        # One text item per character, so the glitch can swap a single glyph
+        # without re-measuring the run every frame.
+        tx = cx - sum(self._title_font.measure(ch) for ch in APP_TITLE) / 2
+        self._title_chars = []
+        for ch in APP_TITLE:
+            item = c.create_text(tx, h * self._TITLE_F, text=ch, anchor="w",
+                                 fill=TEXT, font=self._title_font)
+            self._title_chars.append((item, ch, tx))
+            tx += self._title_font.measure(ch)
+
+        c.create_text(cx, h * self._VERSION_F, text=APP_VERSION_LABEL,
+                      fill=MUTED, font=self._small_font)
+
+        # Cells, not a smooth fill: 20 of them, evenly spread across the bar.
+        pct_w = self._pct_font.measure("100%") + w * 0.015
+        right = w - inset - pct_w
+        gap = w * 0.010
+        cell = ((right - inset) - gap * (self._CELLS - 1)) / self._CELLS
+        half = h * 0.017
+        self._pct = c.create_text(w - inset, self._bar_y, text="0%", anchor="e",
+                                  fill=MUTED, font=self._pct_font)
+        self._ticks = []
+        for i in range(self._CELLS):
+            x0 = inset + i * (cell + gap)
+            self._ticks.append(c.create_rectangle(
+                x0, self._bar_y - half, x0 + cell, self._bar_y + half,
+                fill=CHIP, outline=""))
+
+        self._status = c.create_text(inset, self._status_y,
+                                     text=self._status_text, anchor="w",
+                                     fill=MUTED, font=self._small_font)
+        self._caret = c.create_rectangle(0, 0, 0, 0, fill=ACCENT, outline="")
+
+        self._built = True
+        self._advance()
+
+    # --- animation -----------------------------------------------------------
+
+    def _advance(self):
+        """One frame. Touches only the items that move."""
+        if not self._built:
+            return
+        self._frame += 1
+        f = self._frame
+        c = self.canvas
+
+        x0, x1 = self._cw * 0.02, self._cw * 0.98
+        trail = self._ch * 0.024
+        y = self._ch * 0.03 + (f * self._ch * 0.016) % max(1.0, self._ch * 0.94)
+        c.coords(self._sweep, x0, y, x1, y)
+        c.coords(self._sweep_echo, x0, y + trail, x1, y + trail)
+
+        c.itemconfig(self._ring_spin, start=(f * 7) % 360)
+        c.itemconfig(self._ring_fill, start=90, extent=-359 * self._shown)
+
+        # The glitch walks the title one character at a time. Driven by the
+        # frame count rather than random: a startup card that renders
+        # differently on every launch is one nothing can be asserted about.
+        for item, ch, _x in self._title_chars:
+            c.itemconfig(item, text=ch, fill=TEXT)
+        slot = (f // 5) % len(self._title_chars)
+        item, _ch, _x = self._title_chars[slot]
+        c.itemconfig(item, text=self._GLYPHS[(f // 5) % len(self._GLYPHS)],
+                     fill=ACCENT)
+
+        self._shown += (self._target - self._shown) * 0.25
+        filled = int(round(self._shown * self._CELLS))
+        for i, item in enumerate(self._ticks):
+            c.itemconfig(item, fill=ACCENT if i < filled else CHIP)
+        c.itemconfig(self._pct, text="%d%%" % round(self._shown * 100))
+
+        c.itemconfig(self._status, text=self._status_text)
+        sx = (self._cw * self._MARGIN_F + self._small_font.measure(
+            self._status_text) + self._cw * 0.012)
+        if (f // 6) % 2:
+            # A block, not a bar: it has to read as a cursor, and Tk has no
+            # way to blink one for us.
+            cy, cw = self._status_y, self._ch * 0.024
+            c.coords(self._caret, sx, cy - cw, sx + cw, cy + cw)
+            c.itemconfig(self._caret, state="normal")
+        else:
+            c.itemconfig(self._caret, state="hidden")
+
+    def _tick(self):
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        self._advance()
+        self.after(40, self._tick)
+
+    def step(self, text, progress):
+        """Label the current stage and move the bar to `progress` (0..1).
+
+        The window is built synchronously from here, so the event loop is
+        blocked and after() callbacks never fire: the frames have to be pumped
+        from this loop, which is why it calls update() itself.
+        """
+        self._status_text = text
+        self._target = progress
+        for _ in range(10):
+            self._advance()
+            self.update()
+            time.sleep(0.012)
+
+
 class App(ctk.CTk):
     def __init__(self, notify=True):
         super().__init__()
@@ -592,6 +878,13 @@ class App(ctk.CTk):
             self.iconbitmap(asset_path("slgking.ico"))
         except Exception:  # noqa: BLE001 - a missing icon is not worth a crash
             pass
+
+        self._splash = None
+        # Hidden until the splash has run its course: the window is built
+        # synchronously below, so without a withdraw it would pop in fully
+        # formed and leave the splash nothing to cross-fade into.
+        if notify:
+            self.withdraw()
 
         # A fresh install has an empty library until the first sync; copy the
         # bundled seed (a few hundred games + covers) in so there is something
@@ -609,7 +902,11 @@ class App(ctk.CTk):
             seed = asset_path("tag_zh.json")
             if os.path.exists(seed):
                 slg_db.import_seed_tag_translations(self.conn, seed)
-            slg_db.set_pref(self.conn, PREF_SEED_TAGS_IMPORTED, "1")
+                # Inside the exists() branch on purpose. Marking the import done
+                # when the file was missing latched the flag: every later launch
+                # skipped the import for good and left the user on English tag
+                # names with no way back short of editing the db.
+                slg_db.set_pref(self.conn, PREF_SEED_TAGS_IMPORTED, "1")
         load_tag_translations(self.conn)
         load_title_translations(self.conn)
         # Resolved before the first widget exists, so the opening frame is
@@ -621,9 +918,15 @@ class App(ctk.CTk):
         apply_palette(resolved_theme(self.theme_mode))
         self._sys_theme = resolved_theme(self.theme_mode)
         self.configure(fg_color=BG)
+        if notify:
+            self._splash = _Splash(self)
+            self._splash.step("正在加载数据库…", 0.2)
+            self.update_idletasks()
+            self.update()
         self.include, self.exclude = [], []
         self.search = ""
         self.view = None
+        self.origin = "main"
         self.collection_id = None
         self.sort = "score"
         self.sort_desc = SORT_DEFAULT_DESC[self.sort]
@@ -714,7 +1017,13 @@ class App(ctk.CTk):
         self._update_notes = ""
         self._update_dialog_shown = False
 
+        if notify:
+            self._splash.step("正在构建界面…", 0.55)
+            self.update_idletasks()
         self._build()
+        if notify:
+            self._splash.step("正在渲染卡片…", 0.85)
+            self.update_idletasks()
         self.refresh()
         self.after(120, self._drain)
         # Armed unconditionally: switching to "跟随系统" later has to start being
@@ -730,6 +1039,39 @@ class App(ctk.CTk):
         # entirely by the smoke test, which is not a user session.
         if notify:
             self.after(3000, self._start_update_check)
+
+        if notify:
+            # The bar is a real progress bar for three stages and then a fade;
+            # landing it on 100% first is the difference between "finished" and
+            # "gave up three quarters of the way".
+            self._splash.step("准备就绪", 1.0)
+            self._finish_splash()
+
+    def _finish_splash(self):
+        """Cross-fade the splash out and the window in, then drop the splash."""
+        if self._splash is None:
+            return
+        self.attributes("-alpha", 0.0)
+        self.deiconify()
+        self._fade_splash(1)
+
+    def _fade_splash(self, step, total=10):
+        splash = self._splash
+        if splash is None:
+            self.attributes("-alpha", 1.0)
+            return
+        frac = step / total
+        try:
+            self.attributes("-alpha", frac)
+            splash.attributes("-alpha", 1.0 - frac)
+        except tk.TclError:
+            return
+        if step >= total:
+            self._splash = None
+            splash.destroy()
+            self.attributes("-alpha", 1.0)
+            return
+        self.after(24, self._fade_splash, step + 1, total)
 
     # --- theme ----------------------------------------------------------------
 
@@ -826,6 +1168,7 @@ class App(ctk.CTk):
         self.search_entry = self.settings_btn = None
         self.sync_btn = self.maintenance_btn = None
         self.update_label = None
+        self.qq_btn = None
 
     def _poll_system(self):
         """"system" has no callback to hang off, so sample the OS setting.
@@ -888,7 +1231,7 @@ class App(ctk.CTk):
                      font=ui_font(size=14, weight="bold")).pack(
             fill="x", padx=8, pady=(14, 2))
         steps = (
-            "第 1 步　点「更新游戏数据」抓取游戏目录（建议开梯子）。",
+            "第 1 步　点「更新游戏数据」从服务器拉取游戏目录。",
             "第 2 步　点开任意游戏，在右侧点星星打分。",
             "第 3 步　用标签筛选 + 「按xp推荐」找新游戏。",
         )
@@ -973,6 +1316,34 @@ class App(ctk.CTk):
         self.detail.grid(row=0, column=1, sticky="nsew")
         self.detail.grid_columnconfigure(0, weight=1)
 
+        # Below the panel, not inside it. The panel is a description of one game
+        # and scrolls; the group is about the app and must not scroll away with
+        # it. Row 1 column 1 is the mirror of the pager's cell, so the two share
+        # a top edge and the bottom strip reads as one line across the window.
+        self._build_qq_footer(body)
+
+    def _build_qq_footer(self, body):
+        """The 交流群 copy button, level with the pager under the panel.
+
+        Built in _build rather than _build_detail so it exists once for the
+        session instead of once per selected game - and so a theme switch, which
+        rebuilds the whole window, leaves self.qq_btn pointing at the new button
+        rather than a deleted one.
+        """
+        self.qq_holder = ctk.CTkFrame(body, fg_color="transparent")
+        self.qq_holder.grid(row=1, column=1, sticky="ew", pady=(8, 0))
+        self.qq_holder.grid_columnconfigure(0, weight=1)
+        bar = ctk.CTkFrame(self.qq_holder, fg_color=CARD, corner_radius=8)
+        bar.grid(row=0, column=0, sticky="ew")
+        bar.grid_columnconfigure(0, weight=1)
+        self.qq_btn = ctk.CTkButton(
+            bar, text=QQ_GROUP_COPY_LABEL, height=30, corner_radius=6,
+            anchor="w", fg_color="transparent", text_color=ACCENT,
+            hover_color=CARD_HOVER, font=ui_font(size=12),
+            command=lambda: self._copy_value(
+                QQ_GROUP, self.qq_btn, QQ_GROUP_COPY_LABEL))
+        self.qq_btn.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+
     def _build_sidebar(self):
         """Four bands, packed in priority order rather than reading order.
 
@@ -1051,11 +1422,11 @@ class App(ctk.CTk):
 
         actions = ctk.CTkFrame(bar, fg_color="transparent")
         actions.pack(side="bottom", fill="x")
-        # Two buttons, not four. The three chores behind 更多… all reach the
-        # same games as the sitemap sync - two of them at a hundred times the
-        # cost - and as a column of four differently-sized buttons they gave a
-        # new user no way to tell which one they wanted. Sync stays out here
-        # because it is the one that is actually routine.
+        # Two buttons, not four. The chores behind 更多… all reach the
+        # same games as the sitemap sync - the cover download at a hundred
+        # times the cost - and as a column of four differently-sized buttons
+        # they gave a new user no way to tell which one they wanted. Sync stays
+        # out here because it is the one that is actually routine.
         self.sync_btn = ctk.CTkButton(actions, text="更新游戏数据", height=38,
                                       corner_radius=8, fg_color=ACCENT,
                                       command=self.do_sync)
@@ -1080,6 +1451,8 @@ class App(ctk.CTk):
                 # CARD for the active view, so a theme rebuild does not come back
                 # with the highlight missing.
                 active=(status == self.view), height=36, size=14)
+        self.user_view_btn = _nav_button(
+            nav, "我添加的游戏", self.set_user_view, height=36, size=14)
 
         colbox = ctk.CTkFrame(nav, fg_color="transparent")
         colbox.pack(fill="x", padx=12, pady=(6, 2))
@@ -1099,12 +1472,12 @@ class App(ctk.CTk):
 
         _rule(nav)
         _section(nav, "工具")
-        # The two routine tools stay out here: 标签库 for filtering, and
-        # 检查更新 for "which of my local games has a newer build on the site".
-        # The set-once-then-forget ones (标签译名/偏好权重/翻译设置/扫描本地目录/
-        # 游戏汉化工具) live behind 更多工具…, and the toolbar gear opens 设置.
+        # 标签库 stays out here as the one routine filter; 添加我的游戏… maps
+        # straight onto the sidebar's 我添加的游戏 view. The rest (检查更新 and
+        # the set-once-then-forget ones) live behind 更多工具…, and the toolbar
+        # gear opens 设置.
         for text, command in (("标签库…", self.open_tag_picker),
-                              ("检查更新", self.do_updates),
+                              ("添加我的游戏…", self.open_add_game),
                               ("更多工具…", self.open_tools)):
             _nav_button(nav, text, command)
         _nav_button(nav, "帮助文档", self.open_help, pady=(2, 10))
@@ -1215,25 +1588,6 @@ class App(ctk.CTk):
                       command=lambda: webbrowser.open(SITE_URL)
                       ).pack(side="left", pady=6)
 
-        # The group number sits in the band's own row but outside the band, in
-        # the column the sort controls occupy: that cell was empty, and it is
-        # the one place on the toolbar a reader already looks. Outside rather
-        # than appended to the centred group inside, because the band's contents
-        # are pinned to the window's centre axis by a layout test - a third item
-        # in there would drag the other two off it.
-        #
-        # Same tint, corner radius and 28+6*2 height as the band, so the two read
-        # as a pair rather than as a card that happens to sit nearby.
-        self.qq_chip = ctk.CTkFrame(bar, fg_color=CHIP, corner_radius=8)
-        self.qq_chip.grid(row=1, column=1, sticky="e", padx=(8, 0), pady=(8, 0))
-        self.qq_btn = ctk.CTkButton(
-            self.qq_chip, text=QQ_GROUP_LABEL, height=28, corner_radius=6,
-            fg_color="transparent", text_color=ACCENT, hover_color=CARD_HOVER,
-            font=ui_font(size=12),
-            command=lambda: self._copy_value(QQ_GROUP, self.qq_btn,
-                                             QQ_GROUP_LABEL))
-        self.qq_btn.pack(padx=10, pady=6)
-
     def _on_theme_pick(self, label):
         mode = next(m for m, text in _THEME_LABELS.items() if text == label)
         # Deferred: this runs from inside the segmented button's own press
@@ -1298,16 +1652,38 @@ class App(ctk.CTk):
 
     def set_view(self, status):
         self.view = status
+        self.origin = "main"
         self.page = 1
         for key, btn in self.view_buttons.items():
             btn.configure(fg_color=CARD if key == status else "transparent")
+        self._paint_user_view()
         self.refresh()
+
+    def set_user_view(self):
+        """Show only the games the user added themselves."""
+        self.view = None
+        self.origin = "user"
+        self.collection_id = None
+        self.page = 1
+        for key, btn in self.view_buttons.items():
+            btn.configure(fg_color="transparent")
+        self._refresh_collection_menu()
+        self._sync_delete_collection_btn()
+        self._paint_user_view()
+        self.refresh()
+
+    def _paint_user_view(self):
+        btn = getattr(self, "user_view_btn", None)
+        if btn is not None and btn.winfo_exists():
+            btn.configure(fg_color=CARD if self.origin == "user" else "transparent")
 
     def _on_collection(self, name):
         cols = slg_db.list_collections(self.conn)
         self.collection_id = next((c["id"] for c in cols if c["name"] == name), None)
+        self.origin = "main"
         self.page = 1
         self._sync_delete_collection_btn()
+        self._paint_user_view()
         self.refresh()
 
     def _refresh_collection_menu(self):
@@ -1413,7 +1789,7 @@ class App(ctk.CTk):
             search=self.search or None,
             statuses=[self.view] if self.view else None,
             downloaded_only=False, collection_id=self.collection_id,
-            sort=self.sort, desc=self.sort_desc)
+            origin=self.origin, sort=self.sort, desc=self.sort_desc)
         # A filter or a sort handler sets page 1 already; this is for the other
         # way the set can shrink - the tick after a sync emptied the tail, or a
         # drop that took the last row off the last page.
@@ -1725,7 +2101,8 @@ class App(ctk.CTk):
         # collection_id rides along so the 移出此收藏夹 button appears and
         # disappears when the user switches collections on the same game.
         return (game["id"], game["status"], game["my_rating"], game["note"],
-                game["cover_file"], self.collection_id)
+                game["cover_file"], self.collection_id,
+                game.get("origin"), game.get("promoted"))
 
     def _render_detail_if_stale(self):
         if self._detail_signature() == self._detail_sig:
@@ -1974,6 +2351,8 @@ class App(ctk.CTk):
         order.extend(self._build_detail_open_folder(d, parts))
         order.extend(self._build_detail_collect(d, parts))
         order.extend(self._build_detail_remove_collection(d, parts))
+        order.extend(self._build_detail_promote(d, parts))
+        order.extend(self._build_detail_delete(d, parts))
 
         order.extend(self._build_detail_status(d, parts))
         order.extend(self._build_detail_stars(d, parts))
@@ -2000,34 +2379,32 @@ class App(ctk.CTk):
         # Last thing in the panel on every game, for the same reason the
         # disclaimer is: it is addressed to whoever is reading, and there is no
         # other screen they are guaranteed to see.
+        #
+        # Only the mail door lives in here now. The group number used to sit
+        # next to it, but the panel is about one game and the group is about the
+        # app, so it moved down to the strip under the panel (_build_qq_footer)
+        # where it keeps company with the pager instead of scrolling away with
+        # a game's blurb.
         feedback = ctk.CTkFrame(d, fg_color="transparent")
         ctk.CTkLabel(feedback,
                      text="用得还行的话，欢迎在 GitHub 点个 star，"
                           "也帮忙推荐给周围的朋友。",
                      text_color=MUTED, font=ui_font(size=11), wraplength=340,
                      justify="left", anchor="w").pack(fill="x")
-        # One row per way of reaching the author, same chrome for each: the
-        # panel is the only screen every game shows, so both doors belong here.
-        def foot_link(text):
-            btn = ctk.CTkButton(feedback, text=text, height=22, corner_radius=6,
-                                fg_color="transparent", text_color=ACCENT,
-                                hover_color=CHIP, font=ui_font(size=11),
-                                anchor="w")
-            btn.pack(anchor="w", pady=(2, 0))
-            return btn
-
-        mail = foot_link("反馈 / 建议：%s" % CONTACT_EMAIL)
-        mail.configure(command=lambda: webbrowser.open(CONTACT_MAILTO))
-        qq_text = "交流群 %s（点击复制）" % QQ_GROUP
-        qq = foot_link(qq_text)
-        qq.configure(command=lambda: self._copy_value(QQ_GROUP, qq, qq_text))
+        mail = ctk.CTkButton(feedback, text="反馈 / 建议：%s" % CONTACT_EMAIL,
+                             height=22, corner_radius=6, fg_color="transparent",
+                             text_color=ACCENT, hover_color=CHIP,
+                             font=ui_font(size=11), anchor="w",
+                             command=lambda: webbrowser.open(CONTACT_MAILTO))
+        mail.pack(anchor="w", pady=(2, 0))
         add("feedback", feedback, fill="x", padx=18, pady=(0, 20))
 
         self._detail_parts = parts
         self._detail_order = order
         self._detail_shown = None
 
-    def _layout_detail(self, show_url, show_folder=False, show_remove=False):
+    def _layout_detail(self, show_url, show_folder=False, show_remove=False,
+                       show_user=False):
         """Show, hide and order the panel's blocks.
 
         pack() appends, so a block that comes back lands at the bottom.
@@ -2043,7 +2420,8 @@ class App(ctk.CTk):
         translation they wanted to write by hand.
         """
         wanted = {"url": show_url, "open_folder": show_folder,
-                  "remove_collection": show_remove}
+                  "remove_collection": show_remove,
+                  "promote": show_user, "delete_game": show_user}
         keys = [key for key, _w, _p in self._detail_order if wanted.get(key, True)]
         if keys == self._detail_shown:
             return
@@ -2061,12 +2439,22 @@ class App(ctk.CTk):
         p["sub"].configure(text="v%s · %s" % (game["version"] or "?",
                                               game["developer"] or "未知作者"))
         p["title_note"].configure(text="")
-        if game["url"]:
+        is_user = game.get("origin") == "user"
+        if game["url"] and not is_user:
             p["url"].configure(command=lambda u=game["url"]: webbrowser.open(u))
         folder = game.get("folder_path")
         if folder:
             p["open_folder"].configure(
                 command=lambda f=folder: self._open_local_folder(f))
+        if is_user:
+            if game.get("promoted"):
+                p["promote"].configure(text="移出主列表",
+                                       command=lambda: self._set_promote(game["id"], False))
+            else:
+                p["promote"].configure(text="加入主列表",
+                                       command=lambda: self._check_promote(game))
+            p["delete_game"].configure(
+                command=lambda: self._delete_user_game(game))
         self._sync_status_btns(game)
         self._sync_star_btns(game)
         self._fill_heat(game)
@@ -2091,8 +2479,10 @@ class App(ctk.CTk):
         # should do.
         p["ov_seg"].set("原文")
         self._apply_lang(game, "原文", request=False)
-        self._layout_detail(bool(game["url"]), bool(folder),
-                            self.collection_id is not None)
+        self._layout_detail(show_url=(not is_user) and bool(game["url"]),
+                            show_folder=bool(folder),
+                            show_remove=self.collection_id is not None,
+                            show_user=is_user)
 
     def _show_title(self, text):
         label = self._title_label
@@ -2380,14 +2770,15 @@ class App(ctk.CTk):
         return [("heat", label, {"anchor": "w", "padx": 18, "pady": (10, 0)})]
 
     def _detail_action(self, d, parts, key, text, command=None, accent=False,
-                       pady=(0, 4)):
+                       pady=(0, 4), text_color=None):
         """A filled detail-panel action button, registered under `key`.
 
         share/open_folder/collect/url/remove_collection are one widget restyled
         five times; the constructor's seven kwargs are the thing that drifted.
         """
         btn = ctk.CTkButton(d, text=text, height=30, corner_radius=8,
-                            fg_color=CHIP, text_color=ACCENT if accent else TEXT,
+                            fg_color=CHIP,
+                            text_color=text_color or (ACCENT if accent else TEXT),
                             hover_color=CARD_HOVER, command=command)
         parts[key] = btn
         return [(key, btn, {"fill": "x", "padx": 18, "pady": pady})]
@@ -2407,6 +2798,53 @@ class App(ctk.CTk):
     def _build_detail_remove_collection(self, d, parts):
         return self._detail_action(d, parts, "remove_collection",
                                    "移出此收藏夹", self._remove_from_collection)
+
+    def _build_detail_promote(self, d, parts):
+        return self._detail_action(d, parts, "promote", "加入主列表", accent=True)
+
+    def _build_detail_delete(self, d, parts):
+        return self._detail_action(d, parts, "delete_game", "删除此游戏",
+                                   text_color=DANGER_TEXT)
+
+    def _edit_tags_current(self):
+        if self.selected is not None:
+            self.open_edit_tags(self.selected)
+
+    def _set_promote(self, game_id, on):
+        with slg_db.session() as conn:
+            slg_db.promote_game(conn, game_id, on)
+        self.refresh()
+
+    def _check_promote(self, game):
+        missing = []
+        if not game["title"]:
+            missing.append("标题")
+        if not game["developer"]:
+            missing.append("开发商")
+        if not game["engine"]:
+            missing.append("引擎")
+        if not game["version"]:
+            missing.append("版本")
+        if not slg_db.game_tags(self.conn, game["id"]):
+            missing.append("至少1个标签")
+        if missing:
+            messagebox.showinfo("还不能加入主列表",
+                                "还缺：%s。\n先在右侧补全条目再试。" % "、".join(missing),
+                                parent=self)
+            return
+        self._set_promote(game["id"], True)
+
+    def _delete_user_game(self, game):
+        if game.get("origin") != "user":
+            return
+        if not messagebox.askyesno("删除游戏",
+                                   "确定删除「%s」吗？\n这个操作无法撤销。" % game["title"],
+                                   parent=self):
+            return
+        with slg_db.session() as conn:
+            slg_db.delete_game(conn, game["id"])
+        self.selected = None
+        self.refresh()
 
     def _open_local_folder(self, folder):
         if os.path.isdir(folder):
@@ -2618,6 +3056,10 @@ class App(ctk.CTk):
         head = ctk.CTkFrame(d, fg_color="transparent")
         ctk.CTkLabel(head, text="标签（左键加入筛选 / 右键排除）", text_color=MUTED,
                      font=ui_font(size=12)).pack(side="left")
+        ctk.CTkButton(head, text="✎ 编辑", width=64, height=24, corner_radius=6,
+                      fg_color="transparent", text_color=ACCENT, hover_color=CHIP,
+                      font=ui_font(size=11), command=self._edit_tags_current
+                      ).pack(side="right")
         ctk.CTkButton(head, text="✎ 译名", width=64, height=24, corner_radius=6,
                       fg_color="transparent", text_color=ACCENT, hover_color=CHIP,
                       font=ui_font(size=11), command=self.open_tag_editor
@@ -3228,31 +3670,21 @@ class App(ctk.CTk):
         redraw()
 
     def open_maintenance(self):
-        """The three chores that are not the routine sync.
+        """The two chores that are not the routine sync.
 
-        One dialog rather than three sidebar buttons: none of them is what a
+        One dialog rather than two sidebar buttons: none of them is what a
         new user is looking for, and each is only safe to click with a sentence
-        of explanation attached. Identical styling on all three, so what tells
+        of explanation attached. Identical styling on both, so what tells
         them apart is the text and nothing else.
         """
         win = self._new_dialog("同步与维护", "440x560")
         gaps = slg_db.data_gaps(self.conn)
         entries = (
-            ("全量重建…",
-             "按标签把 dikgames 重爬一遍：约 100 个请求、10 分钟。"
-             "拿到的数据和「同步」完全一样，只是慢得多。",
-             self.do_rebuild, None),
             ("下载封面（%d）" % gaps["covers"] if gaps["covers"] else "封面已齐",
-             "补下缺失的封面缩略图。可随时停止，下次接着下。",
+             "从服务器补下缺失的封面缩略图。可随时停止，下次接着下。",
              self.do_covers, None),
-            ("补齐历史…",
-             "收下日期闸门之前的老游戏。右键这颗按钮 = 取消日期闸门。",
-             self.do_backfill, self._forget_sync_since),
-            ("补齐热度（%d）" % (gaps["metrics"] or gaps["heat"])
-             if (gaps["metrics"] or gaps["heat"]) else "热度已齐",
-             "给老游戏补上浏览/点赞/评论，再算热度。这条会联网重抓详情页，"
-             "需要梯子；每轮 %d 款、约三分钟，可随时停止，再点就接着补。"
-             % METRICS_PER_RUN,
+            ("补齐热度（%d）" % gaps["heat"] if gaps["heat"] else "热度已齐",
+             "本地重算热度，不联网。",
              self.do_heat, None),
         )
         # The dialog cannot normally be opened mid-job - _start_job disables the
@@ -3265,7 +3697,7 @@ class App(ctk.CTk):
         """The set-once tools, behind one door.
 
         Same shape as 同步与维护 and for the same reason: none of these is what
-        the window is for, and as four more rows in the sidebar's 工具 group
+        the window is for, and as extra rows in the sidebar's 工具 group
         they buried the routine controls. The toolbar gear no longer lands here
         - it opens 设置, which holds the theme switch and a way into 关于.
 
@@ -3278,7 +3710,7 @@ class App(ctk.CTk):
                       % os.path.basename(root)) if root else \
                      "把本地游戏库对上号，记录版本号。点它或右键先选文件夹。"
         win = self._new_dialog("更多工具", "440x580")
-        ctk.CTkLabel(win, text="都是设一次就不用再管的东西。\n"
+        ctk.CTkLabel(win, text="不常用的和设一次就够的都在这里。\n"
                                "同步与维护在左侧栏的「更多…」里。",
                      text_color=MUTED, font=ui_font(size=12), justify="left",
                      anchor="w").pack(fill="x", padx=16, pady=(12, 0))
@@ -3291,6 +3723,9 @@ class App(ctk.CTk):
         body = ctk.CTkScrollableFrame(win, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=0, pady=(4, 10))
         entries = (
+            ("检查更新",
+             "看看本地哪些游戏落后于站点新版。",
+             self.do_updates, None),
             ("管理收藏夹…",
              "新建或删除收藏夹，整理你的个人游戏库。",
              self.open_collection_manager, None),
@@ -3581,6 +4016,303 @@ class App(ctk.CTk):
         # the tag names are not among them - the chips have to be redrawn here.
         self._render_detail()
 
+    def _tag_checkbox(self, parent, text, variable):
+        """A checkbox in the shared tag-editing style, returned unpacked so the
+        caller can choose its own pack options."""
+        return ctk.CTkCheckBox(parent, text=text, variable=variable, height=24,
+                               corner_radius=4, border_width=1,
+                               fg_color=ACCENT, hover_color=CARD_HOVER,
+                               text_color=TEXT, font=ui_font(size=12))
+
+    def _tag_checklist(self, parent, current):
+        """A wrapping run of tag checkboxes. Returns (flow, {name: var})."""
+        flow = FlowFrame(parent, fg_color="transparent", gap_x=4, gap_y=4)
+        flow.pack(fill="x")
+        vars_ = {}
+        widgets = []
+        for name in sorted(slg_db.all_tags(self.conn), key=display_tag):
+            var = ctk.BooleanVar(value=(name in current))
+            vars_[name] = var
+            widgets.append(self._tag_checkbox(flow, display_tag(name), var))
+        flow.set_items(widgets)
+        return flow, vars_
+
+    def _tag_new_entry(self, parent, flow, vars_):
+        """An entry that turns whatever is typed into a fresh checked tag."""
+        entry = ctk.CTkEntry(parent, placeholder_text="新标签（回车添加）",
+                             height=30, corner_radius=8, fg_color=BG,
+                             text_color=TEXT, border_color=CHIP,
+                             placeholder_text_color=MUTED, font=ui_font(size=12))
+        entry.pack(fill="x", pady=(4, 0))
+
+        def add(_e=None):
+            text = entry.get().strip()
+            if not text:
+                return
+            if text not in vars_:
+                var = ctk.BooleanVar(value=True)
+                vars_[text] = var
+                flow.add_item(self._tag_checkbox(flow, display_tag(text), var))
+            else:
+                vars_[text].set(True)
+            entry.delete(0, "end")
+        entry.bind("<Return>", add)
+        return entry
+
+    def open_edit_tags(self, game):
+        """Edit which tags a game carries (not their display names)."""
+        win = self._new_dialog("编辑标签", "420x600")
+        ctk.CTkLabel(win, text="给「%s」打标签" % self._title_to_show(game),
+                     text_color=TEXT, font=ui_font(size=14, weight="bold"),
+                     anchor="w", wraplength=380).pack(fill="x", padx=18, pady=(14, 2))
+        ctk.CTkLabel(win, text="勾选已有标签，或在下面输入自己的标签名后回车。",
+                     text_color=MUTED, font=ui_font(size=11), anchor="w",
+                     justify="left").pack(fill="x", padx=18)
+
+        body = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=18, pady=(8, 0))
+        current = set(slg_db.game_tags(self.conn, game["id"]))
+        flow, vars_ = self._tag_checklist(body, current)
+        self._tag_new_entry(body, flow, vars_)
+
+        def save():
+            chosen = [n for n, v in vars_.items() if v.get()]
+            with slg_db.session() as conn:
+                slg_db.set_tags(conn, game["id"], chosen, clear=True)
+            win.destroy()
+            self._reload_tags(None, None)
+
+        ctk.CTkButton(win, text="保存", height=34, corner_radius=8,
+                      fg_color=ACCENT, text_color=ON_ACCENT,
+                      hover_color=CARD_HOVER, command=save
+                      ).pack(fill="x", padx=18, pady=(8, 16))
+
+    def open_add_game(self, prefill_title="", prefill_folder=""):
+        """Add a game the user owns that is not in the dikgames catalogue."""
+        win = self._new_dialog("添加我的游戏", "460x760")
+        ctk.CTkLabel(win, text="把自己本地的游戏加进库",
+                     text_color=TEXT, font=ui_font(size=16, weight="bold"),
+                     anchor="w").pack(fill="x", padx=18, pady=(14, 2))
+        ctk.CTkLabel(win, text="默认只出现在左侧「我添加的游戏」。\n"
+                               "填齐标题/开发商/引擎/版本/标签后，可勾选「加入主列表」。",
+                     text_color=MUTED, font=ui_font(size=11), justify="left",
+                     anchor="w", wraplength=420).pack(fill="x", padx=18, pady=(0, 6))
+
+        body = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=18, pady=(4, 0))
+
+        def field(label, placeholder=""):
+            ctk.CTkLabel(body, text=label, text_color=MUTED,
+                         font=ui_font(size=11), anchor="w").pack(fill="x", pady=(8, 2))
+            e = ctk.CTkEntry(body, height=30, corner_radius=8, fg_color=BG,
+                             text_color=TEXT, border_color=CHIP,
+                             placeholder_text_color=MUTED,
+                             placeholder_text=placeholder, font=ui_font(size=13))
+            e.pack(fill="x")
+            return e
+
+        title_e = field("标题（必填）")
+        title_e.insert(0, prefill_title)
+        dev_e = field("开发商")
+        engine_e = field("引擎")
+        ver_e = field("版本")
+
+        ctk.CTkLabel(body, text="简介", text_color=MUTED,
+                     font=ui_font(size=11), anchor="w").pack(fill="x", pady=(8, 2))
+        ov_e = ctk.CTkTextbox(body, height=70, corner_radius=8, fg_color=BG,
+                              text_color=TEXT, border_color=CHIP, border_width=1,
+                              font=ui_font(size=12), wrap="word")
+        ov_e.pack(fill="x")
+
+        cover = {"path": None}
+        ctk.CTkLabel(body, text="封面（可选）", text_color=MUTED,
+                     font=ui_font(size=11), anchor="w").pack(fill="x", pady=(8, 2))
+        cover_row = ctk.CTkFrame(body, fg_color="transparent")
+        cover_row.pack(fill="x")
+        cover_label = ctk.CTkLabel(cover_row, text="未选择", text_color=MUTED,
+                                   font=ui_font(size=11), anchor="w")
+        cover_label.pack(side="left", fill="x", expand=True)
+
+        def pick_cover():
+            path = filedialog.askopenfilename(
+                title="选择封面图片", parent=win,
+                filetypes=[("图片", "*.png *.jpg *.jpeg")])
+            if path:
+                cover["path"] = path
+                cover_label.configure(text=os.path.basename(path))
+
+        ctk.CTkButton(cover_row, text="选择…", width=72, height=26,
+                      corner_radius=6, fg_color=CHIP, text_color=TEXT,
+                      hover_color=CARD_HOVER, font=ui_font(size=11),
+                      command=pick_cover).pack(side="right")
+
+        folder = {"path": prefill_folder}
+        ctk.CTkLabel(body, text="本地目录（可选）", text_color=MUTED,
+                     font=ui_font(size=11), anchor="w").pack(fill="x", pady=(8, 2))
+        folder_row = ctk.CTkFrame(body, fg_color="transparent")
+        folder_row.pack(fill="x")
+        folder_label = ctk.CTkLabel(folder_row,
+                                    text=os.path.basename(prefill_folder) if prefill_folder else "未选择",
+                                    text_color=MUTED, font=ui_font(size=11), anchor="w")
+        folder_label.pack(side="left", fill="x", expand=True)
+
+        def pick_folder():
+            path = filedialog.askdirectory(title="选择游戏所在文件夹", parent=win)
+            if path:
+                folder["path"] = path
+                folder_label.configure(text=os.path.basename(path))
+
+        ctk.CTkButton(folder_row, text="选择…", width=72, height=26,
+                      corner_radius=6, fg_color=CHIP, text_color=TEXT,
+                      hover_color=CARD_HOVER, font=ui_font(size=11),
+                      command=pick_folder).pack(side="right")
+
+        ctk.CTkLabel(body, text="标签", text_color=MUTED,
+                     font=ui_font(size=11), anchor="w").pack(fill="x", pady=(8, 2))
+        flow, vars_ = self._tag_checklist(body, set())
+        self._tag_new_entry(body, flow, vars_)
+
+        promoted = ctk.BooleanVar(value=False)
+        self._tag_checkbox(body, "加入主列表（需填齐标题/开发商/引擎/版本/至少1个标签）",
+                           promoted).pack(anchor="w", pady=(12, 0))
+
+        def save():
+            title = title_e.get().strip()
+            if not title:
+                messagebox.showwarning("还差标题", "标题是必填的。", parent=win)
+                return
+            chosen = [n for n, v in vars_.items() if v.get()]
+            want_promote = promoted.get()
+            if want_promote:
+                missing = []
+                if not dev_e.get().strip():
+                    missing.append("开发商")
+                if not engine_e.get().strip():
+                    missing.append("引擎")
+                if not ver_e.get().strip():
+                    missing.append("版本")
+                if not chosen:
+                    missing.append("至少1个标签")
+                if missing:
+                    messagebox.showwarning(
+                        "还不能加入主列表",
+                        "还缺：%s。\n补齐后再勾选「加入主列表」。" % "、".join(missing),
+                        parent=win)
+                    return
+            cover_file = None
+            if cover["path"]:
+                try:
+                    cover_file = slg_db.import_cover(cover["path"])
+                except Exception:  # noqa: BLE001 - a bad image must not block saving
+                    cover_file = None
+            with slg_db.session() as conn:
+                slg_db.add_user_game(
+                    conn, title,
+                    developer=dev_e.get().strip() or None,
+                    engine=engine_e.get().strip() or None,
+                    version=ver_e.get().strip() or None,
+                    overview=ov_e.get("1.0", "end-1c").strip() or None,
+                    cover_file=cover_file, tags=chosen,
+                    folder_path=folder["path"] or None,
+                    promoted=want_promote)
+            win.destroy()
+            self.refresh()
+
+        ctk.CTkButton(win, text="保存", height=34, corner_radius=8,
+                      fg_color=ACCENT, text_color=ON_ACCENT,
+                      hover_color=CARD_HOVER, command=save
+                      ).pack(fill="x", padx=18, pady=(8, 16))
+
+    def open_bind_dialog(self, unmatched):
+        """Offer to hand-match folders the scan could not place."""
+        if not unmatched:
+            return
+        import slg_scan
+        root = self.scan_root()
+        win = self._new_dialog("未匹配的游戏", "560x560")
+        ctk.CTkLabel(win, text="这些文件夹没匹配上，手动处理一下：",
+                     text_color=TEXT, font=ui_font(size=14, weight="bold"),
+                     anchor="w").pack(fill="x", padx=18, pady=(14, 2))
+        ctk.CTkLabel(win, text="绑定后下次扫描会自动对上号；也可以当新游戏加进库。",
+                     text_color=MUTED, font=ui_font(size=11), anchor="w",
+                     justify="left").pack(fill="x", padx=18)
+
+        body = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=14, pady=(8, 6))
+        for name in sorted(unmatched):
+            row = ctk.CTkFrame(body, fg_color=CARD, corner_radius=8)
+            row.pack(fill="x", pady=3)
+            ctk.CTkLabel(row, text=name, text_color=TEXT, anchor="w",
+                         font=ui_font(size=12, weight="bold"),
+                         wraplength=240, justify="left").pack(
+                side="left", padx=12, pady=8, fill="x", expand=True)
+            ctk.CTkButton(row, text="绑定", width=56, height=26, corner_radius=6,
+                          fg_color=ACCENT, text_color=ON_ACCENT,
+                          hover_color=CARD_HOVER, font=ui_font(size=11),
+                          command=lambda n=name, w=win: self._bind_folder(n, w)
+                          ).pack(side="right", padx=(4, 6))
+            ctk.CTkButton(row, text="加为游戏", width=72, height=26, corner_radius=6,
+                          fg_color=CHIP, text_color=TEXT,
+                          hover_color=CARD_HOVER, font=ui_font(size=11),
+                          command=lambda n=name, w=win, r=root: (
+                              w.destroy(),
+                              self.open_add_game(
+                                  prefill_title=slg_scan.folder_title(n),
+                                  prefill_folder=os.path.join(r, n) if r else ""))
+                          ).pack(side="right", padx=(0, 12))
+
+    def _bind_folder(self, name, win):
+        import slg_scan
+        game = self._pick_game()
+        if game is None:
+            return
+        root = self.scan_root()
+        with slg_db.session() as conn:
+            slg_db.add_alias(conn, game["id"], slg_scan.folder_title(name))
+            slg_db.set_local_folder(
+                conn, game["id"],
+                os.path.join(root, name) if root else name,
+                slg_scan.parse_folder_version(name))
+            # Binding a folder means the game is on disk; without this it stays
+            # out of the 已下载 view, unlike a game found by scan().
+            slg_db.set_state(conn, game["id"], status="downloaded")
+        win.destroy()
+        self.refresh()
+
+    def _pick_game(self):
+        """A search dialog that returns a games row, or None when cancelled."""
+        win = self._new_dialog("选择游戏", "460x560")
+        entry = ctk.CTkEntry(win, placeholder_text="搜索游戏名…", height=30,
+                             corner_radius=8, fg_color=BG, text_color=TEXT,
+                             border_color=CHIP, placeholder_text_color=MUTED,
+                             font=ui_font(size=13))
+        entry.pack(fill="x", padx=14, pady=(12, 4))
+        frame = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        frame.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+        result = [None]
+
+        def rebuild():
+            for w in frame.winfo_children():
+                w.destroy()
+            text = entry.get().strip()
+            rows = slg_db.find_games(self.conn, search=text or None, origin=None,
+                                     sort="title", desc=False)
+            for g in rows[:200]:
+                ctk.CTkButton(
+                    frame, text=g["title"], height=30, corner_radius=8, anchor="w",
+                    fg_color="transparent", text_color=TEXT, hover_color=CARD,
+                    font=ui_font(size=12),
+                    command=lambda gid=g["id"], w=win: (result.__setitem__(0, gid),
+                                                        w.destroy())
+                    ).pack(fill="x")
+
+        entry.bind("<KeyRelease>", lambda e: rebuild())
+        rebuild()
+        self.wait_window(win)
+        if result[0] is None:
+            return None
+        return slg_db.get_game(self.conn, result[0])
+
     def open_translate_settings(self):
         """Engine, then provider, then a key - in that order.
 
@@ -3773,27 +4505,26 @@ class App(ctk.CTk):
                          justify="left").pack(anchor="w", padx=8, pady=(0, 8))
 
         head("三步上手")
-        body("第 1 步　点左下角的「更新游戏数据」，抓取游戏目录（建议先开梯子）。")
+        body("第 1 步　点左下角的「更新游戏数据」，从服务器拉取游戏目录。")
         body("第 2 步　点开任意一款游戏，在右侧用星星给它打分。")
         body("第 3 步　用标签筛选，再把顶栏排序切成「按xp推荐」，挑下一款要玩的。")
         body("打分越多，推荐越准——这是它和普通游戏列表最大的区别。", color=MUTED)
 
         head("这个软件是什么")
-        body("一个 dikgames 站点游戏的本地资料库。把站上的游戏抓下来存进本地数据库，"
-             "再按标签、评分、下载状态去挑你想玩的那些。数据来自站点的 sitemap，"
-             "抓完就存在本地，浏览、搜索、筛选都不联网；封面图跟着游戏一起抓下来，"
-             "抓完一款存一款。")
+        body("一个 dikgames 站点游戏的本地资料库。游戏目录由作者的服务器从站点整理好，"
+             "同步时下载进本地数据库，再按标签、评分、下载状态去挑你想玩的那些。"
+             "浏览、搜索、筛选都不联网；封面图跟着目录一起下载，下完一款存一款。")
         body("数据库和封面不在程序旁边，在 %LOCALAPPDATA%\\slgking\\ 下面："
              "slgking.db 和 covers 文件夹。想备份或换电脑，把那个目录整个带走。"
              "exe 删了数据还在，换台机器数据留在原处。")
 
         head("网络与梯子")
-        body("游戏数据来自 dikgames 站点，翻译用的是 Google 和各家大模型的公开接口，"
-             "这些站点和接口都在墙外。在国内使用请先开梯子（VPN / 代理），"
-             "否则同步、下载封面、翻译都会连接失败。")
+        body("游戏目录不再直连 dikgames，改从作者的服务器下载（国内可直连，不用梯子）。"
+             "翻译用的是 Google 和各家大模型的公开接口，这些接口在墙外，"
+             "需要先开梯子（VPN / 代理），否则翻译会连接失败。")
         body("没开梯子时，翻译会在 8 秒内明确报「网络错误：连接超时」，而不是一直卡着不动。",
              color=MUTED)
-        body("未使用梯子导致的一切问题（抓不到数据、翻译失败、封面空白等）与作者无关。",
+        body("未使用梯子导致的翻译失败等问题与作者无关。",
              color=DANGER_TEXT)
         _link_button(frame, SITE_LABEL, SITE_URL).pack(fill="x", padx=8, pady=(0, 6))
 
@@ -3801,8 +4532,8 @@ class App(ctk.CTk):
 
         sub("同步与数据")
         qa("Q：同步失败了怎么办？",
-           "A：同步是增量抓取，中断了再点一次「更新游戏数据」就行，"
-           "已经抓到的不会重复抓。站点偶尔抖动，等一会儿再试。")
+           "A：同步从服务器下载目录，中断了再点一次「更新游戏数据」就行，"
+           "已经下好的不会重复下。服务器偶尔抖动，等一会儿再试。")
 
         qa("Q：同步跑太久，能停吗？",
            "A：能。任务跑起来之后，左下角那颗按钮会变成「停止」，点一下就停；"
@@ -3811,21 +4542,12 @@ class App(ctk.CTk):
 
         qa("Q：左下角「更多…」里面那几个是干什么的？",
            "A：都是不常用的维护动作，点开每个下面都有一句说明。\n"
-           "「补齐历史…」：站点有一批好几年前的老游戏，本库一直没收。日常「同步」"
-           "默认只收新出的，老的那些会跳过——否则每次同步都去啃老库，最新的游戏"
-           "反而要等。点它不设日期限制，一次收一批，点几次就把历史补完了。"
-           "在它上面点右键可以彻底取消日期限制，之后普通「同步」也会收老游戏。\n"
-           "「下载封面」：补下缺的封面缩略图。正常「同步」自带封面，这个只是用来"
-           "补老库里的存量欠账，或者哪张图当时没抓到。\n"
-           "「补齐热度」：早先入库的老游戏没抓到浏览/点赞/评论，热度就一直很低。"
-           "点它会把这几款游戏的详情页重新抓一遍，补齐三项值再算热度——"
-           "这一步是联网的，需要梯子，每轮 %d 款、约三分钟，可以随时停止，"
-           "再点就接着补。\n"
-           "「全量重建」：按标签把站点重爬一遍，慢得多，拿到的数据和「同步」一样，"
-           "只有增量同步明显出问题时才需要跑。" % METRICS_PER_RUN)
+           "「下载封面」：补下缺的封面缩略图。正常「同步」会从服务器把封面一起"
+           "拉下来，这个只是用来补漏下的，或者哪张图当时没抓到。\n"
+           "「补齐热度」：在本地重算热度，不联网。")
 
         qa("Q：封面显示灰色方块？",
-           "A：说明这张封面还没下载。正常「同步」会把封面一起抓下来，所以先再点一次"
+           "A：说明这张封面还没下载。正常「同步」会把封面一起拉下来，所以先再点一次"
            "同步；还是灰的就点左下角「更多…」→「下载封面」补，让它慢慢跑完。")
 
         qa("Q：「扫描本地目录」扫哪里？",
@@ -4192,91 +4914,29 @@ class App(ctk.CTk):
             self._invalidate_cards()
         self.refresh()
 
-    def sync_cutoff(self):
-        """The date an ordinary sync stops at, or None for no gate.
-
-        Seeded on first use from the newest row already in the library: that is
-        by definition everything the user has, so the gate costs them nothing
-        they had before. Stored the moment it is chosen, so forgetting it later
-        actually sticks.
-        """
-        stored = slg_db.get_pref(self.conn, PREF_SYNC_SINCE)
-        if stored is None:
-            stored = slg_db.newest_last_updated(self.conn)
-            slg_db.set_pref(self.conn, PREF_SYNC_SINCE, stored)
-        return stored or None
-
-    def _forget_sync_since(self):
-        """Stop gating the routine sync - right-click on 补齐历史."""
-        slg_db.set_pref(self.conn, PREF_SYNC_SINCE, "")
-        self._set_progress("已取消日期闸门，下次「同步」会把老游戏也一起收")
-
     def do_sync(self):
-        """Incremental. Three sitemap requests, then only what actually moved."""
+        """Pull the pre-built catalogue from the server - no direct scraping."""
         if self.busy:
             return
-        # Read here, not in the worker: self.conn belongs to the tk thread and
-        # sqlite3 connections are not shareable across threads.
-        since = self.sync_cutoff()
-        self._run_job("同步中…", self._sync_worker, since, False)
+        self._run_job("同步中…", self._sync_worker)
 
-    def do_backfill(self):
-        """One sync with the date gate off, to take the back catalogue."""
-        if self.busy:
-            return
-        self._run_job("补齐历史…", self._sync_worker, None, True)
-
-    def _sync_worker(self, since, backfill):
-        import slg_scrape
-        fetcher = slg_scrape.Fetcher(log=self._log,
-                                     should_stop=self._stop.is_set)
+    def _sync_worker(self):
+        import slg_sync_server
         try:
             with slg_db.session() as conn:
-                summary = slg_scrape.sync_incremental(
-                    conn, fetcher, new_limit=None, since=since, log=self._log,
-                    should_stop=self._stop.is_set,
-                    on_progress=lambda i, n, title: self.queue.put(
-                        ("progress", ("抓详情 %d/%d · %s" % (i, n, title), i, n))))
-                # Games that predate the rating/overview columns get topped up
-                # here rather than in a separate chore. Uncapped: a single sync
-                # drains the whole backlog, which is what a user who leaves it
-                # running in the background wants.
-                filled = slg_scrape.enrich(
-                    conn, fetcher, limit=None, log=self._log,
-                    should_stop=self._stop.is_set,
-                    on_progress=lambda d, total, url: self.queue.put(
-                        ("progress", ("补全详情 %d/%d" % (d, total), d, total))))
-            # Covers now arrive with the games they belong to, so the count is
-            # reported here rather than left to the 更多… badge to reveal.
-            covers = summary["covers"] + filled["covers"]
-            filled = filled["filled"]
-            # The 更多… badge walks the covers directory and memoises the walk;
-            # a run that just wrote files has to drop it or the count is stale.
-            # Before the stop branch below, not after: a cancelled run is exactly
-            # the one that just wrote some covers.
-            slg_db.invalidate_cover_gaps()
-            # Reported before the summary branches: a cancelled run's counts are
-            # partial by definition, and printing them as "同步完成" would claim
-            # a clean sweep the user cut short.
+                summary = slg_sync_server.pull(
+                    conn, log=self._log, should_stop=self._stop.is_set,
+                    on_progress=lambda d, total: self.queue.put(
+                        ("progress", ("封面 %d/%d" % (d, total), d, total))))
             if self._stop.is_set():
-                self.queue.put(("done", "已停止 · 新增 %d · 变动 %d · 补全 %d · 封面 %d"
-                                % (summary["new"], summary["changed"], filled,
-                                   covers)))
+                self.queue.put(("done", "已停止 · 新增 %d · 封面 %d"
+                                % (summary["new"], summary["covers"])))
                 return
-            if backfill:
-                tail = ("，还有 %d 款下次接着来" % summary["deferred"]
-                        if summary["deferred"] else "")
-                said = "补齐完成 · 新增 %d 款 · 变动 %d · 补全 %d · 封面 %d%s" % (
-                    summary["new"], summary["changed"], filled, covers, tail)
+            if summary["unchanged"]:
+                said = "目录已是最新 · 全站 %d 款" % summary["catalogue"]
             else:
-                tail = ("，还有 %d 款下次接着来" % summary["deferred"]
-                        if summary["deferred"] else "")
-                said = ("同步完成 · 全站 %d 款 · 新增 %d · 变动 %d · 补全 %d · 封面 %d%s"
-                        % (summary["catalogue"], summary["new"],
-                           summary["changed"], filled, covers, tail))
-                if summary["skipped_old"]:
-                    said += ("（跳过 %d 款老游戏，点「补齐历史…」可以收）"
-                             % summary["skipped_old"])
+                said = "同步完成 · 全站 %d 款 · 新增 %d · 封面 %d" % (
+                    summary["catalogue"], summary["new"], summary["covers"])
             self.queue.put(("done", said))
         except Exception as exc:  # noqa: BLE001 - the user needs the message
             self.queue.put(("done", self._fail("同步", exc)))
@@ -4284,19 +4944,17 @@ class App(ctk.CTk):
     def do_covers(self):
         if self.busy:
             return
-        gaps = slg_db.data_gaps(self.conn)
-        if not gaps["covers"]:
+        if not slg_db.missing_cover_files(self.conn):
             self._set_progress("封面都下载好了")
             return
         self._run_job("下封面…", self._covers_worker)
 
     def _covers_worker(self):
-        import slg_scrape
+        import slg_sync_server
         try:
             with slg_db.session() as conn:
-                done = slg_scrape.download_covers(
-                    conn, workers=3, rate=3.0, log=self._log,
-                    should_stop=self._stop.is_set,
+                done = slg_sync_server.download_covers(
+                    conn, log=self._log, should_stop=self._stop.is_set,
                     on_progress=lambda d, total: self.queue.put(
                         ("progress", ("封面 %d/%d" % (d, total), d, total))))
             self.queue.put(("covers_done", "封面下载 %d 张" % done))
@@ -4304,77 +4962,24 @@ class App(ctk.CTk):
             self.queue.put(("covers_done", self._fail("封面下载", exc)))
 
     def do_heat(self):
-        """Two passes under one button: recompute locally, then re-fetch.
-
-        The local pass is seconds and the network pass is minutes, so the
-        order matters - and it has to keep running even when there is nothing
-        left to recompute, which is why the gate tests both counts rather
-        than only heat.
-        """
+        """Local recompute of the heat column - no network."""
         if self.busy:
             return
-        gaps = slg_db.data_gaps(self.conn)
-        if not (gaps["metrics"] or gaps["heat"]):
+        if not slg_db.data_gaps(self.conn)["heat"]:
             self._set_progress("热度都补齐了")
             return
         self._run_job("补热度…", self._heat_worker)
 
     def _heat_worker(self):
-        import slg_scrape
         try:
             with slg_db.session() as conn:
                 recomputed = slg_db.backfill_heat(
                     conn, log=self._log,
                     on_progress=lambda d, total: self.queue.put(
                         ("progress", ("重算热度 %d/%d" % (d, total), d, total))))
-                if recomputed:
-                    self.queue.put(("progress", "重算热度完成 · %d 款" % recomputed))
-                fetcher = slg_scrape.Fetcher(log=self._log,
-                                             should_stop=self._stop.is_set)
-                summary = slg_scrape.backfill_metrics(
-                    conn, fetcher, limit=METRICS_PER_RUN, log=self._log,
-                    should_stop=self._stop.is_set,
-                    on_progress=lambda d, total, url: self.queue.put(
-                        ("progress", ("补齐热度 %d/%d" % (d, total), d, total))))
-            self.queue.put(("done", "补齐热度 · 补全 %d 款 · 还剩 %d 款"
-                            % (summary["filled"], summary["remaining"])))
+            self.queue.put(("done", "补齐热度 · 重算 %d 款" % recomputed))
         except Exception as exc:  # noqa: BLE001
             self.queue.put(("done", self._fail("补齐热度", exc)))
-
-    def do_rebuild(self):
-        """The original tag walk, kept only as a fallback.
-
-        It reaches the same games and the same fields as the sitemap pass, at
-        roughly a hundred requests and ten minutes instead of three and three
-        seconds, so it asks first.
-        """
-        if self.busy:
-            return
-        if not messagebox.askyesno(
-                "全量重建",
-                "全量重建会按标签把 dikgames 重爬一遍：约 100 个请求、10 分钟。\n\n"
-                "它拿到的数据和「更新游戏数据」完全一样，只是慢得多。\n"
-                "只有增量同步明显出问题时才需要跑。确定继续吗？"):
-            return
-        self._run_job("重建中…", self._rebuild_worker)
-
-    def _rebuild_worker(self):
-        import slg_scrape
-        fetcher = slg_scrape.Fetcher(log=self._log,
-                                     should_stop=self._stop.is_set)
-        try:
-            with slg_db.session() as conn:
-                tags = slg_db.get_pref(conn, "watched_tags")
-                tags = tags.split(",") if tags else ["netorare", "corruption", "cheating"]
-                summary = slg_scrape.sync_tags(
-                    conn, fetcher, tags, should_stop=self._stop.is_set,
-                    on_progress=lambda t, p, n: self.queue.put(
-                        ("progress", "%s 第 %d 页 · %d 款" % (t, p, n))))
-            said = ("全量重建已停止：%d 款（新增 %d）"
-                    if self._stop.is_set() else "全量重建完成：%d 款（新增 %d）")
-            self.queue.put(("done", said % (summary["games"], summary["new"])))
-        except Exception as exc:  # noqa: BLE001
-            self.queue.put(("done", self._fail("全量重建", exc)))
 
     def scan_root(self):
         """The remembered game folder, or "" when there is not one yet."""
@@ -4413,6 +5018,8 @@ class App(ctk.CTk):
                     should_stop=self._stop.is_set)
             self.queue.put(("done", "扫描完成：匹配 %d 个，未匹配 %d 个"
                             % (result["matched"], len(result["unmatched"]))))
+            if result["unmatched"]:
+                self.queue.put(("bind", list(result["unmatched"])))
         except Exception as exc:  # noqa: BLE001
             self.queue.put(("done", self._fail("扫描", exc)))
 
@@ -4528,6 +5135,8 @@ class App(ctk.CTk):
             self._title_result(*payload)
         elif kind == "comments":
             self._comments_result(*payload)
+        elif kind == "bind":
+            self.open_bind_dialog(payload)
 
 
 def build(root, smoke=False):

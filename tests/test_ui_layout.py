@@ -562,32 +562,6 @@ class SidebarFit(unittest.TestCase):
                         "群号里有非数字字符：%r" % slg_gui.QQ_GROUP)
         self.assertIn(slg_gui.QQ_GROUP, slg_gui.QQ_GROUP_LABEL)
 
-    def test_the_group_chip_is_in_the_empty_slot_below_the_gear(self):
-        # The point of the slot: it is under the sort controls, and it is
-        # outside the notice band. A chip that drifted into the band would drag
-        # that band's centred contents off the window's axis, which the centring
-        # test below would then blame on the band.
-        self.app.update()
-        chip, gear = self.app.qq_chip, self.app.settings_btn
-        self.assertFalse(self._inside(chip, self.app.vpn_notice),
-                         "小卡跑进说明条里了")
-        self.assertAlmostEqual(
-            chip.winfo_rootx() + chip.winfo_width(),
-            gear.winfo_rootx() + gear.winfo_width(), delta=2,
-            msg="小卡右缘没和齿轮右缘对齐")
-        self.assertAlmostEqual(
-            chip.winfo_rooty(), self.app.vpn_notice.winfo_rooty(), delta=2,
-            msg="小卡没和说明条顶边对齐")
-
-    def test_the_group_number_is_visible_at_the_minimum_size(self):
-        # Scoped to the toolbar: the same digits live in 关于, 帮助文档 and the
-        # detail panel, so an unscoped search would pass even with the chip
-        # collapsed to nothing.
-        hits = [hit for hit in self._find(slg_gui.QQ_GROUP)
-                if self._inside(hit, self.app.toolbar)]
-        self.assertTrue(hits, "工具栏上找不到反馈群号")
-        self._assert_has_height(slg_gui.QQ_GROUP_LABEL, "反馈群号小卡")
-
     def test_copying_the_group_number_reaches_the_clipboard(self):
         self.app._copy_value(slg_gui.QQ_GROUP)
         self.app.update()
@@ -600,43 +574,55 @@ class SidebarFit(unittest.TestCase):
         #
         # `after` is captured rather than waited on: the real delay is 1.2s, and
         # a test that sleeps through it is a test nobody runs.
-        button = self.app.qq_btn
-        scheduled = []
-        with mock.patch.object(self.app, "after",
-                               side_effect=lambda ms, fn: scheduled.append(fn)):
-            self.app._copy_value(slg_gui.QQ_GROUP, button,
-                                 slg_gui.QQ_GROUP_LABEL)
-        self.app.update()
-        self.assertEqual(button.cget("text"), "已复制 √")
-        self.assertEqual(self.app.clipboard_get(), slg_gui.QQ_GROUP)
+        self._pool_reset()
+        try:
+            self._select(self._panel_game(0))
+            button = self.app.qq_btn
+            scheduled = []
+            with mock.patch.object(self.app, "after",
+                                   side_effect=lambda ms, fn: scheduled.append(fn)):
+                self.app._copy_value(slg_gui.QQ_GROUP, button,
+                                     slg_gui.QQ_GROUP_COPY_LABEL)
+            self.app.update()
+            self.assertEqual(button.cget("text"), "已复制 √")
+            self.assertEqual(self.app.clipboard_get(), slg_gui.QQ_GROUP)
 
-        self.assertTrue(scheduled, "没有安排还原回调")
-        for callback in scheduled:
-            callback()
-        self.app.update()
-        self.assertEqual(button.cget("text"), slg_gui.QQ_GROUP_LABEL)
+            self.assertTrue(scheduled, "没有安排还原回调")
+            for callback in scheduled:
+                callback()
+            self.app.update()
+            self.assertEqual(button.cget("text"), slg_gui.QQ_GROUP_COPY_LABEL)
+        finally:
+            self.app.selected = None
+            self._finish()
 
     def test_a_stale_flash_callback_survives_a_theme_switch(self):
         # The restore lands 1.2s later, and a theme switch in between rebuilds
-        # the toolbar - so the callback runs against a button Tcl has already
+        # the window - so the callback runs against a button Tcl has already
         # deleted. The winfo_exists guard is the only thing between that and a
         # TclError traceback with the user's name on it.
-        button = self.app.qq_btn
-        scheduled = []
-        with mock.patch.object(self.app, "after",
-                               side_effect=lambda ms, fn: scheduled.append(fn)):
-            self.app._copy_value(slg_gui.QQ_GROUP, button,
-                                 slg_gui.QQ_GROUP_LABEL)
-        with mock.patch.object(slg_db, "set_pref"):
-            self.app._apply_theme("dark")
-        self.app.update()
-        self.assertFalse(button.winfo_exists(), "按钮没被主题切换重建")
+        self._pool_reset()
+        try:
+            self._select(self._panel_game(0))
+            button = self.app.qq_btn
+            scheduled = []
+            with mock.patch.object(self.app, "after",
+                                   side_effect=lambda ms, fn: scheduled.append(fn)):
+                self.app._copy_value(slg_gui.QQ_GROUP, button,
+                                     slg_gui.QQ_GROUP_COPY_LABEL)
+            with mock.patch.object(slg_db, "set_pref"):
+                self.app._apply_theme("dark")
+            self.app.update()
+            self.assertFalse(button.winfo_exists(), "按钮没被主题切换重建")
 
-        for callback in scheduled:
-            callback()  # must not raise
-        with mock.patch.object(slg_db, "set_pref"):
-            self.app._apply_theme("light")
-        self.app.update()
+            for callback in scheduled:
+                callback()  # must not raise
+            with mock.patch.object(slg_db, "set_pref"):
+                self.app._apply_theme("light")
+            self.app.update()
+        finally:
+            self.app.selected = None
+            self._finish()
 
     def test_the_group_number_is_in_the_about_dialog(self):
         self.app.open_about()
@@ -662,19 +648,27 @@ class SidebarFit(unittest.TestCase):
         finally:
             self._close("帮助文档")
 
-    def test_the_group_number_is_in_the_detail_panel(self):
-        # The panel is the one screen every game shows, so the group belongs
-        # next to the feedback email at its foot.
-        self._pool_reset()
-        try:
-            self._select(self._panel_game(0))
-            self.app.update()
-            hits = [hit for hit in self._find(slg_gui.QQ_GROUP)
-                    if self._inside(hit, self.app._detail_parts["feedback"])]
-            self.assertTrue(hits, "详情面板底部没有群号")
-        finally:
-            self.app.selected = None
-            self._finish()
+    def test_the_group_number_sits_under_the_panel_not_inside_it(self):
+        # The panel is a description of one game and scrolls with it; the group
+        # is about the app. Nested in the panel it scrolled out of sight behind
+        # a long blurb, which is exactly what moved it to the strip below.
+        hits = self._find(slg_gui.QQ_GROUP)
+        self.assertTrue(hits, "窗口里找不到群号")
+        self.assertTrue([hit for hit in hits
+                         if self._inside(hit, self.app.qq_holder)],
+                        "群号不在详情面板下方的那一条里")
+        self.assertFalse([hit for hit in hits
+                          if self._inside(hit, self.app.detail)],
+                         "群号还嵌在详情面板里")
+
+    def test_the_group_strip_is_level_with_the_pager(self):
+        # Same row and same top padding as the pager, so the two read as one
+        # line running across the bottom of the window.
+        group = self.app.qq_holder.grid_info()
+        pager = self.app._pager_holder.grid_info()
+        self.assertEqual(int(group["row"]), int(pager["row"]), "没和翻页栏同一行")
+        self.assertEqual(group["pady"], pager["pady"], "顶边没和翻页栏对齐")
+        self.assertEqual(int(group["column"]), 1, "没在详情面板那一列下面")
 
     # --- theme ---------------------------------------------------------------
 
@@ -1728,23 +1722,22 @@ class SidebarFit(unittest.TestCase):
             self._close("关于")
 
     def test_the_tools_dialog_holds_the_set_once_entries(self):
-        # These four are set-once tools, out of the sidebar's routine column.
+        # These are set-once tools, out of the sidebar's routine column.
         try:
             self.app.open_tools()
             win = self._dialog("更多工具")
             self.assertIsNotNone(win, "更多工具弹窗没打开")
             texts = [b.cget("text") for b in self._buttons_in(win)]
-            for label in ("标签译名…", "偏好权重…", "翻译设置…", "扫描本地目录…"):
+            for label in ("标签译名…", "偏好权重…", "翻译设置…", "扫描本地目录…", "检查更新"):
                 self.assertIn(label, texts)
         finally:
             self._close("更多工具")
 
     def test_the_tool_group_no_longer_lists_the_set_once_entries(self):
-        # 标签库 and 检查更新 are the two routine tools that stayed; the
-        # set-once four (including the local scan) moved into 更多工具….
+        # 标签库 is the one routine filter that stayed in the sidebar; 检查更新
+        # and the set-once four (including the local scan) moved into 更多工具….
         self.assertTrue(self._find("标签库…"), "标签库 被一起搬走了")
-        self.assertTrue(self._find("检查更新"), "检查更新 被一起搬走了")
-        for label in ("标签译名…", "偏好权重…", "翻译设置…", "扫描本地目录"):
+        for label in ("标签译名…", "偏好权重…", "翻译设置…", "扫描本地目录", "检查更新"):
             self.assertEqual(self._find(label), [], "%s 还留在左侧栏" % label)
 
     def test_the_version_label_is_just_the_version(self):
@@ -1777,16 +1770,16 @@ class SidebarFit(unittest.TestCase):
             self.app.selected = None
             self._finish()
 
-    def test_the_maintenance_dialog_lists_all_four_chores(self):
+    def test_the_maintenance_dialog_lists_both_chores(self):
         try:
             with mock.patch.object(slg_db, "data_gaps",
                                    return_value={"covers": 7, "overview": 3,
-                                                 "heat": 0, "metrics": 5}):
+                                                 "heat": 5, "metrics": 5}):
                 self.app.open_maintenance()
                 win = self._dialog("同步与维护")
                 self.assertIsNotNone(win, "维护弹窗没打开")
                 texts = [b.cget("text") for b in self._buttons_in(win)]
-            for label in ("全量重建", "下载封面", "补齐历史", "补齐热度"):
+            for label in ("下载封面", "补齐热度"):
                 self.assertTrue(any(t.startswith(label) for t in texts), texts)
             # Computed when the dialog opens, so a stale number in a window the
             # user cannot see is not possible.

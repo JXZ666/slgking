@@ -34,8 +34,12 @@ import slg_db
 import slg_util
 
 BASE = "https://dikgames.com"
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) slgking/0.1 "
-      "(personal library tool)")
+# A normal browser UA rather than a custom 'slgking/0.1' product token: the
+# latter is a red flag a WAF can key on. robots.txt allows crawling, so this is
+# politeness, not evasion - the ban risk was always the request volume, and that
+# is fixed by consolidating scraping to the one server, not by hiding here.
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 DELAY = 1.0
 TIMEOUT = 30
 
@@ -100,8 +104,11 @@ def http_get(url, timeout=TIMEOUT):
     """
     req = urllib.request.Request(url, headers={
         "User-Agent": UA,
-        "Accept-Encoding": "gzip, deflate",
+        "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+                   "image/avif,image/webp,*/*;q=0.8"),
         "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "close",
     })
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read()

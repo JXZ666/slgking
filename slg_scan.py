@@ -21,12 +21,36 @@ import slg_util
 # back to - and only while the directory is actually there.
 DEFAULT_ROOTS = [path for path in (r"D:\game&novel\黄油",) if os.path.isdir(path)]
 
-_VER_PREFIXED = re.compile(r"[vV](\d+(?:\.\d+){1,3}[a-z]?)")
+_VER_PREFIXED = re.compile(r"[vV](\d+(?:\.\d+){1,3}[a-z]?|\d{1,3}[a-z]?)")
 _VER_BARE = re.compile(r"(\d+(?:\.\d+){1,3}[a-z]?)")
-# Trailing platform/quality markers the scene puts on every folder name.
+# Version-looking tokens to strip from a title. Dotted first so 'v0.9.5' matches
+# whole; a bare 'v1'/'v12' next; then episode/chapter/season markers; then a
+# trailing bare 1-2 digit build number. A 4-digit year (2024) never matches any
+# of these, so it stays in the title.
+_VERSION = re.compile(
+    r"[vV]?\d+(?:\.\d+){1,3}[a-z]?"
+    r"|[vV]\d{1,3}[a-z]?"
+    r"|\b(?:ep|episode|ch|chapter|season|s)\s*\.?\s*\d{1,3}\b"
+    r"|(?:\s|[-_])+\d{1,2}[a-z]?$",
+    re.I)
+# Trailing platform/quality markers the scene puts on every folder name, plus
+# the Chinese suffixes the multi-source folders carry.
 _NOISE = re.compile(
     r"[-_\s]*(?:pc|win|windows|linux|mac|android|compressed|full\s*release|final|"
-    r"eng|english|uncensored|censored|repack|patched|multi)\s*$", re.I)
+    r"eng|english|uncensored|censored|repack|patched|multi|"
+    r"汉化版|汉化|官方中文|官中|中文版|中文|完整版|最终版|无码|步兵|骑兵|"
+    r"精翻|机翻|ai汉化|gpt|解码|去码)\s*$", re.I)
+# Square brackets and their full-width twins are almost always annotations
+# (开发组名、[汉化]、【官中】) rather than part of the title.
+_BRACKET = re.compile(r"[\[【].*?[\]】]")
+# Round parens are only stripped when the whole content is one known noise token,
+# so a real subtitle like 'The DeLuca Family (Season 1)' survives.
+_PAREN_NOISE = re.compile(
+    r"\(\s*(?:pc|win|windows|linux|mac|android|汉化|官中|官方中文|中文版|完整版|"
+    r"最终版|无码|步兵|骑兵|精翻|机翻|ai汉化|gpt|eng|english|uncensored|repack)"
+    r"\s*\)", re.I)
+
+_CJK = re.compile(r"[\u4e00-\u9fff]")
 
 
 _ORDINALS = {"1st": "first", "2nd": "second", "3rd": "third",
@@ -52,12 +76,12 @@ def _key(text):
 
     'Hikari: First Interlude' and 'Hikari1stInterlude' are the same game and
     the site and the folder disagree about how to spell the ordinal, so fold
-    those too.
+    those too. CJK survives so a Chinese folder name can match a Chinese title.
     """
     text = (text or "").lower()
     for word, replacement in _ORDINALS.items():
         text = text.replace(word, replacement)
-    return re.sub(r"[^a-z0-9]", "", text)
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", text)
 
 
 def parse_folder_version(name):
@@ -70,25 +94,47 @@ def folder_title(name):
     """The folder name with the version and platform noise taken off."""
     if not name:
         return name
-    title = re.sub(r"[vV]?\d+(?:\.\d+){1,3}[a-z]?", " ", name)
-    title = re.sub(r"[_]+", " ", title)
+    title = name
     previous = None
     while previous != title:
         previous = title
+        title = _VERSION.sub(" ", title)
+        title = _BRACKET.sub(" ", title)
+        title = _PAREN_NOISE.sub(" ", title)
+        title = title.replace("_", " ")
         title = _NOISE.sub("", title).strip(" -_.")
     return re.sub(r"\s+", " ", title).strip() or name
 
 
 def _title_index(conn):
-    """normalised title -> (game_id, original title), longest keys first.
+    """normalised title -> (game_id, display name), longest keys first.
 
-    Longest first so 'lust theory' wins over 'lust' when both are in the
-    catalogue.
+    One game contributes several keys: its English title, its Chinese machine
+    or hand-typed name, and any user-added aliases. Longest first so 'lust
+    theory' wins over 'lust' when both are in the catalogue.
     """
-    rows = conn.execute("SELECT id, title FROM games").fetchall()
-    index = [(_key(r["title"]), r["id"], r["title"]) for r in rows]
-    index.sort(key=lambda item: -len(item[0]))
-    return index
+    index = []
+    for row in conn.execute("SELECT id, title FROM games"):
+        index.append((_key(row["title"]), row["id"], row["title"]))
+    for ref, (text, _engine) in slg_db.title_translations(conn).items():
+        game_id = slg_db._int_or_none(ref)
+        if game_id is not None and text:
+            index.append((_key(text), game_id, text))
+    for row in conn.execute("SELECT game_id, alias FROM game_aliases"):
+        index.append((_key(row["alias"]), row["game_id"], row["alias"]))
+    seen = set()
+    deduped = []
+    for key, game_id, title in index:
+        if not key or (key, game_id) in seen:
+            continue
+        seen.add((key, game_id))
+        deduped.append((key, game_id, title))
+    deduped.sort(key=lambda item: -len(item[0]))
+    return deduped
+
+
+def _has_cjk(text):
+    return bool(_CJK.search(text or ""))
 
 
 def match_game(conn, folder_name, index=None):
@@ -107,18 +153,32 @@ def match_game(conn, folder_name, index=None):
         if title_key and title_key == key:
             return game_id
 
+    # CJK titles are often 2-4 characters, so the containment length guard has
+    # to drop for them: an ASCII word needs length to be a reliable signal, but
+    # a two-character Chinese substring is already near-unique.
+    min_len = 2 if _has_cjk(key) else 6
     for title_key, game_id, _ in index:
-        if len(title_key) >= 6 and (title_key in key or key in title_key):
+        if title_key and len(title_key) >= min_len and \
+                (title_key in key or key in title_key):
             return game_id
 
     return _closest(key, index)
 
 
 def _closest(key, index, threshold=0.86):
-    """Fuzzy last resort. The length guard keeps this from scanning all 1274."""
-    best_id, best = None, threshold
+    """Fuzzy last resort. The length guard keeps this from scanning all 1274.
+
+    Chinese keys get a higher threshold and a lower length floor, and are never
+    fuzzy-matched against an English key: difflib sees the two alphabets as
+    nothing alike, and the guard skips the wasted comparison.
+    """
+    cjk = _has_cjk(key)
+    best_id, best = None, (0.9 if cjk else threshold)
     for title_key, game_id, _ in index:
-        if len(title_key) < 5 or len(key) < 5:
+        if not title_key or _has_cjk(title_key) != cjk:
+            continue
+        min_len = 2 if cjk else 5
+        if len(title_key) < min_len or len(key) < min_len:
             continue
         longest = max(len(title_key), len(key))
         if abs(len(title_key) - len(key)) > longest * 0.4:

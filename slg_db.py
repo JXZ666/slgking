@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -61,7 +62,9 @@ CREATE TABLE IF NOT EXISTS games (
     site_views    INTEGER,
     site_likes    INTEGER,
     site_comments INTEGER,
-    heat          REAL
+    heat          REAL,
+    origin        TEXT NOT NULL DEFAULT 'site',
+    promoted      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS tags (
@@ -73,6 +76,17 @@ CREATE TABLE IF NOT EXISTS game_tags (
     game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
     tag_id  INTEGER NOT NULL REFERENCES tags(id)  ON DELETE CASCADE,
     PRIMARY KEY (game_id, tag_id)
+);
+
+-- Extra names a game is known by, so a folder that spells the title differently
+-- still matches. Populated two ways: hand-typed by the user when they bind an
+-- unmatched folder, and by tools that accumulate aliases from failed matches.
+CREATE TABLE IF NOT EXISTS game_aliases (
+    id      INTEGER PRIMARY KEY,
+    game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+    alias   TEXT NOT NULL,
+    source  TEXT NOT NULL DEFAULT 'user',
+    UNIQUE (game_id, alias)
 );
 
 CREATE TABLE IF NOT EXISTS local (
@@ -305,6 +319,12 @@ def _migrate(conn):
     if "heat" not in have:
         conn.execute("ALTER TABLE games ADD COLUMN heat REAL")
         conn.commit()
+    if "origin" not in have:
+        conn.execute("ALTER TABLE games ADD COLUMN origin TEXT NOT NULL DEFAULT 'site'")
+        conn.commit()
+    if "promoted" not in have:
+        conn.execute("ALTER TABLE games ADD COLUMN promoted INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
     # Hand-written rows move out of the translation cache into their own table.
     # Deleting them from `translations` is what stops them from having already
     # destroyed the machine row underneath - but it also means anyone who edited
@@ -435,15 +455,20 @@ def clear_fetch_failures(conn, game_id):
     conn.execute("UPDATE games SET fetch_failures = 0 WHERE id = ?", (game_id,))
 
 
-def set_tags(conn, game_id, tags):
+def set_tags(conn, game_id, tags, clear=False):
     """Replace a game's tags. An empty list means "leave them alone".
 
     The listing and detail parsers can both come back with zero tag links -
     a page whose markup moved, not a game that genuinely has no tags - and the
     old unconditional DELETE wiped a healthy row in that case. Reading the ids
     back in one IN query also drops the old one-SELECT-per-tag round trip.
+
+    clear=True is the user's hand-edit path, where an empty list genuinely means
+    "this game has no tags" and must clear them rather than skip.
     """
     if not tags:
+        if clear:
+            conn.execute("DELETE FROM game_tags WHERE game_id = ?", (game_id,))
         return
     names = list(dict.fromkeys(tags))
     conn.executemany("INSERT OR IGNORE INTO tags (name) VALUES (?)",
@@ -458,6 +483,96 @@ def set_tags(conn, game_id, tags):
 
 def set_cover(conn, game_id, cover_file):
     conn.execute("UPDATE games SET cover_file = ? WHERE id = ?", (cover_file, game_id))
+
+
+def import_cover(src_path):
+    """Copy a user-chosen cover image into the cache; return its filename.
+
+    load_cover only ever reads from covers_dir(), so a user's cover has to land
+    there under a name the row can point at. A fresh random name avoids stepping
+    on a scraped cover and dodges any path weirdness in the source filename.
+    """
+    ext = os.path.splitext(src_path)[1].lower() or ".jpg"
+    name = "user_" + uuid.uuid4().hex[:12] + ext
+    shutil.copyfile(src_path, os.path.join(covers_dir(), name))
+    return name
+
+
+def add_user_game(conn, title, developer=None, engine=None, version=None,
+                  overview=None, cover_file=None, tags=(), folder_path=None,
+                  promoted=0):
+    """Insert a game the user added themselves. Returns its id.
+
+    The scraper's upsert_game is COALESCE-on-update because two writers share a
+    row; a user game has exactly one writer (the user), so every column is a
+    plain assignment here. The slug is synthetic - 'user-' + a short random hex
+    - and never collides with the dikgames slugs the scraper keys on, which is
+    also what keeps a later site sync from ever touching this row.
+    """
+    now = _now()
+    slug = "user-" + uuid.uuid4().hex[:8]
+    cur = conn.execute(
+        "INSERT INTO games (slug, url, title, version, developer, engine,"
+        " overview, cover_file, first_seen, last_synced, origin, promoted)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?, 'user', ?)",
+        (slug, "user://" + slug, title, version, developer, engine,
+         overview, cover_file, now, now, int(bool(promoted))))
+    game_id = cur.lastrowid
+    if folder_path:
+        conn.execute(
+            "INSERT INTO local (game_id, folder_path, scanned_at)"
+            " VALUES (?,?,datetime('now'))", (game_id, folder_path))
+    set_tags(conn, game_id, tags, clear=True)
+    return game_id
+
+
+def delete_game(conn, game_id):
+    """Delete a game row. Callers must only pass origin='user' games.
+
+    The FK ON DELETE CASCADE clauses clean game_tags, local, state,
+    collection_items and game_aliases; tags themselves are the shared vocabulary
+    and stay behind (an orphan tag is harmless).
+    """
+    conn.execute("DELETE FROM games WHERE id = ?", (game_id,))
+
+
+def set_local_folder(conn, game_id, folder_path, folder_version=None):
+    """Point a game at a local folder, keeping the fields scan() would not know.
+
+    Used when the user binds an unmatched folder by hand, where there is no
+    Ren'Py probe or size measurement - just the path and the version in its name.
+    """
+    conn.execute(
+        "INSERT INTO local (game_id, folder_path, folder_version, scanned_at)"
+        " VALUES (?,?,?,datetime('now'))"
+        " ON CONFLICT(game_id) DO UPDATE SET"
+        " folder_path=excluded.folder_path,"
+        " folder_version=excluded.folder_version,"
+        " scanned_at=excluded.scanned_at",
+        (game_id, folder_path, folder_version))
+
+
+def add_alias(conn, game_id, alias, source="user"):
+    """Record another name a game is known by, for folder matching."""
+    conn.execute(
+        "INSERT OR IGNORE INTO game_aliases (game_id, alias, source)"
+        " VALUES (?,?,?)", (game_id, alias, source))
+
+
+def aliases(conn, game_id=None):
+    """All aliases, or the aliases for one game."""
+    if game_id is None:
+        return [row["alias"] for row in
+                conn.execute("SELECT alias FROM game_aliases ORDER BY alias")]
+    return [row["alias"] for row in conn.execute(
+        "SELECT alias FROM game_aliases WHERE game_id = ? ORDER BY alias",
+        (game_id,))]
+
+
+def promote_game(conn, game_id, on=True):
+    """Let a user game into the main list (or take it back out)."""
+    conn.execute("UPDATE games SET promoted = ? WHERE id = ?",
+                 (int(bool(on)), game_id))
 
 
 def _version_gt(left, right):
@@ -563,13 +678,23 @@ def upsert_detail(conn, game_id, rating=None, version=None, developer=None,
 
 def find_games(conn, include=(), exclude=(), search=None, statuses=None,
                downloaded_only=False, collection_id=None,
-               sort="score", desc=True):
+               origin="main", sort="score", desc=True):
     """Games matching a tag intersection (include) minus a tag union (exclude).
 
     include is an AND: every tag listed must be present. exclude is a NOT:
     any one of them is enough to drop the row.
+
+    origin controls which games the result may contain:
+      'main' - the catalogue plus user games the user promoted into it.
+      'user' - only games the user added themselves (the sidebar's own view).
+      None   - no origin filter (maintenance paths that need every row).
     """
     where, params = [], []
+
+    if origin == "main":
+        where.append("(g.origin = 'site' OR g.promoted = 1)")
+    elif origin == "user":
+        where.append("g.origin = 'user'")
 
     if include:
         qmarks = ",".join("?" * len(include))
@@ -713,8 +838,8 @@ def missing_cover_files(conn, ttl=_COVER_GAP_TTL):
         now = time.monotonic()
         if _missing_covers is not None and now - _missing_covers[1] < ttl:
             return _missing_covers[0]
-        rows = conn.execute("SELECT cover_file FROM games WHERE cover_file"
-                            " IS NOT NULL AND cover_file NOT LIKE 'pending:%'"
+        rows = conn.execute("SELECT cover_file FROM games WHERE origin = 'site'"
+                            " AND cover_file IS NOT NULL AND cover_file NOT LIKE 'pending:%'"
                             ).fetchall()
         directory = covers_dir()
         count = sum(1 for row in rows
@@ -762,28 +887,17 @@ def data_gaps(conn):
     """
     one = lambda sql: conn.execute(sql).fetchone()[0]  # noqa: E731
     return {
-        "covers": one("SELECT COUNT(*) FROM games WHERE cover_file LIKE 'pending:%'")
+        "covers": one("SELECT COUNT(*) FROM games WHERE origin = 'site'"
+                      " AND cover_file LIKE 'pending:%'")
         + missing_cover_files(conn),
         "rating": one("SELECT COUNT(*) FROM games WHERE rating IS NULL"),
-        "overview": one("SELECT COUNT(*) FROM games WHERE overview IS NULL"
-                        " OR TRIM(overview) = ''"),
+        "overview": one("SELECT COUNT(*) FROM games WHERE origin = 'site'"
+                        " AND (overview IS NULL OR TRIM(overview) = '')"),
         "heat": one("SELECT COUNT(*) FROM games WHERE heat IS NULL"
                     " AND (rating IS NOT NULL OR site_views IS NOT NULL"
                     "      OR site_likes IS NOT NULL OR site_comments IS NOT NULL)"),
         "metrics": metrics_gap_count(conn),
     }
-
-
-def newest_last_updated(conn):
-    """The newest last_updated in the library, as 'YYYY-MM-DD'.
-
-    The natural cutoff for the sync gate: every game the user already has
-    predates it, so gating there takes nothing away that was there before.
-    Empty when the library has no dated rows yet.
-    """
-    row = conn.execute("SELECT MAX(last_updated) AS d FROM games").fetchone()
-    text = (row["d"] or "").strip()
-    return text[:10] if len(text) >= 10 else ""
 
 
 # --- translation cache ---------------------------------------------------------
@@ -1088,11 +1202,6 @@ def get_state(conn, game_id):
     return conn.execute("SELECT * FROM state WHERE game_id = ?", (game_id,)).fetchone()
 
 
-def rates_histogram(conn):
-    return conn.execute("SELECT COUNT(*) AS n FROM state WHERE my_rating IS NOT NULL"
-                        ).fetchone()["n"]
-
-
 # --- comments ------------------------------------------------------------------
 
 def add_comment(conn, game_slug, content, nickname=None, cloud_id=None):
@@ -1188,12 +1297,58 @@ _BACKUP_TABLES = (
     ("manual_translations", ("kind", "ref", "lang", "text", "updated_at")),
 )
 
+# Every non-id column of `games`, in order, for the user-game backup round trip.
+# The id is deliberately left out: it is a local rowid that means nothing on
+# another machine, and the slug ('user-…') is the stable identity across them.
+_USER_GAME_COLS = (
+    "slug", "url", "title", "version", "developer", "engine", "rating",
+    "last_updated", "overview", "cover_file", "complete", "first_seen",
+    "last_synced", "lastmod", "fetch_failures", "site_views", "site_likes",
+    "site_comments", "heat", "origin", "promoted",
+)
+
+
+def _game_id_by_slug(conn, slug):
+    if not slug:
+        return None
+    row = conn.execute("SELECT id FROM games WHERE slug = ?", (slug,)).fetchone()
+    return row["id"] if row else None
+
+
+def _export_game_rows(conn, table):
+    """Export a game-referencing table with each game's slug attached.
+
+    game_id is a machine-local rowid that means nothing on another machine, so
+    the restore re-keys through the stable slug instead; carrying it alongside
+    every row is what makes that possible.
+    """
+    return [dict(r) for r in conn.execute(
+        "SELECT t.*, g.slug AS game_slug FROM %s t"
+        " JOIN games g ON g.id = t.game_id" % table)]
+
 
 def export_user_data(conn):
     """All of the user's own data, as a JSON-serialisable dict."""
     out = {}
     for table, _cols in _BACKUP_TABLES:
         out[table] = [dict(r) for r in conn.execute("SELECT * FROM %s" % table)]
+    out["state"] = _export_game_rows(conn, "state")
+    out["collection_items"] = _export_game_rows(conn, "collection_items")
+    out["user_games"] = [dict(r) for r in conn.execute(
+        "SELECT * FROM games WHERE origin = 'user' ORDER BY id")]
+    out["user_game_tags"] = [dict(r) for r in conn.execute(
+        "SELECT g.slug, t.name FROM game_tags gt"
+        " JOIN games g ON g.id = gt.game_id"
+        " JOIN tags t ON t.id = gt.tag_id"
+        " WHERE g.origin = 'user' ORDER BY g.slug, t.name")]
+    out["user_local"] = [dict(r) for r in conn.execute(
+        "SELECT g.slug, l.folder_path, l.folder_version, l.has_translation,"
+        " l.has_fontpatch, l.size_bytes, l.scanned_at"
+        " FROM local l JOIN games g ON g.id = l.game_id"
+        " WHERE g.origin = 'user'")]
+    out["user_game_aliases"] = [dict(r) for r in conn.execute(
+        "SELECT g.slug, a.alias, a.source FROM game_aliases a"
+        " JOIN games g ON g.id = a.game_id WHERE g.origin = 'user'")]
     return out
 
 
@@ -1203,6 +1358,10 @@ def import_user_data(conn, data):
     Children (collection_items) are cleared before their parents (collections),
     and parents are written back before their children, so the foreign keys
     never see a dangling reference.
+
+    User games are merged rather than overwritten: each is keyed by its synthetic
+    slug, and tags/aliases/local are re-linked to whatever id that slug lands on
+    in this library.
     """
     def load(table, cols, records):
         if not records:
@@ -1213,12 +1372,131 @@ def import_user_data(conn, data):
             % (table, ",".join(cols), qmarks),
             [tuple(r.get(c) for c in cols) for r in records])
 
+    # Children cleared before parents. state and collection_items are held back:
+    # their game_id is a rowid that must be re-keyed through the slug, not
+    # bulk-loaded straight off the backup.
     for table in ("collection_items", "state", "exclusions",
                   "collections", "manual_translations"):
         conn.execute("DELETE FROM %s" % table)
     for table, cols in _BACKUP_TABLES:
+        if table in ("state", "collection_items"):
+            continue
         load(table, cols, data.get(table, []))
+    # User games first: the rows below may point at them, and the foreign key
+    # is enforced on this connection.
+    _import_user_games(conn, data)
+    _import_game_rows(conn, "state", data.get("state", []))
+    _import_game_rows(conn, "collection_items", data.get("collection_items", []))
     conn.commit()
+
+
+def _import_game_rows(conn, table, records):
+    """Re-key a game-referencing table's rows from slug to the local game id.
+
+    Rows whose game is not in this library are dropped rather than forced
+    against a dangling id, which would trip the foreign key.
+    """
+    if not records:
+        return
+    cols = dict(_BACKUP_TABLES)[table]
+    id_map = {r["slug"]: r["id"]
+              for r in conn.execute("SELECT id, slug FROM games")}
+    qmarks = ",".join("?" * len(cols))
+    rows = []
+    for rec in records:
+        gid = id_map.get(rec.get("game_slug"))
+        if gid is None:
+            continue
+        rows.append(tuple(gid if c == "game_id" else rec.get(c) for c in cols))
+    if rows:
+        conn.executemany(
+            "INSERT OR REPLACE INTO %s (%s) VALUES (%s)"
+            % (table, ",".join(cols), qmarks), rows)
+
+
+def _import_user_games(conn, data):
+    for rec in data.get("user_games", []):
+        slug = rec.get("slug")
+        if not slug:
+            continue
+        values = tuple(rec.get(c) for c in _USER_GAME_COLS)
+        row = conn.execute("SELECT id FROM games WHERE slug = ?", (slug,)).fetchone()
+        if row is None:
+            qmarks = ",".join("?" * len(_USER_GAME_COLS))
+            conn.execute(
+                "INSERT INTO games (%s) VALUES (%s)"
+                % (",".join(_USER_GAME_COLS), qmarks), values)
+        else:
+            sets = ",".join("%s = ?" % c for c in _USER_GAME_COLS)
+            conn.execute("UPDATE games SET %s WHERE id = ?" % sets,
+                         values + (row["id"],))
+
+    for rec in data.get("user_game_tags", []):
+        game_id = _game_id_by_slug(conn, rec.get("slug"))
+        name = rec.get("name")
+        if game_id is None or not name:
+            continue
+        conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (name,))
+        tag_id = conn.execute("SELECT id FROM tags WHERE name = ?",
+                              (name,)).fetchone()["id"]
+        conn.execute("INSERT OR IGNORE INTO game_tags (game_id, tag_id)"
+                     " VALUES (?,?)", (game_id, tag_id))
+
+    for rec in data.get("user_local", []):
+        game_id = _game_id_by_slug(conn, rec.get("slug"))
+        if game_id is None:
+            continue
+        conn.execute(
+            "INSERT OR REPLACE INTO local (game_id, folder_path, folder_version,"
+            " has_translation, has_fontpatch, size_bytes, scanned_at)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (game_id, rec.get("folder_path"), rec.get("folder_version"),
+             rec.get("has_translation") or 0, rec.get("has_fontpatch") or 0,
+             rec.get("size_bytes"), rec.get("scanned_at")))
+
+    for rec in data.get("user_game_aliases", []):
+        game_id = _game_id_by_slug(conn, rec.get("slug"))
+        alias = rec.get("alias")
+        if game_id is None or not alias:
+            continue
+        conn.execute("INSERT OR IGNORE INTO game_aliases (game_id, alias, source)"
+                     " VALUES (?,?,?)",
+                     (game_id, alias, rec.get("source") or "user"))
+
+
+# Tables that hold one user's own data and must never ride along in a public
+# snapshot. A client needs only games, tags and game_tags; everything else is
+# ratings, notes, collections, comments, prefs and translation caches that
+# belong to whoever built the library.
+_PRIVATE_TABLES = (
+    "state", "collections", "collection_items", "comments", "prefs",
+    "exclusions", "local", "game_aliases", "weights", "affinities",
+    "sync_log", "translations", "manual_translations",
+)
+
+
+def strip_to_site_catalogue(db_path):
+    """Reduce a db file to the public site catalogue, in place.
+
+    Deletes every game the author added themselves (origin != 'site'), drops
+    the personal-data tables, and reaps the tags left dangling by the game
+    deletion. A snapshot built from an origin-less db - one that predates the
+    origin column - keeps its games: such a db cannot hold user games, so the
+    rows it does hold are all site rows already.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        for table in _PRIVATE_TABLES:
+            conn.execute("DROP TABLE IF EXISTS %s" % table)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(games)")}
+        if "origin" in cols:
+            conn.execute("DELETE FROM games WHERE origin IS NULL OR origin != 'site'")
+        conn.execute("DELETE FROM game_tags WHERE game_id NOT IN (SELECT id FROM games)")
+        conn.execute("DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM game_tags)")
+        conn.commit()
+        conn.execute("VACUUM")
+    finally:
+        conn.close()
 
 
 # --- preference weights --------------------------------------------------------
@@ -1287,17 +1565,6 @@ def weight_table(conn, limit=40):
 
 def exclusions(conn):
     return [r["tag"] for r in conn.execute("SELECT tag FROM exclusions ORDER BY tag")]
-
-
-def add_exclusion(conn, tag, source="user"):
-    conn.execute("INSERT OR REPLACE INTO exclusions (tag, source) VALUES (?,?)",
-                 (tag, source))
-    conn.commit()
-
-
-def remove_exclusion(conn, tag):
-    conn.execute("DELETE FROM exclusions WHERE tag = ?", (tag,))
-    conn.commit()
 
 
 # --- prefs ---------------------------------------------------------------------

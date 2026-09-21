@@ -21,3 +21,21 @@ promo/
 *.log
 __pycache__/
 *.pyc
+
+# Machine-local tooling. .claude/ is this machine's session memory and
+# settings, .codepilot-uploads/ is screenshots pasted into chat, and the
+# *.ai.md files are generated directory listings. None of it is source.
+.claude/
+.codepilot-uploads/
+README.ai.md
+PATH.ai.md
+
+# Server side. The client talks to the author's server, but the deploy tool,
+# the sync server and the catalogue host are single-tenant ops scripts -
+# deploy_server.py alone names the host, the SSH port, the login user and the
+# remote layout. They stay off the public repo. test_serve_catalog.py imports
+# serve_catalog at module level, so it follows them out.
+deploy_server.py
+slg_sync_server.py
+serve_catalog.py
+tests/test_serve_catalog.py
