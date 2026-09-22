@@ -31,7 +31,7 @@ import slg_scrape
 import slg_translate
 import slg_update
 
-APP_VERSION = "0.21.0"
+APP_VERSION = "0.21.1"
 # The sidebar shows the number and nothing else. build_stamp() still carries
 # the channel and the build time, but it belongs on the 关于 page now: a
 # timestamp in the corner of every screen was answering a question the user

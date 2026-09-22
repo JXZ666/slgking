@@ -96,11 +96,21 @@ _VERSIONISH = re.compile(r"^(?:v|ver|r|ep|ch|chapter|part|act|season)?\.?\s*\d",
 _STATUS_WORDS = {"final", "complete", "completed", "finished", "full release"}
 
 
-def http_get(url, timeout=TIMEOUT):
+# An opener that ignores any system/env proxy. The author's own catalogue server
+# (43.130.240.89:8080) must be reached directly: it is a raw IP on a non-standard
+# port, and a user's VPN/proxy otherwise swallows the request (502 / timeout).
+# The scraper itself still uses the default opener, because dikgames needs it.
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def http_get(url, timeout=TIMEOUT, direct=False):
     """One request, entity-decoded, raw bytes back. Raises on failure.
 
     Module level so the threaded cover pool can use it without going through
     Fetcher, whose whole job is to serialise requests.
+
+    `direct=True` uses _DIRECT_OPENER (no proxy) - only for the author's own
+    server, never for the scraped site.
     """
     req = urllib.request.Request(url, headers={
         "User-Agent": UA,
@@ -110,7 +120,9 @@ def http_get(url, timeout=TIMEOUT):
         "Accept-Encoding": "gzip, deflate",
         "Connection": "close",
     })
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    opener = _DIRECT_OPENER if direct else None
+    with (opener.open(req, timeout=timeout) if opener
+          else urllib.request.urlopen(req, timeout=timeout)) as resp:
         raw = resp.read()
         enc = (resp.headers.get("Content-Encoding") or "").lower()
     if enc == "gzip" or raw[:2] == b"\x1f\x8b":
