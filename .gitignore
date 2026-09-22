@@ -30,12 +30,11 @@ __pycache__/
 README.ai.md
 PATH.ai.md
 
-# Server side. The client talks to the author's server, but the deploy tool,
-# the sync server and the catalogue host are single-tenant ops scripts -
-# deploy_server.py alone names the host, the SSH port, the login user and the
-# remote layout. They stay off the public repo. test_serve_catalog.py imports
-# serve_catalog at module level, so it follows them out.
+# Server side. The deploy tool and the catalogue host are single-tenant ops
+# scripts - deploy_server.py alone names the host, the SSH port, the login user
+# and the remote layout. They stay off the public repo. test_serve_catalog.py
+# imports serve_catalog at module level, so it follows them out.
+# (slg_sync_server.py is the *client* half of that sync and IS tracked.)
 deploy_server.py
-slg_sync_server.py
 serve_catalog.py
 tests/test_serve_catalog.py
