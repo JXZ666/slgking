@@ -293,7 +293,7 @@ class SidebarFit(unittest.TestCase):
         for patch in cls._offline:
             patch.start()
         cls.app.report_callback_exception = cls._ignore_dead_widget_focus
-        cls.app.geometry("940x600")
+        cls.app.geometry("1020x600")
         # Pinned off "跟随系统" on purpose. The app polls the OS appearance every
         # five seconds and rebuilds the whole window when it changes, which can
         # land in the middle of a test and hand it a screenful of dead widgets -
@@ -449,6 +449,16 @@ class SidebarFit(unittest.TestCase):
         # hardcoded direction; there was no way back up the list.
         self._assert_has_height(slg_gui.SORT_ARROW[True], "反序按钮")
         self.assertIsNotNone(self.app.sort_dir_btn)
+
+    def test_the_profile_button_sits_in_the_reserved_row_below_sort(self):
+        # 个人 moved out of the sort cluster (`right`) into the toolbar frame
+        # itself, gridded into the reserved empty cell row=1, column=1.
+        self.assertIsNotNone(self.app.profile_btn)
+        self.assertIs(self.app.profile_btn.master, self.app.toolbar)
+        info = self.app.profile_btn.grid_info()
+        self.assertEqual(info.get("row"), 1)
+        self.assertEqual(info.get("column"), 1)
+        self._assert_has_height("个人", "个人按钮")
 
     def test_toggling_reverses_the_arrow_and_the_query(self):
         original = self.app.sort_desc

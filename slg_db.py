@@ -204,6 +204,30 @@ CREATE TABLE IF NOT EXISTS comments (
     cloud_id   TEXT,
     created_at TEXT NOT NULL
 );
+
+-- Points ledger: append-only, so the balance is always SUM(delta) and every
+-- change is auditable. Kept field-compatible with the future server-side
+-- points_log so a local library can be imported whole when the cloud lands.
+CREATE TABLE IF NOT EXISTS points_log (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    delta  INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    at     TEXT NOT NULL
+);
+
+-- One row per calendar day the user signed in. Keyed by day only: the local
+-- batch is single-user, so there is no device id to key on yet.
+CREATE TABLE IF NOT EXISTS signin (
+    day TEXT PRIMARY KEY,
+    at  TEXT NOT NULL
+);
+
+-- Titles the user owns. source is how it was obtained: shop / code / default.
+CREATE TABLE IF NOT EXISTS owned_titles (
+    title_id     TEXT PRIMARY KEY,
+    acquired_at  TEXT NOT NULL,
+    source       TEXT NOT NULL
+);
 """
 
 
@@ -1295,6 +1319,9 @@ _BACKUP_TABLES = (
     ("collections", ("id", "name", "created_at")),
     ("collection_items", ("collection_id", "game_id", "added_at")),
     ("manual_translations", ("kind", "ref", "lang", "text", "updated_at")),
+    ("points_log", ("delta", "reason", "at")),
+    ("signin", ("day", "at")),
+    ("owned_titles", ("title_id", "acquired_at", "source")),
 )
 
 # Every non-id column of `games`, in order, for the user-game backup round trip.
@@ -1376,7 +1403,8 @@ def import_user_data(conn, data):
     # their game_id is a rowid that must be re-keyed through the slug, not
     # bulk-loaded straight off the backup.
     for table in ("collection_items", "state", "exclusions",
-                  "collections", "manual_translations"):
+                  "collections", "manual_translations",
+                  "points_log", "signin", "owned_titles"):
         conn.execute("DELETE FROM %s" % table)
     for table, cols in _BACKUP_TABLES:
         if table in ("state", "collection_items"):
@@ -1472,6 +1500,7 @@ _PRIVATE_TABLES = (
     "state", "collections", "collection_items", "comments", "prefs",
     "exclusions", "local", "game_aliases", "weights", "affinities",
     "sync_log", "translations", "manual_translations",
+    "points_log", "signin", "owned_titles",
 )
 
 
@@ -1577,6 +1606,78 @@ def get_pref(conn, key, default=None):
 def set_pref(conn, key, value):
     conn.execute("INSERT OR REPLACE INTO prefs (key, value) VALUES (?,?)", (key, value))
     conn.commit()
+
+
+# --- points / sign-in / titles ------------------------------------------------
+#
+# Persistence primitives only; the catalogue (titles, costs, redemption codes)
+# and the business rules live in slg_titles, which imports this module. Keeping
+# the values as explicit parameters means slg_db stays decoupled from that
+# catalogue, and the server scripts that import slg_db keep working untouched.
+
+def points_balance(conn):
+    return conn.execute(
+        "SELECT COALESCE(SUM(delta), 0) FROM points_log").fetchone()[0]
+
+
+def add_points(conn, delta, reason):
+    conn.execute("INSERT INTO points_log (delta, reason, at) VALUES (?,?,?)",
+                 (delta, reason, _now()))
+    conn.commit()
+
+
+def record_signin(conn, day, points):
+    """Record a sign-in for `day`, awarding `points`. Returns (already, day, gained)."""
+    row = conn.execute("SELECT 1 FROM signin WHERE day = ?", (day,)).fetchone()
+    if row:
+        return (True, day, 0)
+    conn.execute("INSERT INTO signin (day, at) VALUES (?,?)", (day, _now()))
+    add_points(conn, points, "签到")
+    return (False, day, points)
+
+
+def last_signin_day(conn):
+    return conn.execute("SELECT MAX(day) FROM signin").fetchone()[0]
+
+
+def owned_title_ids(conn):
+    return {r["title_id"] for r in conn.execute("SELECT title_id FROM owned_titles")}
+
+
+def own_title(conn, title_id, source):
+    conn.execute(
+        "INSERT OR IGNORE INTO owned_titles (title_id, acquired_at, source)"
+        " VALUES (?,?,?)", (title_id, _now(), source))
+    conn.commit()
+
+
+def redeem_title(conn, title_id):
+    """Own a title via a redemption code. Returns True if it was newly owned."""
+    if title_id in owned_title_ids(conn):
+        return False
+    own_title(conn, title_id, "code")
+    return True
+
+
+def buy_title(conn, title_id, cost):
+    """Deduct `cost` points and own the title, in one transaction. Returns bool."""
+    if points_balance(conn) < cost:
+        return False
+    conn.execute("INSERT INTO points_log (delta, reason, at) VALUES (?,?,?)",
+                 (-cost, "兑换:" + title_id, _now()))
+    conn.execute(
+        "INSERT OR IGNORE INTO owned_titles (title_id, acquired_at, source)"
+        " VALUES (?,?,?)", (title_id, _now(), "shop"))
+    conn.commit()
+    return True
+
+
+def set_equipped_title(conn, title_id):
+    set_pref(conn, "profile.equipped_title", title_id)
+
+
+def get_equipped_title(conn):
+    return get_pref(conn, "profile.equipped_title", "") or ""
 
 
 def log_sync(conn, tag, pages, games_seen, new_games):

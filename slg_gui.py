@@ -28,10 +28,11 @@ import slg_comments
 import slg_db
 import slg_engines
 import slg_scrape
+import slg_titles
 import slg_translate
 import slg_update
 
-APP_VERSION = "0.21.0"
+APP_VERSION = "0.22.0"
 # The sidebar shows the number and nothing else. build_stamp() still carries
 # the channel and the build time, but it belongs on the 关于 page now: a
 # timestamp in the corner of every screen was answering a question the user
@@ -872,7 +873,7 @@ class App(ctk.CTk):
         super().__init__()
         self.title(APP_TITLE)
         self.geometry("1180x760")
-        self.minsize(940, 600)
+        self.minsize(1020, 600)
         # Without this the window and the taskbar entry keep tkinter's feather.
         try:
             self.iconbitmap(asset_path("slgking.ico"))
@@ -1169,6 +1170,7 @@ class App(ctk.CTk):
         self.sync_btn = self.maintenance_btn = None
         self.update_label = None
         self.qq_btn = None
+        self.profile_btn = None
 
     def _poll_system(self):
         """"system" has no callback to hang off, so sample the OS setting.
@@ -1549,6 +1551,15 @@ class App(ctk.CTk):
             hover_color=CARD_HOVER, font=ui_font(size=15),
             command=self._toggle_sort_dir)
         self.sort_dir_btn.pack(side="left", padx=(6, 0))
+        # 个人 sits in the reserved empty cell directly below the sort cluster
+        # (bar row 1, col 1), vertically centred with the VPN notice band on the
+        # left. Kept out of `right` so the sort/gear row stays one clean line.
+        self.profile_btn = ctk.CTkButton(
+            bar, text="个人", width=64, height=38, corner_radius=8,
+            fg_color=CARD, text_color=TEXT, hover_color=CARD_HOVER,
+            font=ui_font(size=13), command=self.open_profile)
+        self.profile_btn.grid(row=1, column=1, sticky="e",
+                              padx=(20, 0), pady=(9, 0))
         # The gear lands on 设置, not 关于: the theme switch lives in there now,
         # and 关于 is the first row inside it. Same width as the button it
         # replaced, taller to match the two controls beside it.
@@ -2981,6 +2992,9 @@ class App(ctk.CTk):
                              placeholder_text_color=MUTED, border_width=1,
                              border_color=CHIP, font=ui_font(size=12))
         entry.pack(fill="x", padx=16, pady=(8, 0))
+        nickname = slg_db.get_pref(self.conn, "profile.nickname", "") or ""
+        if nickname:
+            entry.insert(0, nickname)
         upload = tk.BooleanVar(value=slg_comments.configured())
         if slg_comments.configured():
             ctk.CTkCheckBox(win, text="上传到云端，让其他用户也能看到",
@@ -3422,6 +3436,264 @@ class App(ctk.CTk):
             ctk.CTkLabel(body, text=blurb, text_color=MUTED,
                          font=ui_font(size=11), justify="left",
                          wraplength=380).pack(fill="x", padx=22, pady=(2, 0))
+
+    # --- profile / points / titles ---------------------------------------------
+
+    def _title_color(self, title_id):
+        t = slg_titles.title_by_id(title_id)
+        return slg_titles.RARITY_COLORS.get(t["rarity"], MUTED) if t else MUTED
+
+    def _obtain_hint(self, t):
+        if t["obtain"] == "default":
+            return "默认"
+        if t["obtain"] == "code":
+            return "兑换码获取"
+        if t["obtain"] == "shop":
+            hint = "积分兑换（%d 分）" % t["cost"]
+            if t.get("limited_until"):
+                hint += " · 限时"
+            return hint
+        return ""
+
+    def _title_badge(self, parent, title_id, animate=True):
+        """A rarity badge drawn on a canvas, so the equipped title can glow.
+
+        普通/稀有 are static; 史诗 breathes, 传说 gets a sweeping shine and 至臻
+        cycles through a rainbow ramp. The rarity names never show - the colour
+        and the motion are the whole signal.
+        """
+        t = slg_titles.title_by_id(title_id) or {"name": "普通用户", "rarity": "普通"}
+        rarity = t["rarity"]
+        color = slg_titles.RARITY_COLORS.get(rarity, MUTED)
+        name = t["name"]
+        font = ui_tkfont(size=12, weight="bold")
+        w = max(64, font.measure(name) + 40)
+        h = 34
+        c = tk.Canvas(parent, width=w, height=h, highlightthickness=0, bg=BG)
+        tint = _mix(BG, color, 0.16)
+        r = h // 2
+        c.create_oval(0, 0, h, h, fill=tint, outline="")
+        c.create_oval(w - h, 0, w, h, fill=tint, outline="")
+        c.create_rectangle(r, 0, w - r, h, fill=tint, outline="")
+        text_item = c.create_text(w // 2, h // 2, text=name, fill=color, font=font)
+        shine = c.create_rectangle(-44, h * 0.12, -22, h * 0.88,
+                                   fill=_mix(color, "#ffffff", 0.75), outline="")
+        if not animate or rarity in ("普通", "稀有"):
+            c.itemconfig(shine, state="hidden")
+            return c
+
+        frame = {"n": 0}
+
+        def tick():
+            try:
+                if not c.winfo_exists():
+                    return
+            except tk.TclError:
+                return
+            frame["n"] += 1
+            n = frame["n"]
+            if rarity == "史诗":
+                p = 1 - abs(2 * ((n % 40) / 39.0) - 1)
+                c.itemconfig(text_item, fill=_mix(color, "#ffffff", 0.35 * p))
+            elif rarity == "传说":
+                x = -44 + (n * 4) % (w + 66)
+                c.coords(shine, x, h * 0.12, x + 22, h * 0.88)
+                c.itemconfig(shine, state="normal")
+            elif rarity == "至臻":
+                ramp = ("#e84393", "#e06a3f", "#e0a800", "#3fae5a", "#2f9bd0", "#8b5cf6")
+                c.itemconfig(text_item, fill=ramp[n % len(ramp)])
+            c.after(40, tick)
+
+        c.after(40, tick)
+        return c
+
+    def _equip_title(self, win, title_id):
+        if title_id == slg_titles.DEFAULT_TITLE_ID:
+            slg_db.set_equipped_title(self.conn, "")
+        else:
+            slg_db.set_equipped_title(self.conn, title_id)
+        win.destroy()
+        self.open_titles()
+
+    def _do_signin(self, win, sign_btn, bal_label):
+        already, _day, gained = slg_titles.signin(self.conn)
+        if already:
+            return
+        sign_btn.configure(text="今日已签到", state="disabled")
+        bal_label.configure(text="积分：%d" % slg_db.points_balance(self.conn))
+
+    def _edit_nickname(self, parent):
+        win = self._new_dialog("修改昵称", "340x180")
+        cur = slg_db.get_pref(self.conn, "profile.nickname", "") or ""
+        ctk.CTkLabel(win, text="设置你的昵称（本地保存，随时可改）", text_color=TEXT,
+                     font=ui_font(size=13)).pack(fill="x", padx=16, pady=(16, 8))
+        entry = ctk.CTkEntry(win, placeholder_text="昵称…", height=32, corner_radius=8,
+                             fg_color=CARD, text_color=TEXT,
+                             placeholder_text_color=MUTED, border_width=1,
+                             border_color=CHIP, font=ui_font(size=13))
+        entry.insert(0, cur)
+        entry.pack(fill="x", padx=16)
+
+        def save():
+            name = entry.get().strip()
+            if not name:
+                return
+            slg_db.set_pref(self.conn, "profile.nickname", name)
+            if not slg_db.get_pref(self.conn, "profile.registered_at"):
+                slg_db.set_pref(self.conn, "profile.registered_at",
+                                time.strftime("%Y-%m-%d %H:%M:%S"))
+            win.destroy()
+            parent.destroy()
+            self.open_profile()
+
+        ctk.CTkButton(win, text="保存", height=32, width=90, corner_radius=8,
+                      fg_color=ACCENT, text_color=ON_ACCENT, hover_color=CARD_HOVER,
+                      font=ui_font(size=12), command=save).pack(pady=(12, 0))
+
+    def open_profile(self):
+        win = self._new_dialog("个人中心", "420x560")
+        nickname = slg_db.get_pref(self.conn, "profile.nickname", "") or ""
+        equipped = slg_db.get_equipped_title(self.conn) or slg_titles.DEFAULT_TITLE_ID
+        day = slg_titles.today_str()
+        signed = slg_db.last_signin_day(self.conn) == day
+
+        head = ctk.CTkFrame(win, fg_color="transparent")
+        head.pack(fill="x", padx=16, pady=(16, 8))
+        ctk.CTkLabel(head, text=(nickname[:1] or "游"), width=48, height=48,
+                     corner_radius=24, fg_color=ACCENT, text_color=ON_ACCENT,
+                     font=ui_font(size=20, weight="bold")).pack(side="left")
+        info = ctk.CTkFrame(head, fg_color="transparent")
+        info.pack(side="left", padx=(12, 0))
+        ctk.CTkLabel(info, text=nickname or "未设置昵称", text_color=TEXT,
+                     font=ui_font(size=16, weight="bold")).pack(anchor="w")
+        self._title_badge(info, equipped).pack(anchor="w", pady=(6, 0))
+
+        bal_label = ctk.CTkLabel(win, text="积分：%d" % slg_db.points_balance(self.conn),
+                                 text_color=TEXT, font=ui_font(size=13))
+        bal_label.pack(anchor="w", padx=16, pady=(14, 0))
+        sign_btn = ctk.CTkButton(
+            win, text="今日已签到" if signed else "签到（+%d 分）" % slg_titles.DAILY_SIGNIN_POINTS,
+            height=36, corner_radius=8, fg_color=ACCENT, text_color=ON_ACCENT,
+            hover_color=CARD_HOVER, font=ui_font(size=13),
+            state="disabled" if signed else "normal",
+            command=lambda: self._do_signin(win, sign_btn, bal_label))
+        sign_btn.pack(fill="x", padx=16, pady=(6, 0))
+
+        ctk.CTkButton(win, text="修改昵称", height=32, corner_radius=8,
+                      fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+                      font=ui_font(size=12),
+                      command=lambda: self._edit_nickname(win)).pack(
+            fill="x", padx=16, pady=(10, 0))
+
+        ctk.CTkLabel(win, text="——————", text_color=MUTED,
+                     font=ui_font(size=11)).pack(pady=(16, 4))
+        for text, fn in (("查看头衔", self.open_titles),
+                         ("积分商城", self.open_shop),
+                         ("兑换码", self.open_redeem)):
+            ctk.CTkButton(win, text=text, height=36, corner_radius=8, anchor="w",
+                          fg_color="transparent", text_color=TEXT,
+                          hover_color=CARD, font=ui_font(size=13),
+                          command=lambda f=fn: (win.destroy(), f())).pack(
+                fill="x", padx=16, pady=(6, 0))
+
+    def open_titles(self):
+        win = self._new_dialog("我的头衔", "360x520")
+        ctk.CTkLabel(win, text="我的头衔", text_color=TEXT,
+                     font=ui_font(size=14, weight="bold")).pack(
+            fill="x", padx=16, pady=(14, 8))
+        owned = slg_db.owned_title_ids(self.conn) | {slg_titles.DEFAULT_TITLE_ID}
+        equipped = slg_db.get_equipped_title(self.conn) or slg_titles.DEFAULT_TITLE_ID
+        box = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        box.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        for t in slg_titles.TITLES:
+            tid = t["id"]
+            is_owned = tid in owned
+            is_equipped = tid == equipped
+            color = slg_titles.RARITY_COLORS.get(t["rarity"], MUTED)
+            row = ctk.CTkFrame(box, fg_color="transparent")
+            row.pack(fill="x", padx=4, pady=4)
+            label = t["name"] + ("（使用中）" if is_equipped else "")
+            ctk.CTkLabel(row, text=label, text_color=color if is_owned else MUTED,
+                         font=ui_font(size=13, weight="bold")).pack(side="left")
+            if is_owned:
+                ctk.CTkButton(row, text="取消" if is_equipped else "装备", width=64,
+                              height=28, corner_radius=8, fg_color=CHIP,
+                              text_color=TEXT, hover_color=CARD_HOVER,
+                              font=ui_font(size=12),
+                              command=lambda tid=tid: self._equip_title(win, tid)
+                              ).pack(side="right")
+            else:
+                ctk.CTkLabel(row, text=self._obtain_hint(t), text_color=MUTED,
+                             font=ui_font(size=11)).pack(side="right")
+
+    def open_shop(self):
+        win = self._new_dialog("积分商城", "380x520")
+        ctk.CTkLabel(win, text="积分商城", text_color=TEXT,
+                     font=ui_font(size=14, weight="bold")).pack(
+            fill="x", padx=16, pady=(14, 4))
+        ctk.CTkLabel(win, text="当前积分：%d" % slg_db.points_balance(self.conn),
+                     text_color=TEXT, font=ui_font(size=13)).pack(
+            anchor="w", padx=16, pady=(0, 8))
+        owned = slg_db.owned_title_ids(self.conn)
+        box = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        box.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        for item in slg_titles.available_shop_items():
+            row = ctk.CTkFrame(box, fg_color=CARD, corner_radius=8)
+            row.pack(fill="x", padx=4, pady=6)
+            left = ctk.CTkFrame(row, fg_color="transparent")
+            left.pack(side="left", fill="x", expand=True, padx=12, pady=8)
+            ctk.CTkLabel(left, text=item["name"],
+                         text_color=self._title_color(item["id"]),
+                         font=ui_font(size=13, weight="bold")).pack(anchor="w")
+            locked = item.get("locked")
+            cost_text = "%d 分" % item["cost"]
+            if locked:
+                cost_text = item.get("note") or "即将开放"
+            ctk.CTkLabel(left, text=cost_text, text_color=MUTED,
+                         font=ui_font(size=11)).pack(anchor="w")
+            if locked:
+                ctk.CTkLabel(row, text="即将开放", text_color=MUTED,
+                             font=ui_font(size=11)).pack(side="right", padx=12)
+            elif item["id"] in owned:
+                ctk.CTkLabel(row, text="已拥有", text_color=MUTED,
+                             font=ui_font(size=11)).pack(side="right", padx=12)
+            else:
+                ctk.CTkButton(row, text="兑换", width=64, height=28, corner_radius=8,
+                              fg_color=ACCENT, text_color=ON_ACCENT,
+                              hover_color=CARD_HOVER, font=ui_font(size=12),
+                              command=lambda i=item: self._buy_item(win, i)
+                              ).pack(side="right", padx=12)
+
+    def _buy_item(self, win, item):
+        if slg_titles.buy(self.conn, item):
+            messagebox.showinfo("兑换成功", "已获得「%s」" % item["name"], parent=win)
+            win.destroy()
+            self.open_shop()
+        else:
+            messagebox.showwarning("积分不足", "积分不足，无法兑换", parent=win)
+
+    def open_redeem(self):
+        win = self._new_dialog("兑换码", "360x240")
+        ctk.CTkLabel(win, text="输入头衔兑换码", text_color=TEXT,
+                     font=ui_font(size=14, weight="bold")).pack(
+            fill="x", padx=16, pady=(16, 4))
+        ctk.CTkLabel(win, text="部分头衔需通过兑换码解锁", text_color=MUTED,
+                     font=ui_font(size=11)).pack(anchor="w", padx=16, pady=(0, 10))
+        entry = ctk.CTkEntry(win, placeholder_text="兑换码…", height=34, corner_radius=8,
+                             fg_color=CARD, text_color=TEXT,
+                             placeholder_text_color=MUTED, border_width=1,
+                             border_color=CHIP, font=ui_font(size=13))
+        entry.pack(fill="x", padx=16)
+        feedback = ctk.CTkLabel(win, text="", text_color=MUTED, font=ui_font(size=12))
+        feedback.pack(anchor="w", padx=16, pady=(8, 0))
+
+        def do():
+            ok, msg = slg_titles.redeem(self.conn, entry.get())
+            feedback.configure(text=msg, text_color=ACCENT if ok else DANGER_TEXT)
+
+        ctk.CTkButton(win, text="兑换", height=34, corner_radius=8, fg_color=ACCENT,
+                      text_color=ON_ACCENT, hover_color=CARD_HOVER,
+                      font=ui_font(size=13), command=do).pack(fill="x", padx=16, pady=(12, 0))
 
     def _open_collect_dialog(self):
         """Check off which collections the selected game belongs to."""

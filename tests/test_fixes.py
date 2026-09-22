@@ -5,9 +5,11 @@ Run with:
     python -m unittest discover tests
 """
 
+import inspect
 import os
 import sys
 import unittest
+import urllib.request
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -162,6 +164,29 @@ class ScrapeTests(unittest.TestCase):
         out = slg_scrape.parse_list_page(page, log=logged.append)
         self.assertEqual(out, [])
         self.assertEqual(len(logged), 1)
+
+
+class DirectHttpTests(unittest.TestCase):
+    """The sync client must reach the author's own server directly.
+
+    v0.21 switched the catalogue pull to http://43.130.240.89:8080 but kept the
+    default urllib opener, so a user's system/VPN proxy swallowed the request
+    (502 / timeout) and sync reported "服务器不可用". _DIRECT_OPENER is the
+    no-proxy opener those requests now go through.
+    """
+
+    def test_direct_opener_bypasses_proxy(self):
+        # ProxyHandler({}) means "no proxy": build_opener skips the default
+        # ProxyHandler (which reads the system proxy), and the empty one registers
+        # no *_open methods, so no handler in the opener carries a proxy mapping.
+        for handler in slg_scrape._DIRECT_OPENER.handlers:
+            self.assertIsNone(getattr(handler, "proxies", None),
+                              "直连 opener 不应携带系统代理")
+
+    def test_http_get_exposes_the_direct_flag(self):
+        params = inspect.signature(slg_scrape.http_get).parameters
+        self.assertIn("direct", params)
+        self.assertFalse(params["direct"].default)
 
 
 if __name__ == "__main__":
