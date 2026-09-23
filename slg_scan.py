@@ -183,7 +183,12 @@ def _closest(key, index, threshold=0.86):
         longest = max(len(title_key), len(key))
         if abs(len(title_key) - len(key)) > longest * 0.4:
             continue
-        ratio = difflib.SequenceMatcher(None, key, title_key).ratio()
+        sm = difflib.SequenceMatcher(None, key, title_key)
+        # quick_ratio 是 O(n) 的字符计数上界，先拿它挡掉一批进不了最佳的，
+        # 省下昂贵的 LCS 计算 —— 未匹配文件夹越多，这一步越值。
+        if sm.quick_ratio() < best:
+            continue
+        ratio = sm.ratio()
         if ratio > best:
             best_id, best = game_id, ratio
     return best_id
@@ -208,6 +213,55 @@ def inspect(folder):
                 info["has_fontpatch"] = 1
                 break
     return info
+
+
+# --- add-game autofill ----------------------------------------------------------
+
+# 方括号里的内容经常是开发组/社团名（[NTRMAN]），但也可能是翻译/画质标注，这些不算开发商。
+_GROUP_NOISE = re.compile(
+    r"汉化|官中|官方中文|中文|精翻|机翻|ai汉化|gpt|无码|步兵|骑兵|解码|去码|"
+    r"完整版|最终版|pc|win|windows|linux|mac|android|eng|english|repack|"
+    r"compressed|uncensored|censored", re.I)
+
+
+def _folder_developer(name):
+    """第一个「非翻译/画质标注」的方括号组，当作开发商/社团名。"""
+    for match in re.finditer(r"[\[【]([^\]】]+)[\]】]", name):
+        group = match.group(1).strip()
+        if group and not _GROUP_NOISE.search(group):
+            return group
+    return ""
+
+
+def detect_engine(folder):
+    """从目录结构判断引擎，未知返回空串。"""
+    entries = _listdir(folder)
+    lowered = {e.lower() for e in entries}
+    if "renpy" in lowered or any(e.lower().endswith(".rpy") for e in entries):
+        return "Ren'Py"
+    if "unityplayer.dll" in lowered or any(e.lower().endswith("_data") for e in entries):
+        return "Unity"
+    if "www" in lowered and os.path.isfile(os.path.join(folder, "www", "index.html")):
+        return "RPG Maker"
+    if any(e.lower().endswith((".rgss3a", ".rgss2a", ".rxproj", ".rvproj2")) for e in entries):
+        return "RPG Maker"
+    if any(e.lower().endswith(".html") for e in entries) or "index.html" in lowered:
+        return "HTML"
+    return ""
+
+
+def autofill_folder(folder):
+    """从一个游戏文件夹猜出标题/开发商/版本/引擎，供「添加我的游戏」表单预填。
+
+    简介 / 标签 / 封面仍由玩家自己填，这里只填目录本身能确定的四项。
+    """
+    name = os.path.basename(folder.rstrip("/\\"))
+    return {
+        "title": folder_title(name) or "",
+        "developer": _folder_developer(name) or "",
+        "version": parse_folder_version(name) or "",
+        "engine": detect_engine(folder) or "",
+    }
 
 
 def scan(conn, roots=None, with_size=False, on_progress=None, log=print,

@@ -7,6 +7,7 @@ Run with:
 
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -82,6 +83,45 @@ class Match(unittest.TestCase):
         # No Chinese translation, so the Chinese folder must not match the
         # English title through a bogus cross-alphabet fuzzy ratio.
         self.assertIsNone(slg_scan.match_game(conn, "多娜多娜"))
+
+
+class Autofill(unittest.TestCase):
+    def test_name_version_developer_from_folder_name(self):
+        # 目录不存在时引擎返回空串，但标题/版本/开发商仍可从名字猜出。
+        info = slg_scan.autofill_folder(
+            os.path.join("C:", "games", "[NTRMAN] ParadiseCity v0.6.23"))
+        self.assertEqual(info["title"], "ParadiseCity")
+        self.assertEqual(info["version"], "0.6.23")
+        self.assertEqual(info["developer"], "NTRMAN")
+        self.assertEqual(info["engine"], "")
+
+    def test_translation_group_is_not_developer(self):
+        info = slg_scan.autofill_folder(
+            os.path.join("C:", "games", "多娜多娜【官中】 v1.0"))
+        self.assertEqual(info["title"], "多娜多娜")
+        self.assertEqual(info["developer"], "")
+
+    def test_detect_renpy(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "renpy"))
+            self.assertEqual(slg_scan.detect_engine(root), "Ren'Py")
+
+    def test_detect_unity(self):
+        with tempfile.TemporaryDirectory() as root:
+            open(os.path.join(root, "UnityPlayer.dll"), "w").close()
+            self.assertEqual(slg_scan.detect_engine(root), "Unity")
+
+    def test_detect_rpg_maker(self):
+        with tempfile.TemporaryDirectory() as root:
+            www = os.path.join(root, "www")
+            os.makedirs(www)
+            open(os.path.join(www, "index.html"), "w").close()
+            self.assertEqual(slg_scan.detect_engine(root), "RPG Maker")
+
+    def test_detect_unknown(self):
+        with tempfile.TemporaryDirectory() as root:
+            open(os.path.join(root, "README.txt"), "w").close()
+            self.assertEqual(slg_scan.detect_engine(root), "")
 
 
 if __name__ == "__main__":

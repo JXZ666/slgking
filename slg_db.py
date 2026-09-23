@@ -6,17 +6,19 @@ it, which is the one requirement that got its own question in the interview.
 """
 
 import hashlib
+import hmac
 import json
 import math
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import threading
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 STATUSES = ("want", "downloaded")
 STATUS_LABELS = {"want": "想玩", "downloaded": "已下载"}
@@ -208,11 +210,13 @@ CREATE TABLE IF NOT EXISTS comments (
 -- Points ledger: append-only, so the balance is always SUM(delta) and every
 -- change is auditable. Kept field-compatible with the future server-side
 -- points_log so a local library can be imported whole when the cloud lands.
+-- seal is the tamper-evident chained HMAC described next to _row_seal below.
 CREATE TABLE IF NOT EXISTS points_log (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
     delta  INTEGER NOT NULL,
     reason TEXT NOT NULL,
-    at     TEXT NOT NULL
+    at     TEXT NOT NULL,
+    seal   TEXT
 );
 
 -- One row per calendar day the user signed in. Keyed by day only: the local
@@ -226,7 +230,8 @@ CREATE TABLE IF NOT EXISTS signin (
 CREATE TABLE IF NOT EXISTS owned_titles (
     title_id     TEXT PRIMARY KEY,
     acquired_at  TEXT NOT NULL,
-    source       TEXT NOT NULL
+    source       TEXT NOT NULL,
+    seal         TEXT
 );
 """
 
@@ -273,6 +278,17 @@ def covers_dir():
 
 def db_path():
     return os.path.join(app_dir(), "slgking.db")
+
+
+def avatar_path():
+    """Where a user-set avatar lives: %LOCALAPPDATA%\\slgking\\avatar.png.
+
+    Deliberately in the data folder and not the repo - it is the user's own
+    picture, and the repo is public. Nothing needs to be registered anywhere:
+    the file's existence *is* the setting, and deleting it restores the default
+    avatar that ships in assets.
+    """
+    return os.path.join(app_dir(), "avatar.png")
 
 
 def install_seed_db(db_src, covers_src=None):
@@ -326,6 +342,13 @@ def session(path=None):
 
 def _migrate(conn):
     """Add columns that CREATE TABLE IF NOT EXISTS will not add to an old db."""
+    # 账本封印列。老档补成 NULL：封印链是「链开始之前的历史行一律信任」，
+    # 所以升级上来的存档不会因为一次升级就变成「被外部修改」。
+    for table in _LEDGER_TABLES:
+        have = {row["name"] for row in conn.execute("PRAGMA table_info(%s)" % table)}
+        if "seal" not in have:
+            conn.execute("ALTER TABLE %s ADD COLUMN seal TEXT" % table)
+            conn.commit()
     have = {row["name"] for row in conn.execute("PRAGMA table_info(games)")}
     if "complete" not in have:
         conn.execute("ALTER TABLE games ADD COLUMN complete INTEGER NOT NULL DEFAULT 0")
@@ -1608,6 +1631,205 @@ def set_pref(conn, key, value):
     conn.commit()
 
 
+# --- 账本完整性：门槛，不是保险箱 ---------------------------------------------
+#
+# 先把话说在前面：**本地存档 100% 防不住。** 数据就在用户自己的
+# %LOCALAPPDATA%\slgking\slgking.db 里，任何 SQLite 工具都能直接 INSERT 一行；
+# 仓库是公开的，所以任何加密方案也就跟着公开了。这里能做的只有两件事：
+#
+#   1. 提高门槛 —— 账本每行带一个 HMAC 封印，密钥存在库外（integrity.key）。
+#      不会算封印就伪造不出一行；用 DB 浏览器直接改数字、塞一行积分，也就是
+#      99% 的「改档」，会留下断链。
+#   2. 让篡改可见 —— 每次读余额/头衔时校验一次，断链之后的记录不再计入，
+#      个人中心直接写「存档被外部修改」。
+#
+# 挡不住的：读源码把密钥和链一起复刻；或者把两张表清空重来（链从头开始，跟新档
+# 长得一样）。真正的解法是服务器记账，那需要账号体系，与「轻量优先」冲突，
+# 留给后面版本 —— 这里只是门槛。
+
+INTEGRITY_KEY_FILE = "integrity.key"
+
+# 表 -> 参与封印的列。**列序就是封印内容的一部分**：改动这里等于让所有老档断链，
+# 所以只在确实要换格式时动它。
+_LEDGER_TABLES = {
+    "points_log": ("delta", "reason", "at"),
+    "owned_titles": ("title_id", "acquired_at", "source"),
+}
+
+# 校验结果按库文件缓存。写账本的地方调 invalidate_ledger()，否则余额会用着
+# 上一次的断链位置。单用户单连接，所以一个进程一份就够。
+_LEDGER_CACHE = {}
+
+
+def integrity_key_path():
+    """密钥文件的位置。库外，跟存档同目录。"""
+    return os.path.join(app_dir(), INTEGRITY_KEY_FILE)
+
+
+def integrity_key(create=True):
+    """库外的 HMAC 密钥；没有就生成一个。写不进去就返回 None（封印功能关闭）。
+
+    放库外是这台机器上唯一还有点用的做法：库和密钥一起被改就无效了。跟着
+    %LOCALAPPDATA%\\slgking 整个目录走，所以按帮助文档那样整个目录拷到新机器，
+    链依然能验。
+    """
+    path = integrity_key_path()
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            key = fh.read().strip()
+        if key:
+            return key
+    except OSError:
+        if not create:
+            return None
+    key = secrets.token_hex(32)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(key)
+    except OSError:
+        return None
+    return key
+
+
+def _row_seal(key, prev, rowid, values):
+    """一行账目的封印：HMAC(密钥, 上一行封印 + 行号 + 行内容)。
+
+    带上「上一行封印」是为了能发现**删除**：中间少一行，后面那行的 prev 就对不上。
+    """
+    payload = "\x1f".join([prev or "", str(rowid)] + [str(v) for v in values])
+    return hmac.new(key.encode("utf-8"), payload.encode("utf-8"),
+                    hashlib.sha256).hexdigest()
+
+
+def _last_seal(conn, table, before_rowid):
+    """这一行之前最后一枚**有封印**的行的封印（老档的历史行跳过不算）。"""
+    row = conn.execute(
+        "SELECT seal FROM %s WHERE rowid < ? AND seal IS NOT NULL"
+        " ORDER BY rowid DESC LIMIT 1" % table, (before_rowid,)).fetchone()
+    return row["seal"] if row else None
+
+
+def _insert_sealed(conn, table, values, ignore=False):
+    """往账本里写一行并盖封印。调用方负责 commit。返回行号，没插进去返回 None。
+
+    INSERT OR IGNORE 撞到已有行时 rowcount 是 0，这时**不能**去盖封印 ——
+    lastrowid 还是上一次插入的值，会把上一行的封印改写成这一行的，平白断链。
+    """
+    cols = _LEDGER_TABLES[table]
+    cur = conn.execute(
+        "INSERT %s INTO %s (%s) VALUES (%s)"
+        % ("OR IGNORE" if ignore else "", table, ",".join(cols),
+           ",".join("?" * len(cols))), tuple(values))
+    rowid = cur.lastrowid
+    if not cur.rowcount or rowid is None:
+        return None
+    key = integrity_key()
+    if key:
+        conn.execute(
+            "UPDATE %s SET seal = ? WHERE rowid = ?" % table,
+            (_row_seal(key, _last_seal(conn, table, rowid), rowid, values), rowid))
+    invalidate_ledger(conn)
+    return rowid
+
+
+def verify_ledger(conn):
+    """校验封印链。返回 {"sealed": bool, "breaks": {表: 第一处断链的行号}}。
+
+    "sealed" 表示这份存档里有封印行。"breaks" 为空且 sealed 为真 = 账本干净。
+
+    链开始之前的 NULL 封印一律信任：那是老版本写下的历史行，当时还没有这套东西
+    （升级上来的存档不该因为一次升级就被判成「被改过」）。但链已经开始的**之后**
+    再出现 NULL 封印，就是有人绕过程序塞了一行进来 —— 那正是不装封印的改档手法，
+    必须算断链。
+
+    没有密钥时不校验：能看出问题前提是能算出封印，算不出来就不该冤枉用户
+    （常见于只拷了 slgking.db 没拷 integrity.key）。
+    """
+    key = integrity_key(create=False)
+    breaks = {}
+    sealed = False
+    for table, cols in _LEDGER_TABLES.items():
+        rows = conn.execute("SELECT rowid AS rid, seal, %s FROM %s ORDER BY rowid"
+                            % (",".join(cols), table)).fetchall()
+        if any(row["seal"] for row in rows):
+            sealed = True
+        if not key:
+            continue
+        prev = None
+        started = False
+        for row in rows:
+            seal = row["seal"]
+            if seal is None:
+                if started:
+                    breaks.setdefault(table, row["rid"])
+                continue
+            started = True
+            if seal != _row_seal(key, prev, row["rid"], [row[c] for c in cols]):
+                # 断链之后不再往下推 prev：后面每一行都会跟着断，只报第一处就够。
+                breaks.setdefault(table, row["rid"])
+                started = False
+                prev = None
+                continue
+            prev = seal
+    return {"sealed": sealed, "breaks": breaks}
+
+
+def _conn_path(conn):
+    """这个连接指向哪个库文件 —— 缓存键。内存库返回空串。"""
+    for row in conn.execute("PRAGMA database_list"):
+        if row["name"] == "main":
+            return row["file"]
+    return ""
+
+
+def ledger_state(conn):
+    """校验结果（按库缓存）。
+
+    内存库不缓存：所有 `:memory:` 连接的路径都是空串，共用一个键会让一个测试的
+    断链结论漏到下一个测试里（sqlite3.Connection 既不给挂属性也不能弱引用，没有
+    更细的键可用）。真实存档走文件路径，照常缓存。
+    """
+    path = _conn_path(conn)
+    if not path:
+        return verify_ledger(conn)
+    state = _LEDGER_CACHE.get(path)
+    if state is None:
+        state = _LEDGER_CACHE[path] = verify_ledger(conn)
+    return state
+
+
+def invalidate_ledger(conn):
+    _LEDGER_CACHE.pop(_conn_path(conn), None)
+
+
+def _trusted(conn, table):
+    """SQL 条件：只算到第一处断链为止的行。"""
+    brk = ledger_state(conn)["breaks"].get(table)
+    return "rowid < %d" % brk if brk is not None else "1"
+
+
+def tamper_report(conn):
+    """被断链排除掉的东西；账本没被人动过就返回 None。
+
+    给个人中心用：返回 {"points": 被排掉的积分合计, "titles": [被排掉的头衔 id]}。
+    """
+    state = ledger_state(conn)
+    if not state["breaks"]:
+        return None
+    points = 0
+    brk = state["breaks"].get("points_log")
+    if brk is not None:
+        points = conn.execute("SELECT COALESCE(SUM(delta), 0) FROM points_log"
+                              " WHERE rowid >= ?", (brk,)).fetchone()[0]
+    titles = []
+    brk = state["breaks"].get("owned_titles")
+    if brk is not None:
+        titles = [row["title_id"] for row in conn.execute(
+            "SELECT title_id FROM owned_titles WHERE rowid >= ?", (brk,))]
+    return {"points": points, "titles": titles}
+
+
 # --- points / sign-in / titles ------------------------------------------------
 #
 # Persistence primitives only; the catalogue (titles, costs, redemption codes)
@@ -1617,12 +1839,12 @@ def set_pref(conn, key, value):
 
 def points_balance(conn):
     return conn.execute(
-        "SELECT COALESCE(SUM(delta), 0) FROM points_log").fetchone()[0]
+        "SELECT COALESCE(SUM(delta), 0) FROM points_log WHERE %s"
+        % _trusted(conn, "points_log")).fetchone()[0]
 
 
 def add_points(conn, delta, reason):
-    conn.execute("INSERT INTO points_log (delta, reason, at) VALUES (?,?,?)",
-                 (delta, reason, _now()))
+    _insert_sealed(conn, "points_log", (delta, reason, _now()))
     conn.commit()
 
 
@@ -1636,18 +1858,25 @@ def record_signin(conn, day, points):
     return (False, day, points)
 
 
+def makeup_signin(conn, day):
+    """Insert a sign-in row for a past `day` without awarding daily points."""
+    conn.execute("INSERT OR IGNORE INTO signin (day, at) VALUES (?,?)",
+                 (day, _now()))
+    conn.commit()
+
+
 def last_signin_day(conn):
     return conn.execute("SELECT MAX(day) FROM signin").fetchone()[0]
 
 
 def owned_title_ids(conn):
-    return {r["title_id"] for r in conn.execute("SELECT title_id FROM owned_titles")}
+    return {r["title_id"] for r in conn.execute(
+        "SELECT title_id FROM owned_titles WHERE %s"
+        % _trusted(conn, "owned_titles"))}
 
 
 def own_title(conn, title_id, source):
-    conn.execute(
-        "INSERT OR IGNORE INTO owned_titles (title_id, acquired_at, source)"
-        " VALUES (?,?,?)", (title_id, _now(), source))
+    _insert_sealed(conn, "owned_titles", (title_id, _now(), source), ignore=True)
     conn.commit()
 
 
@@ -1663,11 +1892,8 @@ def buy_title(conn, title_id, cost):
     """Deduct `cost` points and own the title, in one transaction. Returns bool."""
     if points_balance(conn) < cost:
         return False
-    conn.execute("INSERT INTO points_log (delta, reason, at) VALUES (?,?,?)",
-                 (-cost, "兑换:" + title_id, _now()))
-    conn.execute(
-        "INSERT OR IGNORE INTO owned_titles (title_id, acquired_at, source)"
-        " VALUES (?,?,?)", (title_id, _now(), "shop"))
+    _insert_sealed(conn, "points_log", (-cost, "兑换:" + title_id, _now()))
+    _insert_sealed(conn, "owned_titles", (title_id, _now(), "shop"), ignore=True)
     conn.commit()
     return True
 
@@ -1696,3 +1922,75 @@ def stats(conn):
         "rated": one("SELECT COUNT(*) FROM state WHERE my_rating IS NOT NULL"),
         "last_sync": one("SELECT MAX(ran_at) FROM sync_log"),
     }
+
+
+# --- profile / usage counters --------------------------------------------------
+#
+# Read-only aggregates for the 个人中心 page. Each is one cheap COUNT over a
+# table that is already append-only; nothing here writes, so the profile panel
+# can call them freely on every open.
+
+def collection_count(conn):
+    """Games the user has put into any collection."""
+    return conn.execute("SELECT COUNT(*) FROM collection_items").fetchone()[0]
+
+
+def rating_count(conn):
+    """Games the user has personally rated."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM state WHERE my_rating IS NOT NULL").fetchone()[0]
+
+
+def local_count(conn):
+    """Games the user has added from a local folder."""
+    return conn.execute("SELECT COUNT(*) FROM local").fetchone()[0]
+
+
+def signin_days(conn):
+    """Sign-in totals: total days and the current consecutive streak.
+
+    The streak counts back from today (or yesterday, so signing in before the
+    next midnight still reads as a run) while the days stay consecutive.
+    """
+    days = [r["day"] for r in conn.execute(
+        "SELECT day FROM signin ORDER BY day DESC")]
+    total = len(days)
+    streak = 0
+    if days:
+        cursor = date.today()
+        if days[0] != cursor.isoformat():
+            cursor -= timedelta(days=1)
+        for d in days:
+            if d == cursor.isoformat():
+                streak += 1
+                cursor -= timedelta(days=1)
+            else:
+                break
+    return {"total": total, "streak": streak}
+
+
+def lottery_count(conn):
+    """How many times the user has drawn the daily lottery."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM points_log WHERE reason = '每日抽奖' AND %s"
+        % _trusted(conn, "points_log")).fetchone()[0]
+
+
+def points_flow(conn):
+    """Points earned (delta > 0) and spent (delta < 0) across the whole ledger."""
+    trusted = _trusted(conn, "points_log")
+    earned = conn.execute(
+        "SELECT COALESCE(SUM(delta), 0) FROM points_log"
+        " WHERE delta > 0 AND %s" % trusted).fetchone()[0]
+    spent = conn.execute(
+        "SELECT COALESCE(SUM(-delta), 0) FROM points_log"
+        " WHERE delta < 0 AND %s" % trusted).fetchone()[0]
+    return {"earned": earned, "spent": spent}
+
+
+def signin_month_days(conn, year, month):
+    """Day-of-month numbers signed in during the given year/month."""
+    prefix = "%04d-%02d" % (year, month)
+    rows = conn.execute(
+        "SELECT day FROM signin WHERE day LIKE ?", (prefix + "-%",)).fetchall()
+    return {int(r["day"][-2:]) for r in rows}

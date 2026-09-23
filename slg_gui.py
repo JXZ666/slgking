@@ -9,9 +9,11 @@ Light, card-based, Win11-ish - the stock tkinter look reads as Windows XP and
 that was the one thing about the previous tools the user actively disliked.
 """
 
+import calendar
 import json
 import os
 import queue
+import random
 import sys
 import threading
 import time
@@ -19,18 +21,26 @@ import tkinter as tk
 import tkinter.font as tkfont
 import traceback
 import webbrowser
+from datetime import date
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
-from PIL import Image, ImageGrab, ImageTk
+from PIL import Image, ImageDraw, ImageGrab, ImageTk
+
+try:  # Windows-only, and the reel sounds are a nicety rather than a feature
+    import winsound
+except ImportError:  # pragma: no cover - the build is Windows-only in practice
+    winsound = None
 
 import slg_comments
 import slg_db
 import slg_engines
+import slg_remote
 import slg_scrape
 import slg_titles
 import slg_translate
 import slg_update
+import slg_util
 
 APP_VERSION = "0.22.0"
 # The sidebar shows the number and nothing else. build_stamp() still carries
@@ -260,6 +270,34 @@ def _mix(color_a, color_b, t):
         int(round(x + (y - x) * t)) for x, y in zip(a, b))
 
 
+# 至臻档的色相环。以前是把文字在下面这 6 个色值之间直接换，一帧一跳 —— 那正是
+# 「看着像劣质传说」的来源：跳变读起来是闪烁，不是流光。
+RAINBOW_STOPS = ("#e84393", "#e06a3f", "#e0a800", "#3fae5a", "#2f9bd0", "#8b5cf6")
+
+
+def _rainbow(t):
+    """色相环上的一点：t 取模到 [0,1)，在相邻色标之间线性插值，帧间连续。"""
+    t = t % 1.0
+    span = len(RAINBOW_STOPS)
+    pos = t * span
+    index = int(pos)
+    return _mix(RAINBOW_STOPS[index],
+                RAINBOW_STOPS[(index + 1) % span], pos - index)
+
+
+def _rounded_rect(canvas, x0, y0, x1, y1, r, fill):
+    """Fill a rounded rectangle on a canvas.
+
+    Tk has no rounded-rectangle item and canvas items carry no alpha, so every
+    corner in this file is four ovals with two slabs across them.
+    """
+    for cx, cy in ((x0, y0), (x1 - 2 * r, y0), (x0, y1 - 2 * r),
+                   (x1 - 2 * r, y1 - 2 * r)):
+        canvas.create_oval(cx, cy, cx + 2 * r, cy + 2 * r, fill=fill, outline="")
+    canvas.create_rectangle(x0 + r, y0, x1 - r, y1, fill=fill, outline="")
+    canvas.create_rectangle(x0, y0 + r, x1, y1 - r, fill=fill, outline="")
+
+
 def _section(parent, text):
     """Small caption that breaks the sidebar's flat run of buttons into groups."""
     ctk.CTkLabel(parent, text=text, text_color=MUTED, anchor="w",
@@ -405,18 +443,61 @@ def load_cover(game, width=COVER_W, height=COVER_H):
     return ctk_img
 
 
-def load_avatar(size=72):
-    """The author's avatar, pre-cropped to a transparent circle in assets.
+def circle_avatar(img, size):
+    """Centre-crop to a square, round it off, and scale to `size`.
 
-    Cached like load_cover so a theme switch does not re-decode it, and the
+    The bundled avatar is already a transparent circle; a picture the user picks
+    is whatever shape their file was, and pasting a square into a round slot
+    leaves four corners sticking out. One crop and one mask make the two
+    indistinguishable.
+    """
+    w, h = img.size
+    side = min(w, h)
+    img = img.crop(((w - side) // 2, (h - side) // 2,
+                    (w - side) // 2 + side, (h - side) // 2 + side))
+    img = img.resize((size, size), Image.LANCZOS)
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
+    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    out.paste(img, (0, 0), mask)
+    return out
+
+
+def avatar_source(own=True):
+    """(path, mtime) of the avatar to draw.
+
+    own=True prefers a picture the user set (see slg_db.avatar_path) and falls
+    back to the bundled one. own=False forces the bundled one, because 关于 and
+    the splash are the *author's* card: they must not start showing whichever
+    picture the user put next to their own nickname.
+
+    The mtime is part of the cache key below so a freshly picked avatar takes
+    effect on the next repaint rather than the next restart.
+    """
+    if own:
+        try:
+            path = slg_db.avatar_path()
+            return path, os.path.getmtime(path)
+        except OSError:
+            pass
+    path = asset_path("avatar.png")
+    try:
+        return path, os.path.getmtime(path)
+    except OSError:
+        return None, 0
+
+
+def load_avatar(size=72, own=True):
+    """The avatar image. Cached so a theme switch does not re-decode it, and the
     module-level dict keeps the CTkImage referenced (an unreferenced CTkImage
     renders blank).
     """
-    key = ("__avatar__", size)
+    path, mtime = avatar_source(own)
+    key = ("__avatar__", size, path, mtime)
     if key in _image_cache:
         return _image_cache[key]
     try:
-        img = Image.open(asset_path("avatar.png")).convert("RGBA")
+        img = Image.open(path).convert("RGBA")
         img = img.resize((size * 2, size * 2), Image.LANCZOS)
     except Exception:  # noqa: BLE001 - a missing avatar must not crash the window
         img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -474,7 +555,8 @@ def build_stamp():
     build time is a question the user has once and then reads past forever.
     """
     if getattr(sys, "frozen", False):
-        path, channel = sys.executable, "exe"
+        path = sys.executable
+        channel = ("测试版" if "_test" in os.path.basename(path) else "exe")
     else:
         path, channel = os.path.abspath(__file__), "源码"
     try:
@@ -518,6 +600,24 @@ def card_tags(tags):
     return sorted(tags, key=lambda t: (t in GENERIC_TAGS, t))[:CARD_TAG_LIMIT]
 
 
+def shop_columns(available, tile_max, tile_min, gap=8):
+    """商城货架的 (列数, 卡宽)，按网格的实际可用宽度算。
+
+    卡宽写死过一个 104，因为「最小窗口下面板有 322px」——那是个过期前提：面板宽度
+    是窗口的 40%，默认窗口 1180 只有 288px，减掉货架栏和内边距后网格只剩 192px，
+    两张 104 的卡放不下，于是每行只排一张、四件商品被拉成四行、底下的被挤出视野。
+    现在按实际宽度回推：优先放满 `tile_max` 的卡，放不下两张就压到 `tile_min` 硬塞
+    两张，实在塞不下才退回一张。
+
+    纯函数，和 FlowFrame 的 flow_rows 一样可以脱离窗口测。
+    """
+    count = max(1, (available + gap) // (tile_max + gap))
+    if count == 1 and available >= 2 * tile_min + gap:
+        count = 2
+    width = int((available - gap * (count - 1)) // count)
+    return count, max(tile_min, min(tile_max, width))
+
+
 def flow_rows(widths, available, gap=4):
     """Row index for each item, wrapping at `available` pixels.
 
@@ -534,6 +634,107 @@ def flow_rows(widths, available, gap=4):
         used += width
         out.append(row)
     return out
+
+
+def reel_geometry(cell=52, rows=3, pad=4, slots=14):
+    """One reel's (canvas_height, tape_tiles) - the numbers that keep it covered.
+
+    A reel is a tape of tile-high symbols scrolled behind a window. The tape
+    loops every `slots` tiles, so its offset only ever lands in [0, slots), and
+    the tiles have to reach past the bottom of the window by the largest offset:
+
+        tiles * cell - slots * cell >= rows * cell + pad
+
+    Get this wrong and the tape scrolls clean off the canvas, which is exactly
+    what "three empty boxes" was: the tape had `slots` tiles and no spare, so
+    the last sliver of travel left nothing inside the window.
+
+    Pure arithmetic so the coverage can be proven in a test without a window.
+    """
+    height = rows * cell + 2 * pad
+    extra = -(-height // cell)  # ceil: whole tiles needed to cross the window
+    return height, slots + extra
+
+
+# 抽奖弹窗底部常驻的免责声明。奖品全部是软件内的积分与虚拟头衔，没有任何货币
+# 价值，也不涉及任何形式的真实下注——这话得写在用户看得见的地方，而不是只留在
+# 开发者的脑子里。
+SLOT_DISCLAIMER = ("本玩法为纯娱乐：奖品仅为软件内积分与虚拟头衔，无货币价值，"
+                   "不可兑换现金或实物，与真实赌博无关。")
+
+
+def lottery_spin_schedule(slots=18, ticks=26, start_delay=16, end_delay=200,
+                          bounce=0.09):
+    """(delay_ms, step_in_slots) per tick, for one lottery reel.
+
+    Fast on the first tick and decelerating to a crawl, so the reel reads as
+    losing momentum rather than stopping dead. The steps always sum to exactly
+    `slots`, which is what lands the strip centred on a symbol instead of
+    between two - and the last two entries are a small rebound, the little
+    settle a real reel does.
+
+    Pure maths, so the shape can be tested without opening a window.
+    """
+    span = max(1, ticks - 1)
+    weights = [max(1.0 - (i / span) ** 2.2, 0.05) for i in range(ticks)]
+    total = sum(weights)
+    steps = [slots * w / total for w in weights]
+    steps[-1] += slots - sum(steps)  # absorb the rounding drift
+    out = []
+    for i, step in enumerate(steps):
+        frac = i / span
+        delay = int(round(start_delay + (end_delay - start_delay) * frac ** 1.5))
+        out.append((delay, step))
+    out.append((80, -bounce))
+    out.append((70, bounce))
+    return out
+
+
+# --- 抽奖音效 ---------------------------------------------------------------------
+# winsound.Beep blocks its caller for the length of the tone, so it can never run
+# on the reel's after() tick - that would stutter the animation. One worker plays
+# a short queue in order, and a full queue drops the tone: falling behind the
+# animation sounds worse than missing a tick.
+
+_sound_queue = queue.Queue(maxsize=4)
+_sound_worker = None
+
+
+def _sound_loop():
+    while True:
+        freq, dur_ms = _sound_queue.get()
+        try:
+            winsound.Beep(int(freq), int(dur_ms))
+        except Exception:  # noqa: BLE001 - no sound device must not break the draw
+            pass
+
+
+def _play_tone(freq, dur_ms):
+    global _sound_worker
+    if winsound is None:
+        return
+    if _sound_worker is None or not _sound_worker.is_alive():
+        _sound_worker = threading.Thread(target=_sound_loop, daemon=True)
+        _sound_worker.start()
+    try:
+        _sound_queue.put_nowait((freq, dur_ms))
+    except queue.Full:
+        pass
+
+
+def lottery_jingle(grand, jackpot=False):
+    """The notes played when the reels stop. Queued tones play end to end.
+
+    jackpot is the 0.01% 幸运之王 fanfare - one note longer and a fifth higher at
+    the end, so the player who actually hits it can hear that this was not the
+    ordinary title win even before reading the result line.
+    """
+    if jackpot:
+        return ((784, 90), (988, 90), (1175, 90), (1568, 120), (1976, 120),
+                (2349, 380))
+    if grand:
+        return ((784, 90), (988, 90), (1175, 90), (1568, 240))
+    return ((880, 80), (1175, 150))
 
 
 class FlowFrame(ctk.CTkFrame):
@@ -677,7 +878,11 @@ class _Splash(ctk.CTkToplevel):
         the window behind it on a 150% display. Rebuilt on the first layout call
         because the scaling factor is not known until the window is mapped.
         """
-        scale = self._apply_window_scaling(1.0) or 1.0
+        # _get_window_scaling() rather than _apply_window_scaling(1.0): the
+        # latter returns int(value * scaling), so the single point it was scaled
+        # by was truncated to 1 and the splash stayed at 100% type on every
+        # display above it.
+        scale = self._get_window_scaling()
         self._title_font = ui_tkfont(int(round(22 * scale)), "bold")
         self._small_font = ui_tkfont(int(round(12 * scale)))
         self._pct_font = ui_tkfont(int(round(11 * scale)))
@@ -685,17 +890,22 @@ class _Splash(ctk.CTkToplevel):
     def _centre(self):
         """Park the card in the middle of the screen, once it has a size.
 
-        Measured rather than computed from the requested geometry: geometry()
-        takes real pixels for the position but multiplies the size by the display
-        scaling, so (screen - 420) / 2 would land the card half that growth off
-        centre. The window is mapped by now, so winfo_width() is the real size.
+        Both numbers have to be in the same unit. CTk multiplies every size it
+        is handed by the display scaling, so a window asked for at 420x260 is
+        really 630x390 on a 150% display and winfo_width() reports that grown
+        value - while winfo_screenwidth() stays in the virtualised (unscaled)
+        units the process sees. Subtracting one from the other used to land the
+        card at 538,298 on a 2560x1600 screen whose centre is 965,605. Scaling
+        the screen up by that same factor puts the two back in one space.
         """
         w, h = self.winfo_width(), self.winfo_height()
         if w <= 1 or h <= 1:      # not mapped yet; the next configure retries
             return
         self._centred = True
-        self.geometry("+%d+%d" % ((self.winfo_screenwidth() - w) // 2,
-                                  (self.winfo_screenheight() - h) // 2 - 40))
+        scale = self._get_window_scaling()
+        sw = int(self.winfo_screenwidth() * scale)
+        sh = int(self.winfo_screenheight() * scale)
+        self.geometry("+%d+%d" % ((sw - w) // 2, (sh - h) // 2))
 
     # --- drawing -------------------------------------------------------------
 
@@ -871,6 +1081,8 @@ class _Splash(ctk.CTkToplevel):
 class App(ctk.CTk):
     def __init__(self, notify=True):
         super().__init__()
+        # Before anything else: a callback that raises must leave a trace.
+        self.report_callback_exception = self._report_callback_exception
         self.title(APP_TITLE)
         self.geometry("1180x760")
         self.minsize(1020, 600)
@@ -932,6 +1144,7 @@ class App(ctk.CTk):
         self.sort = "score"
         self.sort_desc = SORT_DEFAULT_DESC[self.sort]
         self.selected = None
+        self._panel_mode = "game"
         self.rows = []
         # 1-based, and it indexes _page_slice(). self.rows stays the whole
         # result set on purpose: four other places read it as such (re-finding
@@ -1017,6 +1230,10 @@ class App(ctk.CTk):
         self._update_url = slg_update.RELEASES_URL
         self._update_notes = ""
         self._update_dialog_shown = False
+        # Remote config (feature flags + announcement) and the flags extracted
+        # from it; both start empty and fill in a few seconds after launch.
+        self._remote_config = {}
+        self._remote_flags = {}
 
         if notify:
             self._splash.step("正在构建界面…", 0.55)
@@ -1040,6 +1257,8 @@ class App(ctk.CTk):
         # entirely by the smoke test, which is not a user session.
         if notify:
             self.after(3000, self._start_update_check)
+            self.after(3100, self._apply_startup_compensation)
+            self.after(3200, self._start_remote_check)
 
         if notify:
             # The bar is a real progress bar for three stages and then a fade;
@@ -1047,6 +1266,29 @@ class App(ctk.CTk):
             # "gave up three quarters of the way".
             self._splash.step("准备就绪", 1.0)
             self._finish_splash()
+
+    def _report_callback_exception(self, exc, val, tb):
+        """Turn a Tk callback explosion into a file on disk plus one dialog.
+
+        The packaged build is windowless, so `sys.stderr is None` and tkinter's
+        own reporter raises while printing the traceback - the exception vanishes
+        and the user is left with a button that "does nothing" or a dialog that
+        flashes. Appending to crash.log is the only record that survives, and it
+        is what turns the next bug report into a stack trace. The dialog is shown
+        once per session: a callback that keeps failing would otherwise bury the
+        window under identical popups.
+        """
+        path = os.path.join(slg_db.app_dir(), "crash.log")
+        slg_util.log_crash(exc, val, tb, path)
+        if getattr(self, "_crash_reported", False):
+            return
+        self._crash_reported = True
+        try:
+            messagebox.showwarning(
+                "程序内部出错了", "刚才的操作出了点问题，详细信息已记录到：\n%s\n\n"
+                "程序还能继续用，但这一步没完成。" % path, parent=self)
+        except Exception:  # noqa: BLE001 - the reporter must never explode too
+            pass
 
     def _finish_splash(self):
         """Cross-fade the splash out and the window in, then drop the splash."""
@@ -1170,7 +1412,7 @@ class App(ctk.CTk):
         self.sync_btn = self.maintenance_btn = None
         self.update_label = None
         self.qq_btn = None
-        self.profile_btn = None
+        self.profile_btn = self.signin_btn = self.shop_btn = None
 
     def _poll_system(self):
         """"system" has no callback to hang off, so sample the OS setting.
@@ -1363,7 +1605,8 @@ class App(ctk.CTk):
 
         header = ctk.CTkFrame(bar, fg_color="transparent")
         header.pack(side="top", fill="x")
-        ctk.CTkLabel(header, text="", image=load_avatar(64)).pack(pady=(18, 6))
+        ctk.CTkLabel(header, text="", image=load_avatar(64, own=False)).pack(
+            pady=(18, 6))
         ctk.CTkLabel(header, text=APP_TITLE, text_color=TEXT,
                      font=ui_font(size=19, weight="bold")).pack(pady=(0, 2),
                                                                    padx=18)
@@ -1551,15 +1794,32 @@ class App(ctk.CTk):
             hover_color=CARD_HOVER, font=ui_font(size=15),
             command=self._toggle_sort_dir)
         self.sort_dir_btn.pack(side="left", padx=(6, 0))
-        # 个人 sits in the reserved empty cell directly below the sort cluster
-        # (bar row 1, col 1), vertically centred with the VPN notice band on the
-        # left. Kept out of `right` so the sort/gear row stays one clean line.
+        # 个人 / 每日签到 / 积分商城 sit side by side in the reserved empty cell
+        # directly below the sort cluster (bar row 1, col 1), vertically centred
+        # with the VPN notice band on the left and filling the row's right edge.
+        # Kept out of `right` so the sort/gear row stays one clean line.
+        signed = slg_db.last_signin_day(self.conn) == slg_titles.today_str()
+        dev = slg_titles.dev_unlocked(self.conn)
+        prof_row = ctk.CTkFrame(bar, fg_color="transparent")
+        prof_row.grid(row=1, column=1, sticky="e", padx=(20, 0), pady=(9, 0))
         self.profile_btn = ctk.CTkButton(
-            bar, text="个人", width=64, height=38, corner_radius=8,
+            prof_row, text="个人", width=64, height=38, corner_radius=8,
             fg_color=CARD, text_color=TEXT, hover_color=CARD_HOVER,
             font=ui_font(size=13), command=self.open_profile)
-        self.profile_btn.grid(row=1, column=1, sticky="e",
-                              padx=(20, 0), pady=(9, 0))
+        self.profile_btn.pack(side="left")
+        signin_text = "无限签到" if dev else ("今日已签到" if signed else "每日签到")
+        signin_state = "normal" if dev else ("disabled" if signed else "normal")
+        self.signin_btn = ctk.CTkButton(
+            prof_row, text=signin_text, width=88, height=38,
+            corner_radius=8, fg_color=CARD, text_color=TEXT, hover_color=CARD_HOVER,
+            font=ui_font(size=13), state=signin_state,
+            command=self._on_signin_click)
+        self.signin_btn.pack(side="left", padx=(6, 0))
+        self.shop_btn = ctk.CTkButton(
+            prof_row, text="积分商城", width=88, height=38, corner_radius=8,
+            fg_color=CARD, text_color=TEXT, hover_color=CARD_HOVER,
+            font=ui_font(size=13), command=self.open_shop)
+        self.shop_btn.pack(side="left", padx=(6, 0))
         # The gear lands on 设置, not 关于: the theme switch lives in there now,
         # and 关于 is the first row inside it. Same width as the button it
         # replaced, taller to match the two controls beside it.
@@ -2116,6 +2376,12 @@ class App(ctk.CTk):
                 game.get("origin"), game.get("promoted"))
 
     def _render_detail_if_stale(self):
+        if self._panel_mode == "profile":
+            self.open_profile()
+            return
+        if self._panel_mode == "shop":
+            self.open_shop()
+            return
         if self._detail_signature() == self._detail_sig:
             return
         self._render_detail()
@@ -2247,8 +2513,11 @@ class App(ctk.CTk):
 
     def select(self, game):
         old = self.selected
-        if old is not None and old["id"] == game["id"]:
+        # In profile mode the panel is showing 个人中心, not this game - so even
+        # a re-click on the same game must switch the panel back to game view.
+        if old is not None and old["id"] == game["id"] and self._panel_mode == "game":
             return  # already open; rebuilding the panel would just flicker
+        self._panel_mode = "game"
         # dict(), not the row itself: sqlite3.Row is read-only and the status
         # and rating buttons write their new value back into this object.
         self.selected = dict(game)
@@ -2358,6 +2627,7 @@ class App(ctk.CTk):
         order.extend(self._detail_action(
             d, parts, "url", "在浏览器打开 dikgames 页面", pady=(10, 4)))
 
+        order.extend(self._build_detail_back_profile(d, parts))
         order.extend(self._build_detail_share(d, parts))
         order.extend(self._build_detail_open_folder(d, parts))
         order.extend(self._build_detail_collect(d, parts))
@@ -2793,6 +3063,10 @@ class App(ctk.CTk):
                             hover_color=CARD_HOVER, command=command)
         parts[key] = btn
         return [(key, btn, {"fill": "x", "padx": 18, "pady": pady})]
+
+    def _build_detail_back_profile(self, d, parts):
+        return self._detail_action(d, parts, "back_profile", "返回个人",
+                                   self.open_profile)
 
     def _build_detail_share(self, d, parts):
         return self._detail_action(d, parts, "share", "分享截图",
@@ -3393,23 +3667,92 @@ class App(ctk.CTk):
 
     # --- dialogs --------------------------------------------------------------
 
-    def _new_dialog(self, title, geometry=None):
+    def _new_dialog(self, title, geometry=None, parent=None):
         """A dialog window with the two things every one of them needs.
 
         Escape closes it - Tk hands a bare Toplevel no bindings at all - and
         re-opening the same dialog reuses the window instead of stacking a
         second copy, which is what clicking 帮助文档 twice used to do.
+
+        parent is where it lands: a dialog opened from another dialog (头衔简介
+        over 我的头衔) belongs over that one, not over the main window.
         """
         for child in self.winfo_children():
-            if isinstance(child, ctk.CTkToplevel) and child.title() == title:
+            if isinstance(child, ctk.CTkToplevel) and child.winfo_exists() \
+                    and child.title() == title:
                 child.destroy()
         win = ctk.CTkToplevel(self)
         win.title(title)
-        if geometry:
-            win.geometry(geometry)
-        win.transient(self)
+        win.transient(parent if parent is not None else self)
         win.bind("<Escape>", lambda e: win.destroy())
+        win.lift()
+
+        def _relift():
+            if win.winfo_exists():
+                win.lift()
+        win.after(120, _relift)
+        if geometry:
+            w, h = geometry.split("x")
+            self._place(win, int(w), int(h), parent)
+        else:
+            self._center_on_parent(win, parent)
         return win
+
+    def _place(self, win, width, height, parent=None):
+        """Size and centre a dialog in one geometry() call.
+
+        Tk does not report a Toplevel's size back until it is mapped - long after
+        the caller needs the position - so centring on winfo_width() measured the
+        placeholder CTk hands out (200x200) and parked the dialog wherever that
+        happened to land. The size the caller asked for is the only trustworthy
+        number here. Real pixels for the position, unscaled units for the size:
+        CTk multiplies the width and height by the display scale and passes the
+        +x+y through untouched.
+        """
+        base = self if parent is None else parent
+        win.update_idletasks()
+        base.update_idletasks()
+        scale = ctk.ScalingTracker.get_window_scaling(win)
+        x = base.winfo_rootx() + (base.winfo_width() - width * scale) // 2
+        y = base.winfo_rooty() + (base.winfo_height() - height * scale) // 2
+        win.geometry("%dx%d+%d+%d" % (width, height, max(x, 0), max(y, 0)))
+
+    def _center_on_parent(self, win, parent=None):
+        """Park a dialog over the middle of its parent window.
+
+        Tk defaults a Toplevel to a cascade position near the top-left of the
+        screen; that is why every dialog used to open up there. geometry() takes
+        real pixels for the position, so the offset is measured from winfo_root*
+        rather than computed from the requested size.
+        """
+        base = self if parent is None else parent
+        win.update_idletasks()
+        w, h = win.winfo_width(), win.winfo_height()
+        if w <= 1 or h <= 1:
+            return
+        x = base.winfo_rootx() + (base.winfo_width() - w) // 2
+        y = base.winfo_rooty() + (base.winfo_height() - h) // 2
+        win.geometry("+%d+%d" % (max(x, 0), max(y, 0)))
+
+    def _fit_dialog(self, win, width, parent=None):
+        """Height a dialog from its actual content, clamped to the screen.
+
+        Every dialog here used to hard-code a geometry, and CTk multiplies that
+        number by the display scale (1.5 on the machine this was written on): a
+        "340x432" is really 510x648, and the moment the content grew past it the
+        last widget was simply cut off - which is exactly how 幸运之王的获得方式
+        and the lottery's disclaimer disappeared. reqheight() is in real pixels
+        while geometry() is in unscaled units, hence the division by the scale;
+        that mismatch is the whole trick.
+
+        Callers with text of unpredictable length keep the middle in a scrollable
+        frame so that this clamp is never the thing that hides a control.
+        """
+        win.update_idletasks()
+        scale = ctk.ScalingTracker.get_window_scaling(win)
+        limit = int(win.winfo_screenheight() * 0.9)
+        height = int(min(win.winfo_reqheight() / float(scale), limit))
+        self._place(win, width, height, parent)
 
     def _dialog_rows(self, win, entries, state="normal", parent=None):
         """A dialog body of rows: one button over one blurb, identically styled.
@@ -3443,24 +3786,12 @@ class App(ctk.CTk):
         t = slg_titles.title_by_id(title_id)
         return slg_titles.RARITY_COLORS.get(t["rarity"], MUTED) if t else MUTED
 
-    def _obtain_hint(self, t):
-        if t["obtain"] == "default":
-            return "默认"
-        if t["obtain"] == "code":
-            return "兑换码获取"
-        if t["obtain"] == "shop":
-            hint = "积分兑换（%d 分）" % t["cost"]
-            if t.get("limited_until"):
-                hint += " · 限时"
-            return hint
-        return ""
-
     def _title_badge(self, parent, title_id, animate=True):
         """A rarity badge drawn on a canvas, so the equipped title can glow.
 
         普通/稀有 are static; 史诗 breathes, 传说 gets a sweeping shine and 至臻
-        cycles through a rainbow ramp. The rarity names never show - the colour
-        and the motion are the whole signal.
+        flows through a continuous colour ramp. The rarity names never show - the
+        colour and the motion are the whole signal.
         """
         t = slg_titles.title_by_id(title_id) or {"name": "普通用户", "rarity": "普通"}
         rarity = t["rarity"]
@@ -3472,9 +3803,13 @@ class App(ctk.CTk):
         c = tk.Canvas(parent, width=w, height=h, highlightthickness=0, bg=BG)
         tint = _mix(BG, color, 0.16)
         r = h // 2
-        c.create_oval(0, 0, h, h, fill=tint, outline="")
-        c.create_oval(w - h, 0, w, h, fill=tint, outline="")
-        c.create_rectangle(r, 0, w - r, h, fill=tint, outline="")
+        pills = [c.create_oval(0, 0, h, h, fill=tint, outline=""),
+                 c.create_oval(w - h, 0, w, h, fill=tint, outline=""),
+                 c.create_rectangle(r, 0, w - r, h, fill=tint, outline="")]
+        # 至臻的描边靠这一层 1px 的同色影子：画在主字下面，白字就有了彩边，比整颗
+        # 字在彩虹里跳要稳。其他档一律隐藏。
+        shadow = c.create_text(w // 2 + 1, h // 2 + 1, text=name, fill=color,
+                               font=font, state="hidden")
         text_item = c.create_text(w // 2, h // 2, text=name, fill=color, font=font)
         shine = c.create_rectangle(-44, h * 0.12, -22, h * 0.88,
                                    fill=_mix(color, "#ffffff", 0.75), outline="")
@@ -3500,8 +3835,16 @@ class App(ctk.CTk):
                 c.coords(shine, x, h * 0.12, x + 22, h * 0.88)
                 c.itemconfig(shine, state="normal")
             elif rarity == "至臻":
-                ramp = ("#e84393", "#e06a3f", "#e0a800", "#3fae5a", "#2f9bd0", "#8b5cf6")
-                c.itemconfig(text_item, fill=ramp[n % len(ramp)])
+                # 一整圈 7.2 秒（180 帧 × 40ms）：慢到看得出是流光，不是闪烁。
+                hue = _rainbow(n / 180.0)
+                fill = _mix(BG, hue, 0.24)
+                for item in pills:
+                    c.itemconfig(item, fill=fill)
+                c.itemconfig(shadow, fill=hue, state="normal")
+                c.itemconfig(text_item, fill=_mix(hue, "#ffffff", 0.5))
+                x = -44 + (n * 2) % (w + 66)
+                c.coords(shine, x, h * 0.12, x + 12, h * 0.88)
+                c.itemconfig(shine, fill=_mix(hue, "#ffffff", 0.85), state="normal")
             c.after(40, tick)
 
         c.after(40, tick)
@@ -3515,14 +3858,300 @@ class App(ctk.CTk):
         win.destroy()
         self.open_titles()
 
-    def _do_signin(self, win, sign_btn, bal_label):
-        already, _day, gained = slg_titles.signin(self.conn)
-        if already:
-            return
-        sign_btn.configure(text="今日已签到", state="disabled")
-        bal_label.configure(text="积分：%d" % slg_db.points_balance(self.conn))
+    # Report event names to the words the panel shows. The wire names stay
+    # stable so the aggregate keeps working across client versions; only the
+    # display changes here. An unknown name falls through untranslated rather
+    # than disappearing, so a new event is visible before it is labelled.
+    _EVENT_LABELS = {
+        "launch": "启动",
+        "snapshot": "库存快照",
+        "signin": "签到",
+        "lottery": "抽奖",
+        "buy": "购买",
+        "redeem": "兑换",
+    }
 
-    def _edit_nickname(self, parent):
+    def _show_stats_panel(self):
+        """Developer-only read panel of the server's anonymous aggregate stats."""
+        win = self._new_dialog("数据统计（只读）", "460x680")
+        self._stats_win = win
+        head = ctk.CTkFrame(win, fg_color="transparent")
+        head.pack(fill="x", padx=16, pady=(16, 0))
+        ctk.CTkLabel(head, text="匿名统计", text_color=TEXT,
+                     font=ui_font(size=16, weight="bold")).pack(side="left")
+        ctk.CTkButton(head, text="刷新", width=56, height=26, corner_radius=8,
+                      fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+                      font=ui_font(size=12),
+                      command=self._reload_stats).pack(side="right")
+        ctk.CTkLabel(win, text="只有匿名事件和设备数，不含昵称、游戏名、评论内容",
+                     text_color=MUTED, font=ui_font(size=10)).pack(
+            anchor="w", padx=16, pady=(4, 10))
+        # Scrollable: the panel now stacks cards, a 14-day table, the ranking and
+        # the group code, which together outgrow any dialog worth showing.
+        self._stats_body = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        self._stats_body.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        self._reload_stats()
+
+    def _reload_stats(self):
+        body = getattr(self, "_stats_body", None)
+        if body is None:
+            return
+        for child in body.winfo_children():
+            child.destroy()
+        ctk.CTkLabel(body, text="正在从服务器拉取…", text_color=MUTED,
+                     font=ui_font(size=12)).pack(pady=20)
+        threading.Thread(target=self._stats_worker, daemon=True).start()
+
+    def _stats_worker(self):
+        self.queue.put(("stats", slg_remote.fetch_stats()))
+
+    def _fill_stats(self, result):
+        win = getattr(self, "_stats_win", None)
+        body = getattr(self, "_stats_body", None)
+        if win is None or body is None:
+            return
+        try:
+            if not win.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        status, stats = result
+        for child in body.winfo_children():
+            child.destroy()
+        if status != "ok":
+            self._stats_problem(body, status)
+            return
+
+        events = stats.get("events") or {}
+        recent = (stats.get("last_report") or "—").replace("T", " ")
+        # 口径写在标签里：这两个数是「从部署那天起」的累计值，不是日活，也不是
+        # 此刻在线的机器数。之前叫「活跃设备」，读起来像日活，是个歧义。
+        self._stats_cards(body, (
+            ("累计设备（去重）", str(stats.get("devices", 0))),
+            ("累计事件", str(sum(events.values()))),
+            ("最近上报", recent[-14:] if recent != "—" else "—"),
+        ))
+        self._stats_daily(body, stats.get("by_day") or [])
+        self._stats_group_code(body)
+        if not events:
+            ctk.CTkLabel(
+                body, text="服务器上还没有任何上报。\n"
+                           "部署完成后，客户端下次启动才会开始产生数据。",
+                text_color=MUTED, font=ui_font(size=11), justify="left").pack(
+                anchor="w", pady=(14, 0))
+            return
+
+        ctk.CTkLabel(body, text="事件排行（累计）", text_color=TEXT,
+                     font=ui_font(size=12, weight="bold")).pack(
+            anchor="w", pady=(16, 6))
+        ranked = sorted(events.items(), key=lambda kv: (-kv[1], kv[0]))
+        top = ranked[0][1] or 1
+        box = ctk.CTkScrollableFrame(body, fg_color="transparent", height=170)
+        box.pack(fill="both", expand=True)
+        for name, count in ranked:
+            self._stats_bar(box, self._EVENT_LABELS.get(name, name), count, top)
+
+    def _stats_daily(self, parent, by_day):
+        """近 N 天：每天一行，回答「这是不是每日统计」。
+
+        每行读作「9-23：事件 12 · 设备 3」。设备是当天出现过的去重安装数——这
+        才是「日活」的意思，上面那张卡的累计数不是。
+        """
+        if not by_day:
+            return
+        head = ctk.CTkFrame(parent, fg_color="transparent")
+        head.pack(fill="x", pady=(16, 6))
+        ctk.CTkLabel(head, text="近 %d 天" % len(by_day), text_color=TEXT,
+                     font=ui_font(size=12, weight="bold")).pack(side="left")
+        ctk.CTkLabel(head, text="事件 / 当日设备", text_color=MUTED,
+                     font=ui_font(size=10)).pack(side="right")
+        top = max([d.get("events", 0) for d in by_day] + [1])
+        for entry in by_day:
+            day = (entry.get("day") or "")[5:] or "—"
+            events = entry.get("events", 0)
+            self._stats_bar(parent, day, events, top, width=96,
+                            note="%d 台" % entry.get("devices", 0))
+
+    def _stats_group_code(self, parent):
+        """今日「群友」兑换码：作者要把它贴到群里，所以顺手给个复制按钮。
+
+        纯本地算出来的（HMAC(日期)），不依赖服务器——连不上也照样显示。
+        """
+        box = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=10)
+        box.pack(fill="x", pady=(16, 0))
+        head = ctk.CTkFrame(box, fg_color="transparent")
+        head.pack(fill="x", padx=12, pady=(10, 0))
+        ctk.CTkLabel(head, text="今日群友兑换码", text_color=ACCENT,
+                     font=ui_font(size=12, weight="bold")).pack(side="left")
+        ctk.CTkLabel(head, text=slg_titles.today_str(), text_color=MUTED,
+                     font=ui_font(size=10)).pack(side="right")
+        _copy_button(box, slg_titles.group_code(), slg_titles.group_code(),
+                     self, fill="x", padx=12, pady=(8, 4))
+        ctk.CTkLabel(box, text="每天自动换一次，跨天后旧码失效。",
+                     text_color=MUTED, font=ui_font(size=10)).pack(
+            anchor="w", padx=12, pady=(0, 10))
+
+    def _stats_cards(self, parent, cells):
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x")
+        for i, (label, value) in enumerate(cells):
+            cell = ctk.CTkFrame(row, fg_color=CARD, corner_radius=8)
+            cell.pack(side="left", expand=True, fill="x",
+                      padx=(0, 0 if i == len(cells) - 1 else 6))
+            ctk.CTkLabel(cell, text=value, text_color=ACCENT,
+                         font=ui_font(size=16, weight="bold")).pack(pady=(10, 0))
+            ctk.CTkLabel(cell, text=label, text_color=MUTED,
+                         font=ui_font(size=10)).pack(pady=(0, 8))
+
+    def _stats_bar(self, parent, label, count, top, width=132, note=""):
+        """One row of the ranking: name, a bar scaled against the largest, count.
+
+        `note` carries the second number the daily rows need (that day's device
+        count) without turning this into a two-purpose widget.
+        """
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", pady=3)
+        ctk.CTkLabel(row, text=label, width=76, anchor="w", text_color=TEXT,
+                     font=ui_font(size=12)).pack(side="left")
+        track = ctk.CTkFrame(row, fg_color=CHIP, width=width, height=8,
+                             corner_radius=4)
+        track.pack(side="left", padx=(0, 10))
+        track.pack_propagate(False)
+        # A zero-width bar disappears, which reads as "row missing" rather than
+        # "no events", so even the smallest count keeps a visible stub.
+        ctk.CTkFrame(track, fg_color=ACCENT, height=8, corner_radius=4,
+                     width=max(4, int(width * count / top))).pack(side="left")
+        ctk.CTkLabel(row, text=str(count), text_color=ACCENT,
+                     font=ui_font(size=12, weight="bold")).pack(side="left")
+        if note:
+            ctk.CTkLabel(row, text="· " + note, text_color=MUTED,
+                         font=ui_font(size=10)).pack(side="left", padx=(4, 0))
+
+    def _stats_problem(self, body, status):
+        """Name the failure and its fix. An empty panel says none of this.
+
+        These otherwise render identically - as nothing - while needing
+        different actions, only one of which is to wait for data.
+        """
+        if status == "missing":
+            text = ("服务器上还没有 /stats.json，说明它跑的 serve_catalog 是旧版：\n"
+                    "远程公告、远程开关和匿名统计一直没部署成功过。\n\n"
+                    "在你本机项目目录里跑这一条（会提示输密码）：\n"
+                    "python deploy_server.py --user ubuntu")
+        elif status == "locked":
+            text = ("服务器拒绝返回数据：它认的统计密钥和本机这份对不上。\n\n"
+                    "本机密钥文件：%s\n"
+                    "重新部署一次就会用本机的密钥覆盖服务器的。"
+                    % slg_remote.stats_key_path())
+        else:
+            text = ("连不上服务器，或对方返回的不是统计数据。\n"
+                    "先确认网络能打开 43.130.240.89:8080。")
+        ctk.CTkLabel(body, text=text, text_color=MUTED, font=ui_font(size=11),
+                     wraplength=390, justify="left").pack(anchor="w", pady=8)
+
+    def _unlock_all_titles(self):
+        gained = slg_titles.unlock_all_titles(self.conn)
+        messagebox.showinfo("开发者特权", "已解锁全部头衔（新增 %d 个）" % gained,
+                            parent=self)
+        self.open_profile()
+
+    def _on_signin_click(self):
+        if self._remote_flags.get("disable_signin"):
+            messagebox.showinfo("签到", "签到功能维护中，稍后再试", parent=self)
+            return
+        dev = slg_titles.dev_unlocked(self.conn)
+        already, _day, gained, bonus = slg_titles.signin(self.conn)
+        if already and not dev:
+            self._show_signin_result(gained=0, already=True, dev=False)
+            return
+        slg_remote.report(self.conn, "signin", {"dev": dev})
+        if not dev and self.signin_btn is not None and self.signin_btn.winfo_exists():
+            self.signin_btn.configure(text="今日已签到", state="disabled")
+        self._show_signin_result(gained=gained, bonus=bonus, already=False, dev=dev)
+        if self._panel_mode == "profile":
+            self.open_profile()
+        elif self._panel_mode == "shop":
+            self.open_shop()
+
+    def _show_signin_result(self, gained, already, dev, bonus=0):
+        """签到结果弹窗，成功时带撒花动画。开发者模式下可反复签到。"""
+        win = self._new_dialog("每日签到", "360x320")
+        canvas = tk.Canvas(win, width=360, height=150, highlightthickness=0, bg=BG)
+        canvas.pack(fill="x")
+        if already:
+            ctk.CTkLabel(win, text="今日已签到", text_color=TEXT,
+                         font=ui_font(size=16, weight="bold")).pack(pady=(10, 2))
+            ctk.CTkLabel(win, text="明天再来吧", text_color=MUTED,
+                         font=ui_font(size=12)).pack()
+        else:
+            self._confetti(canvas, 360, 150, gained + bonus)
+            title = "无限签到" if dev else "签到成功"
+            ctk.CTkLabel(win, text=title, text_color=ACCENT,
+                         font=ui_font(size=16, weight="bold")).pack(pady=(6, 2))
+            if dev:
+                sub = "开发者模式 · 积分已到账"
+            elif bonus:
+                sub = "签到 +%d · 累签奖励 +%d" % (gained, bonus)
+            else:
+                sub = "签到 +%d 积分" % gained
+            ctk.CTkLabel(win, text=sub, text_color=MUTED,
+                         font=ui_font(size=12)).pack()
+        ctk.CTkButton(win, text="知道了", height=34, width=120, corner_radius=8,
+                      fg_color=ACCENT, text_color=ON_ACCENT, hover_color=CARD_HOVER,
+                      font=ui_font(size=13), command=win.destroy).pack(pady=(14, 0))
+
+    def _confetti(self, canvas, w, h, gained, label="+%d 积分", ramp=None):
+        """Falling confetti plus a counting-up +N 积分, run on one after loop.
+
+        `label=None` drops the counter and `ramp` swaps the palette, which is
+        how the lottery reuses this for a gold shower over a title win - a
+        second particle system for the same effect would be two things to keep
+        in step.
+        """
+        ramp = ramp or ("#e84393", "#e06a3f", "#e0a800", "#3fae5a", "#2f9bd0",
+                        "#8b5cf6")
+        parts = []
+        rects = []
+        for _ in range(64):
+            size = random.randint(3, 7)
+            p = {"x": random.uniform(0, w), "y": random.uniform(-h, 0),
+                 "vy": random.uniform(1.6, 3.6), "dx": random.uniform(-1.2, 1.2),
+                 "color": random.choice(ramp)}
+            parts.append(p)
+            rects.append(canvas.create_rectangle(
+                p["x"], p["y"], p["x"] + size, p["y"] + size,
+                fill=p["color"], outline=""))
+        text_item = None
+        if label:
+            text_item = canvas.create_text(w // 2, h // 2 - 8, text="+0 积分",
+                                          fill=ACCENT, font=ui_tkfont(22, "bold"))
+        start = time.time()
+
+        def tick():
+            try:
+                if not canvas.winfo_exists():
+                    return
+            except tk.TclError:
+                return
+            for i, p in enumerate(parts):
+                p["y"] += p["vy"]
+                p["x"] += p["dx"]
+                if p["y"] > h + 8:
+                    p["y"] = -8
+                    p["x"] = random.uniform(0, w)
+                canvas.coords(rects[i], p["x"], p["y"],
+                              p["x"] + 5, p["y"] + 5)
+            if text_item is not None:
+                progress = min(1.0, (time.time() - start) / 0.6)
+                shown = int(gained * progress)
+                pulse = 1 - abs(2 * (progress % 0.5) / 0.5 - 1) if progress < 1 else 0
+                color = _mix(ACCENT, "#ffffff", 0.35 * pulse) if pulse else ACCENT
+                canvas.itemconfig(text_item, text=label % shown, fill=color)
+            canvas.after(30, tick)
+
+        canvas.after(30, tick)
+
+    def _edit_nickname(self):
         win = self._new_dialog("修改昵称", "340x180")
         cur = slg_db.get_pref(self.conn, "profile.nickname", "") or ""
         ctk.CTkLabel(win, text="设置你的昵称（本地保存，随时可改）", text_color=TEXT,
@@ -3543,7 +4172,6 @@ class App(ctk.CTk):
                 slg_db.set_pref(self.conn, "profile.registered_at",
                                 time.strftime("%Y-%m-%d %H:%M:%S"))
             win.destroy()
-            parent.destroy()
             self.open_profile()
 
         ctk.CTkButton(win, text="保存", height=32, width=90, corner_radius=8,
@@ -3551,53 +4179,327 @@ class App(ctk.CTk):
                       font=ui_font(size=12), command=save).pack(pady=(12, 0))
 
     def open_profile(self):
-        win = self._new_dialog("个人中心", "420x560")
+        # 个人中心 shares the detail panel: the first click swaps the panel over
+        # (temporarily covering any game shown), and the actions inside it -
+        # 修改昵称/查看头衔/兑换码 - still open dialogs. The content is grouped
+        # into labelled sections so the flat pile of numbers reads as a dashboard.
+        self._panel_mode = "profile"
+        self._destroy_detail()
+        d = self.detail
         nickname = slg_db.get_pref(self.conn, "profile.nickname", "") or ""
         equipped = slg_db.get_equipped_title(self.conn) or slg_titles.DEFAULT_TITLE_ID
-        day = slg_titles.today_str()
-        signed = slg_db.last_signin_day(self.conn) == day
+        dev = slg_titles.dev_unlocked(self.conn)
 
-        head = ctk.CTkFrame(win, fg_color="transparent")
-        head.pack(fill="x", padx=16, pady=(16, 8))
-        ctk.CTkLabel(head, text=(nickname[:1] or "游"), width=48, height=48,
-                     corner_radius=24, fg_color=ACCENT, text_color=ON_ACCENT,
-                     font=ui_font(size=20, weight="bold")).pack(side="left")
+        # 身份卡：头像 + 昵称 + 头衔，右侧积分。换过头像的人显示那张图，没换过的
+        # 仍是昵称首字 —— 默认头像属于作者，挂到别人名下会认错人。
+        head = ctk.CTkFrame(d, fg_color=CARD, corner_radius=10)
+        head.pack(fill="x", padx=16, pady=(20, 0))
+        if os.path.exists(slg_db.avatar_path()):
+            avatar = ctk.CTkLabel(head, text="", image=load_avatar(48))
+        else:
+            avatar = ctk.CTkLabel(head, text=(nickname[:1] or "游"), width=48,
+                                  height=48, corner_radius=24, fg_color=ACCENT,
+                                  text_color=ON_ACCENT,
+                                  font=ui_font(size=20, weight="bold"))
+        avatar.pack(side="left", padx=14, pady=14)
+        if dev:
+            avatar.configure(cursor="hand2")
+            avatar.bind("<Button-1>", lambda e: self.pick_avatar())
         info = ctk.CTkFrame(head, fg_color="transparent")
         info.pack(side="left", padx=(12, 0))
         ctk.CTkLabel(info, text=nickname or "未设置昵称", text_color=TEXT,
                      font=ui_font(size=16, weight="bold")).pack(anchor="w")
         self._title_badge(info, equipped).pack(anchor="w", pady=(6, 0))
+        ctk.CTkLabel(head, text="%d 积分" % slg_db.points_balance(self.conn),
+                     text_color=ACCENT, font=ui_font(size=16, weight="bold")).pack(
+            side="right", padx=16)
 
-        bal_label = ctk.CTkLabel(win, text="积分：%d" % slg_db.points_balance(self.conn),
-                                 text_color=TEXT, font=ui_font(size=13))
-        bal_label.pack(anchor="w", padx=16, pady=(14, 0))
-        sign_btn = ctk.CTkButton(
-            win, text="今日已签到" if signed else "签到（+%d 分）" % slg_titles.DAILY_SIGNIN_POINTS,
-            height=36, corner_radius=8, fg_color=ACCENT, text_color=ON_ACCENT,
-            hover_color=CARD_HOVER, font=ui_font(size=13),
-            state="disabled" if signed else "normal",
-            command=lambda: self._do_signin(win, sign_btn, bal_label))
-        sign_btn.pack(fill="x", padx=16, pady=(6, 0))
+        # 改档警告：账本封印对不上才出现。上面那个余额已经是「只算到断链为止」
+        # 的数字，这里把被排掉的部分明说，免得用户以为积分凭空少了。
+        report = slg_db.tamper_report(self.conn)
+        if report:
+            self._tamper_notice(d, report)
 
-        ctk.CTkButton(win, text="修改昵称", height=32, corner_radius=8,
-                      fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
-                      font=ui_font(size=12),
-                      command=lambda: self._edit_nickname(win)).pack(
-            fill="x", padx=16, pady=(10, 0))
+        # 我的数据：两行统计卡。库存、行为、收支本来分散在三个小节里，各自只有
+        # 一两行字，滚动一屏全是标题 —— 合成一块才读得出「我这台机器攒了什么」。
+        flow = slg_db.points_flow(self.conn)
+        self._profile_section(d, "我的数据")
+        self._profile_cells(d, (
+            ("收藏", slg_db.collection_count(self.conn),
+             self._open_profile_collections),
+            ("已评分", slg_db.rating_count(self.conn)),
+            ("本地游戏", slg_db.local_count(self.conn)),
+        ))
+        self._profile_cells(d, (
+            ("抽奖次数", slg_db.lottery_count(self.conn)),
+            ("积分收入", flow["earned"]),
+            ("积分支出", flow["spent"]),
+        ))
 
-        ctk.CTkLabel(win, text="——————", text_color=MUTED,
-                     font=ui_font(size=11)).pack(pady=(16, 4))
-        for text, fn in (("查看头衔", self.open_titles),
-                         ("积分商城", self.open_shop),
-                         ("兑换码", self.open_redeem)):
-            ctk.CTkButton(win, text=text, height=36, corner_radius=8, anchor="w",
-                          fg_color="transparent", text_color=TEXT,
-                          hover_color=CARD, font=ui_font(size=13),
-                          command=lambda f=fn: (win.destroy(), f())).pack(
-                fill="x", padx=16, pady=(6, 0))
+        # 本月签到：日历 + 连续/累计 + 累签奖励。
+        sign = slg_db.signin_days(self.conn)
+        today = date.today()
+        first_wd, days_in_month = calendar.monthrange(today.year, today.month)
+        signed = slg_db.signin_month_days(self.conn, today.year, today.month)
+        self._profile_section(d, "本月签到",
+                              "连续 %d 天 · 累计 %d 天" % (sign["streak"], sign["total"]))
+        cal = ctk.CTkFrame(d, fg_color="transparent")
+        cal.pack(fill="x", padx=16)
+        for wd, name in enumerate(("一", "二", "三", "四", "五", "六", "日")):
+            ctk.CTkLabel(cal, text=name, text_color=MUTED, width=26,
+                         font=ui_font(size=10)).grid(row=0, column=wd, padx=1)
+        col, row = first_wd, 1
+        for day in range(1, days_in_month + 1):
+            is_signed = day in signed
+            is_today = day == today.day
+            # 漏签 = 本月、今天之前、没签过。这些格子可以点，点了就补这一天。
+            missed = (not is_signed and day < today.day
+                      and slg_titles.makeup_problem(
+                          self.conn, "%04d-%02d-%02d"
+                          % (today.year, today.month, day)) is None)
+            cell = ctk.CTkLabel(
+                cal, text=str(day), width=26, height=22, corner_radius=6,
+                fg_color=(ACCENT if is_signed
+                          else (CHIP if is_today else "transparent")),
+                text_color=(ON_ACCENT if is_signed else TEXT),
+                font=ui_font(size=10))
+            if missed:
+                # 淡红描边：一眼看清哪天漏了，而不是要去数哪几格没有颜色。
+                cell.configure(text_color=DANGER_TEXT, border_width=1,
+                               border_color=_mix(BG, DANGER_TEXT, 0.45),
+                               cursor="hand2")
+                cell.bind("<Button-1>",
+                          lambda e, d=day: self._makeup_prompt(d))
+            cell.grid(row=row, column=col, padx=1, pady=1)
+            col += 1
+            if col > 6:
+                col = 0
+                row += 1
+
+        claimed = slg_titles.claimed_milestone(self.conn)
+        ms_parts = []
+        for need in sorted(slg_titles.SIGNIN_MILESTONES):
+            mark = "已领" if claimed >= need else "+%d" % slg_titles.SIGNIN_MILESTONES[need]
+            ms_parts.append("%d天%s" % (need, mark))
+        ctk.CTkLabel(d, text="本月已签 %d 天 · 累签奖励 %s"
+                     % (len(signed), "  ".join(ms_parts)),
+                     text_color=MUTED, font=ui_font(size=11)).pack(
+            anchor="w", padx=16, pady=(4, 0))
+        if any(1 <= day < today.day and day not in signed
+               for day in range(1, days_in_month + 1)):
+            ctk.CTkLabel(d, text="红色日期是漏签，点它就能用 %d 积分补上"
+                         % slg_titles.MAKEUP_CARD_COST,
+                         text_color=MUTED, font=ui_font(size=10)).pack(
+                anchor="w", padx=16, pady=(2, 0))
+
+        self._profile_lottery_log(d)
+
+        # 头衔收集进度。
+        owned_ids = slg_db.owned_title_ids(self.conn)
+        owned_count = sum(1 for t in slg_titles.TITLES
+                          if t["obtain"] == "default" or t["id"] in owned_ids)
+        total_titles = len(slg_titles.TITLES)
+        self._profile_section(d, "头衔收集", "%d / %d" % (owned_count, total_titles))
+        title_bar = ctk.CTkProgressBar(d, height=8, corner_radius=4,
+                                       fg_color=CHIP, progress_color=ACCENT)
+        title_bar.set(owned_count / total_titles if total_titles else 0.0)
+        title_bar.pack(fill="x", padx=16)
+
+        # 操作：三个入口横排。通栏三条按钮会在面板底部堆成一堵墙，而这三个动作
+        # 权重相同、又都是短词，一行放得下。
+        self._profile_section(d, "操作")
+        acts = ctk.CTkFrame(d, fg_color="transparent")
+        acts.pack(fill="x", padx=16)
+        for i, (text, fn) in enumerate((("修改昵称", self._edit_nickname),
+                                        ("查看头衔", self.open_titles),
+                                        ("兑换码", self.open_redeem))):
+            ctk.CTkButton(acts, text=text, height=34, corner_radius=8,
+                          fg_color=CHIP, text_color=TEXT,
+                          hover_color=CARD_HOVER, font=ui_font(size=13),
+                          command=fn).pack(side="left", expand=True, fill="x",
+                                           padx=(0, 0 if i == 2 else 6))
+
+        # 开发者区：仅解锁开发者特权者可见，独立成块、ACCENT 边框区分。
+        if dev:
+            devbox = ctk.CTkFrame(d, fg_color=CARD, corner_radius=10,
+                                  border_width=1, border_color=ACCENT)
+            devbox.pack(fill="x", padx=16, pady=(18, 20))
+            ctk.CTkLabel(devbox, text="开发者", text_color=ACCENT,
+                         font=ui_font(size=12, weight="bold")).pack(
+                anchor="w", padx=12, pady=(10, 2))
+            ctk.CTkLabel(devbox, text="开发者特权已开启 · 无限签到与抽奖",
+                         text_color=MUTED, font=ui_font(size=11)).pack(
+                anchor="w", padx=12, pady=(0, 8))
+            ctk.CTkButton(devbox, text="一键解锁所有头衔", height=32, corner_radius=8,
+                          fg_color=ACCENT, text_color=ON_ACCENT,
+                          hover_color=CARD_HOVER, font=ui_font(size=12),
+                          command=self._unlock_all_titles).pack(
+                fill="x", padx=12, pady=(0, 6))
+            ctk.CTkButton(devbox, text="更换头像", height=32, corner_radius=8,
+                          fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+                          font=ui_font(size=12),
+                          command=self.pick_avatar).pack(
+                fill="x", padx=12, pady=(0, 6))
+            if os.path.exists(slg_db.avatar_path()):
+                ctk.CTkButton(devbox, text="恢复默认头像", height=30,
+                              corner_radius=8, fg_color="transparent",
+                              text_color=MUTED, hover_color=CARD_HOVER,
+                              font=ui_font(size=11),
+                              command=self.clear_avatar).pack(
+                    fill="x", padx=12, pady=(0, 6))
+            ctk.CTkButton(devbox, text="数据统计（只读）", height=32, corner_radius=8,
+                          fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+                          font=ui_font(size=12),
+                          command=self._show_stats_panel).pack(
+                fill="x", padx=12, pady=(0, 12))
+
+    def pick_avatar(self):
+        """开发者专用入口：挑一张图当头像。普通用户没有入口（见 open_profile）。"""
+        path = filedialog.askopenfilename(
+            title="选择头像", parent=self,
+            filetypes=[("图片", "*.png *.jpg *.jpeg *.bmp *.webp"),
+                       ("所有文件", "*.*")])
+        if not path:
+            return
+        ok, msg = self.set_avatar_from_file(path)
+        if ok:
+            self.open_profile()
+        else:
+            messagebox.showwarning("头像", msg, parent=self)
+
+    def clear_avatar(self):
+        try:
+            os.remove(slg_db.avatar_path())
+        except OSError:
+            pass
+        self.open_profile()
+
+    def set_avatar_from_file(self, path):
+        """把一张图存成头像，返回 (ok, msg)。
+
+        目前只有开发者特权用户能走到这里（入口在 open_profile），但这个方法本身
+        不检查权限 —— 将来要开放普通用户上传时，挂个按钮上来就行。
+        """
+        try:
+            img = Image.open(path).convert("RGBA")
+        except Exception as exc:  # noqa: BLE001 - any unreadable file is a message
+            return (False, "这张图打不开：%s" % exc)
+        try:
+            # 256 是给高 DPI 留的余量：界面上最大用到 84pt，×2 也才 168。
+            circle_avatar(img, 256).save(slg_db.avatar_path())
+        except OSError as exc:
+            return (False, "头像写不进去：%s" % exc)
+        return (True, "头像已更新")
+
+    def _profile_lottery_log(self, parent):
+        """最近抽奖：一行一条流水。没有记录时整块不画，省得面板挂着一条空标题。"""
+        rows = slg_titles.lottery_history(self.conn)[:5]
+        if not rows:
+            return
+        self._profile_section(parent, "最近抽奖",
+                              "共 %d 次" % slg_db.lottery_count(self.conn))
+        box = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=8)
+        box.pack(fill="x", padx=16)
+        for i, row in enumerate(rows):
+            line = ctk.CTkFrame(box, fg_color="transparent")
+            line.pack(fill="x", padx=10, pady=(8 if i == 0 else 2,
+                                               8 if i == len(rows) - 1 else 2))
+            ctk.CTkLabel(line, text=row.get("day", ""), text_color=MUTED,
+                         font=ui_font(size=10)).pack(side="left")
+            ctk.CTkLabel(
+                line, text=slg_titles.lottery_prize_text(row),
+                text_color=(ACCENT if row.get("kind") == "title" else TEXT),
+                font=ui_font(size=11)).pack(side="right")
+
+    def _makeup_prompt(self, day):
+        """日历点名补签：确认 → 下单 → 原地刷新个人面板。
+
+        只在日历上「今天之前且未签到」的格子上挂这个回调，所以这里不再重算一遍
+        能不能补 —— 但 slg_titles 会再校验一次（积分、日期都可能在面板开着的时候
+        被别处改动），拒绝理由直接透给用户。
+        """
+        today = date.today()
+        target = "%04d-%02d-%02d" % (today.year, today.month, day)
+        problem = slg_titles.makeup_problem(self.conn, target)
+        if problem:
+            messagebox.showinfo("补签", problem, parent=self)
+            return
+        cost = slg_titles.MAKEUP_CARD_COST
+        if not messagebox.askyesno(
+                "补签", "补签 %s？\n消耗 %d 积分。" % (target, cost),
+                parent=self):
+            return
+        ok, msg, bonus = slg_titles.buy_makeup_card(self.conn, target=target)
+        if not ok:
+            messagebox.showwarning("补签失败", msg, parent=self)
+            return
+        if bonus:
+            msg += "，累签奖励 +%d 积分" % bonus
+        messagebox.showinfo("补签成功", msg, parent=self)
+        self.open_profile()
+
+    @staticmethod
+    def _profile_cells(parent, cells):
+        """一行等宽统计卡：上面数字、下面标签。第三项可选 command，给了就让整卡可点。"""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(0, 6))
+        for i, item in enumerate(cells):
+            label_text, value = item[0], item[1]
+            command = item[2] if len(item) > 2 else None
+            cell = ctk.CTkFrame(row, fg_color=CARD, corner_radius=8)
+            cell.pack(side="left", expand=True, fill="x",
+                      padx=(0, 0 if i == len(cells) - 1 else 6))
+            if command is not None:
+                cell.configure(cursor="hand2")
+                cell.bind("<Button-1>", lambda e, c=command: c())
+            ctk.CTkLabel(cell, text=str(value), text_color=ACCENT,
+                         font=ui_font(size=17, weight="bold")).pack(pady=(10, 0))
+            ctk.CTkLabel(cell, text=label_text, text_color=MUTED,
+                         font=ui_font(size=10)).pack(pady=(0, 8))
+
+    @staticmethod
+    def _profile_section(parent, title, right=""):
+        head = ctk.CTkFrame(parent, fg_color="transparent")
+        head.pack(fill="x", padx=16, pady=(18, 6))
+        ctk.CTkLabel(head, text=title, text_color=TEXT,
+                     font=ui_font(size=12, weight="bold")).pack(side="left")
+        if right:
+            ctk.CTkLabel(head, text=right, text_color=MUTED,
+                         font=ui_font(size=11)).pack(side="right")
+
+    @staticmethod
+    def _tamper_notice(parent, report):
+        """账本封印对不上时的那块警告。
+
+        上面的余额已经只算到断链为止了，这里把被排掉的部分明说 —— 不然用户只
+        会看到积分莫名变少。措辞克制：不指控，只说程序看到的事实。
+        """
+        box = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=10,
+                           border_width=1,
+                           border_color=_mix(BG, DANGER_TEXT, 0.55))
+        box.pack(fill="x", padx=16, pady=(12, 0))
+        ctk.CTkLabel(box, text="存档被外部修改", text_color=DANGER_TEXT,
+                     font=ui_font(size=12, weight="bold")).pack(
+            anchor="w", padx=12, pady=(10, 2))
+        lines = []
+        if report["points"]:
+            lines.append("多出的 %d 积分未计入余额" % report["points"])
+        if report["titles"]:
+            names = []
+            for tid in report["titles"]:
+                t = slg_titles.title_by_id(tid)
+                names.append(t["name"] if t else tid)
+            lines.append("已失效头衔：%s" % "、".join(names))
+        ctk.CTkLabel(box, text="\n".join(lines), text_color=TEXT,
+                     font=ui_font(size=11), justify="left",
+                     wraplength=420).pack(anchor="w", padx=12)
+        ctk.CTkLabel(box, text="这份存档的积分和头衔记录被程序之外的东西动过，"
+                     "以上内容不参与计算。",
+                     text_color=MUTED, font=ui_font(size=10), justify="left",
+                     wraplength=420).pack(anchor="w", padx=12, pady=(4, 10))
 
     def open_titles(self):
-        win = self._new_dialog("我的头衔", "360x520")
+        win = self._new_dialog("我的头衔", "380x560")
         ctk.CTkLabel(win, text="我的头衔", text_color=TEXT,
                      font=ui_font(size=14, weight="bold")).pack(
             fill="x", padx=16, pady=(14, 8))
@@ -3605,72 +4507,1149 @@ class App(ctk.CTk):
         equipped = slg_db.get_equipped_title(self.conn) or slg_titles.DEFAULT_TITLE_ID
         box = ctk.CTkScrollableFrame(win, fg_color="transparent")
         box.pack(fill="both", expand=True, padx=12, pady=(0, 8))
-        for t in slg_titles.TITLES:
-            tid = t["id"]
-            is_owned = tid in owned
-            is_equipped = tid == equipped
-            color = slg_titles.RARITY_COLORS.get(t["rarity"], MUTED)
-            row = ctk.CTkFrame(box, fg_color="transparent")
-            row.pack(fill="x", padx=4, pady=4)
-            label = t["name"] + ("（使用中）" if is_equipped else "")
-            ctk.CTkLabel(row, text=label, text_color=color if is_owned else MUTED,
-                         font=ui_font(size=13, weight="bold")).pack(side="left")
-            if is_owned:
-                ctk.CTkButton(row, text="取消" if is_equipped else "装备", width=64,
-                              height=28, corner_radius=8, fg_color=CHIP,
-                              text_color=TEXT, hover_color=CARD_HOVER,
-                              font=ui_font(size=12),
-                              command=lambda tid=tid: self._equip_title(win, tid)
-                              ).pack(side="right")
-            else:
-                ctk.CTkLabel(row, text=self._obtain_hint(t), text_color=MUTED,
-                             font=ui_font(size=11)).pack(side="right")
+        # 按稀有度分节，节头写「稀有度 + 持有 n/m」。列表本来就长，再往后只会更长，
+        # 分节头是滚到一半还能知道自己掉到哪一档的唯一线索。不折叠未拥有的档 ——
+        # 折叠会把「这枚怎么拿」直接藏掉，跟列表本身的目的相反。
+        for rarity in slg_titles.RARITY_ORDER:
+            group = [t for t in slg_titles.TITLES if t["rarity"] == rarity]
+            if not group:
+                continue
+            have = sum(1 for t in group if t["id"] in owned)
+            self._title_section(box, rarity, have, len(group))
+            for t in group:
+                self._title_row(box, t, t["id"] in owned,
+                                t["id"] == equipped, win)
+
+    def _title_section(self, parent, rarity, have, total):
+        """稀有度分节头：色点 + 徽记 + 「n/m」。"""
+        color = slg_titles.RARITY_COLORS.get(rarity, MUTED)
+        head = ctk.CTkFrame(parent, fg_color="transparent")
+        head.pack(fill="x", padx=6, pady=(10, 2))
+        ctk.CTkLabel(head, text=self.SHOP_TITLE_GLYPHS.get(rarity, "●"),
+                     text_color=color, font=ui_font(size=13, weight="bold")).pack(
+            side="left")
+        ctk.CTkLabel(head, text=rarity, text_color=color,
+                     font=ui_font(size=12, weight="bold")).pack(
+            side="left", padx=(5, 0))
+        ctk.CTkLabel(head, text="%d/%d" % (have, total), text_color=MUTED,
+                     font=ui_font(size=11)).pack(side="right")
+
+    def _title_row(self, parent, t, is_owned, is_equipped, win):
+        """一条头衔：名字 + 状态、一句话简介、以及「获得方式 / 装备」两颗按钮。
+
+        简介直接摊在列表里 —— 藏进弹窗等于每次都要点一次才知道是什么。
+        """
+        color = slg_titles.RARITY_COLORS.get(t["rarity"], MUTED)
+        card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=8)
+        card.pack(fill="x", padx=4, pady=4)
+
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.pack(fill="x", padx=10, pady=(8, 0))
+        name_lbl = ctk.CTkLabel(head, text=t["name"],
+                                text_color=color if is_owned else MUTED,
+                                font=ui_font(size=13, weight="bold"))
+        name_lbl.pack(side="left")
+        if is_equipped:
+            ctk.CTkLabel(head, text="使用中", text_color=ON_ACCENT,
+                         fg_color=ACCENT, corner_radius=6, height=16,
+                         font=ui_font(size=9)).pack(side="left", padx=(6, 0))
+        elif is_owned:
+            ctk.CTkLabel(head, text="已拥有", text_color=MUTED, fg_color=CHIP,
+                         corner_radius=6, height=16,
+                         font=ui_font(size=9)).pack(side="left", padx=(6, 0))
+
+        desc_lbl = ctk.CTkLabel(card, text=t.get("desc", ""), text_color=MUTED,
+                                font=ui_font(size=10), justify="left",
+                                wraplength=280, anchor="w")
+        desc_lbl.pack(fill="x", padx=10, pady=(3, 0))
+        # 名字和简介也是打开简介的入口，跟那颗按钮同一个弹窗。
+        for lbl in (name_lbl, desc_lbl):
+            lbl.bind("<Button-1>", lambda e, t=t: self._title_info(t, win))
+            lbl.configure(cursor="hand2")
+
+        acts = ctk.CTkFrame(card, fg_color="transparent")
+        acts.pack(fill="x", padx=10, pady=(7, 8))
+        # 「获得方式」人人都有：没拿到的想知道怎么拿，拿到了的也可能想知道这枚是什么来头。
+        ctk.CTkButton(acts, text="获得方式", height=26, corner_radius=8,
+                      fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+                      font=ui_font(size=11),
+                      command=lambda t=t: self._title_info(t, win)).pack(
+            side="left", fill="x", expand=True, padx=(0, 6))
+        if is_owned:
+            ctk.CTkButton(acts, text="取消" if is_equipped else "装备", width=72,
+                          height=26, corner_radius=8, fg_color=CHIP,
+                          text_color=TEXT, hover_color=CARD_HOVER,
+                          font=ui_font(size=11),
+                          command=lambda tid=t["id"]: self._equip_title(win, tid)
+                          ).pack(side="left", fill="x", expand=True)
+
+    def _title_info(self, t, parent=None):
+        """头衔简介 + 获取路径。列表里那句点评简化过，这里给完整的一句。
+
+        顶部徽记和底部「知道了」都固定，中间可滚动：简介长短不由这里说了算
+        （幸运之王那段就比别的长一截），固定高度迟早会把按钮顶出可视区。
+        """
+        color = slg_titles.RARITY_COLORS.get(t.get("rarity"), MUTED)
+        owned = t.get("id") in slg_db.owned_title_ids(self.conn)
+        win = self._new_dialog(t.get("name", "头衔"), parent=parent)
+
+        band = ctk.CTkFrame(win, height=96, fg_color=_mix(BG, color, 0.22),
+                            corner_radius=10)
+        band.pack(fill="x", padx=16, pady=(16, 0))
+        band.pack_propagate(False)
+        ctk.CTkLabel(band, text=self.SHOP_TITLE_GLYPHS.get(t.get("rarity"), "●"),
+                     text_color=color, font=ui_font(size=44, weight="bold")).pack(
+            expand=True)
+
+        ctk.CTkLabel(win, text=t.get("name", "头衔"), text_color=TEXT,
+                     font=ui_font(size=17, weight="bold")).pack(pady=(12, 0))
+        ctk.CTkLabel(win, text=t.get("rarity", ""), text_color=color,
+                     font=ui_font(size=11)).pack(pady=(2, 0))
+
+        # 换行宽度得按**滚动区内部**算，不是按窗口：340 的滚动区去掉滚动条和左右
+        # 留白只剩 ~464 物理像素，写 480 会让最后几个字被右边缘切掉（幸运之王的
+        # 那句「一百抽」就被吃掉了一个字）。
+        body = ctk.CTkScrollableFrame(win, fg_color="transparent",
+                                      width=340, height=150)
+        body.pack(fill="both", expand=True, padx=8, pady=(6, 0))
+        for heading, text in (("简介", t.get("desc", "")),
+                              ("获得方式", slg_titles.obtain_title_text(t))):
+            ctk.CTkLabel(body, text=heading, text_color=ACCENT, anchor="w",
+                         font=ui_font(size=11, weight="bold")).pack(
+                fill="x", padx=10, pady=(10, 2))
+            ctk.CTkLabel(body, text=text, text_color=MUTED, justify="left",
+                         wraplength=440, anchor="w",
+                         font=ui_font(size=11)).pack(fill="x", padx=10)
+
+        ctk.CTkLabel(win, text="已拥有" if owned else "尚未获得",
+                     text_color=ACCENT if owned else MUTED,
+                     font=ui_font(size=11, weight="bold")).pack(pady=(12, 0))
+        ctk.CTkButton(win, text="知道了", height=32, corner_radius=8,
+                      fg_color=ACCENT, text_color=ON_ACCENT,
+                      hover_color=CARD_HOVER, font=ui_font(size=12),
+                      command=win.destroy).pack(fill="x", padx=16, pady=(10, 16))
+        self._fit_dialog(win, 380, parent=parent)
+
+    # 商城货架：左栏分类 + 右栏网格。一件商品一张固定尺寸的卡片，FlowFrame 负责
+    # 换行。高度写死是为了让 winfo_reqheight 就是卡片高度 —— 网格的行高靠它算，
+    # 让卡片随内容长高会让同一行的卡片参差不齐。
+    #
+    # Unscaled units, like every other geometry the FlowFrame measures: CTk
+    # multiplies these by the 1.5x display factor. 卡宽不再写死：面板是窗口的 40%，
+    # 默认窗口 1180 时网格只有 192px，两张 104 放不下（这正是「商品不见了」的根因），
+    # 所以 _render_shop 用 shop_columns() 按实测宽度回推列数与卡宽。
+    # SHOP_TILE_W 是卡宽上限（Grid 够宽时的样子），SHOP_TILE_W_MIN 是下限 ——
+    # 「首发用户」加「限时」角标在 92px 内刚好放得下，再窄会截断商品名。
+    SHOP_RAIL_W = 56
+    SHOP_TILE_W = 104
+    SHOP_TILE_W_MIN = 92
+    SHOP_TILE_H = 172
+    SHOP_TILE_GAP = 8
+    SHOP_TITLE_GLYPHS = {"普通": "●", "稀有": "◆", "史诗": "★", "传说": "✦", "至臻": "♛"}
+    SHOP_KIND_GLYPHS = {"rename": "✎", "makeup": "↺"}
 
     def open_shop(self):
-        win = self._new_dialog("积分商城", "380x520")
-        ctk.CTkLabel(win, text="积分商城", text_color=TEXT,
-                     font=ui_font(size=14, weight="bold")).pack(
-            fill="x", padx=16, pady=(14, 4))
-        ctk.CTkLabel(win, text="当前积分：%d" % slg_db.points_balance(self.conn),
-                     text_color=TEXT, font=ui_font(size=13)).pack(
-            anchor="w", padx=16, pady=(0, 8))
-        owned = slg_db.owned_title_ids(self.conn)
-        box = ctk.CTkScrollableFrame(win, fg_color="transparent")
-        box.pack(fill="both", expand=True, padx=12, pady=(0, 8))
-        for item in slg_titles.available_shop_items():
-            row = ctk.CTkFrame(box, fg_color=CARD, corner_radius=8)
-            row.pack(fill="x", padx=4, pady=6)
-            left = ctk.CTkFrame(row, fg_color="transparent")
-            left.pack(side="left", fill="x", expand=True, padx=12, pady=8)
-            ctk.CTkLabel(left, text=item["name"],
-                         text_color=self._title_color(item["id"]),
-                         font=ui_font(size=13, weight="bold")).pack(anchor="w")
-            locked = item.get("locked")
-            cost_text = "%d 分" % item["cost"]
-            if locked:
-                cost_text = item.get("note") or "即将开放"
-            ctk.CTkLabel(left, text=cost_text, text_color=MUTED,
-                         font=ui_font(size=11)).pack(anchor="w")
-            if locked:
-                ctk.CTkLabel(row, text="即将开放", text_color=MUTED,
-                             font=ui_font(size=11)).pack(side="right", padx=12)
-            elif item["id"] in owned:
-                ctk.CTkLabel(row, text="已拥有", text_color=MUTED,
-                             font=ui_font(size=11)).pack(side="right", padx=12)
-            else:
-                ctk.CTkButton(row, text="兑换", width=64, height=28, corner_radius=8,
-                              fg_color=ACCENT, text_color=ON_ACCENT,
-                              hover_color=CARD_HOVER, font=ui_font(size=12),
-                              command=lambda i=item: self._buy_item(win, i)
-                              ).pack(side="right", padx=12)
+        # 积分商城 shares the detail panel exactly like 个人中心: the first click
+        # swaps the panel over (temporarily covering any game shown), and buying
+        # or drawing re-renders it in place.
+        self._panel_mode = "shop"
+        self._destroy_detail()
+        d = self.detail
+        head = ctk.CTkFrame(d, fg_color="transparent")
+        head.pack(fill="x", padx=16, pady=(20, 8))
+        ctk.CTkLabel(head, text="积分商城", text_color=TEXT,
+                     font=ui_font(size=16, weight="bold")).pack(side="left")
+        # Held on self so the lottery can update the balance in place the moment
+        # points are spent, instead of waiting for the panel to rebuild.
+        self._shop_balance_label = ctk.CTkLabel(
+            head, text="%d 积分" % slg_db.points_balance(self.conn),
+            text_color=ACCENT, font=ui_font(size=14, weight="bold"))
+        self._shop_balance_label.pack(side="right")
 
-    def _buy_item(self, win, item):
-        if slg_titles.buy(self.conn, item):
-            messagebox.showinfo("兑换成功", "已获得「%s」" % item["name"], parent=win)
-            win.destroy()
+        self._shop_lottery_card(d)
+
+        # 货架：左栏分类、右栏商品。以前分类 tab 和子分类 chip 是上下两排圆角
+        # 按钮、只差一个高度，层级几乎看不出来；竖排才像货架，顺带把纵向让给商品。
+        body = ctk.CTkFrame(d, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=16, pady=(12, 14))
+        # 货架栏不锁尺寸：以前写了 width + pack_propagate(False)，那会把高度一起冻在
+        # CTk 默认的 200px 上，细分栏涨到 6 档之后，第 7 行往下的稀有度就再也画不出来
+        # （史诗/传说/至臻集体消失）。让它按内容自己撑开，高度和宽度都不会再被裁。
+        self._shop_rail = ctk.CTkFrame(body, fg_color="transparent")
+        self._shop_rail.pack(side="left", fill="y")
+        # The rail and the grid are separate holders so a filter click rebuilds
+        # both without laying the whole panel out again.
+        self._shop_grid = ctk.CTkFrame(body, fg_color="transparent")
+        self._shop_grid.pack(side="left", fill="both", expand=True, padx=(8, 0))
+        # 面板宽度跟着窗口走，拉宽后每行能放的张数会变；卡宽是烘进控件的，所以宽度
+        # 变了必须整格重建。防抖 80ms，免得拖动窗口时每像素重建一次。
+        self._shop_resize_job = None
+        self._shop_grid.bind("<Configure>", self._on_shop_grid_configure)
+        # Every open starts on 全部: the panel swaps in wholesale, so arriving
+        # with last visit's filter still on reads as "the shop lost its stock".
+        self._shop_cat = self._shop_sub = "全部"
+        self._render_shop()
+        fly = getattr(self, "_shop_fly", None)
+        self._shop_fly = None
+        if fly:
+            self._shop_fly_in(*fly)
+
+    def _render_shop(self):
+        """Draw the filter chips and the product grid for the current filter.
+
+        Split from open_shop because a chip click only needs this half: the
+        header, the balance and the lottery banner do not change.
+        """
+        items = [i for i in slg_titles.available_shop_items()
+                 if i["kind"] != "lottery"]
+        cat = getattr(self, "_shop_cat", "全部")
+        sub = getattr(self, "_shop_sub", "全部")
+
+        cats = list(dict.fromkeys(i.get("category") or "其他" for i in items))
+        if cat != "全部" and cat not in cats:
+            cat = "全部"
+        subs = self._shop_subs(items, cat)
+        if sub != "全部" and sub not in subs:
+            sub = "全部"
+        self._shop_cat, self._shop_sub = cat, sub
+
+        self._shop_rail_view(items, cats, subs, cat, sub)
+
+        for child in self._shop_grid.winfo_children():
+            child.destroy()
+        owned = slg_db.owned_title_ids(self.conn)
+        shown = [i for i in items
+                 if cat in ("全部", i.get("category"))
+                 and sub in ("全部", i.get("subcategory"))]
+        # 已拥有的排后面：逛商城是为了看还没拿到的，「已拥有」挡在最前面没有信息量。
+        # sorted 是稳定的，同类商品之间的原顺序不变。
+        shown.sort(key=lambda i: i["id"] in owned)
+        if not shown:
+            ctk.CTkLabel(self._shop_grid, text="该分类暂无商品，敬请期待",
+                         text_color=MUTED, font=ui_font(size=12)).pack(pady=24)
+            self._shop_cols = (1, self.SHOP_TILE_W)
+            return
+        cols, tile_w = self._shop_columns_now()
+        self._shop_cols = (cols, tile_w)
+        flow = FlowFrame(self._shop_grid, gap_x=self.SHOP_TILE_GAP,
+                         gap_y=self.SHOP_TILE_GAP, fg_color="transparent")
+        flow.pack(fill="x")
+        equipped = slg_db.get_equipped_title(self.conn) or ""
+        points = slg_db.points_balance(self.conn)
+        flow.set_items([self._shop_tile(flow, item, owned, equipped, points,
+                                        width=tile_w)
+                        for item in shown])
+
+    @staticmethod
+    def _shop_subs(items, cat):
+        """细分栏的条目。
+
+        头衔类的细分就是稀有度，而「这个档现在没货」本身就是有用信息 —— 所以列全
+        RARITY_ORDER 五档，空档点进去如实显示「该分类暂无商品」，而不是让那一档
+        凭空消失、让人以为软件漏了。物品类维持现状，只列真的存在的细分。
+        """
+        subs = list(dict.fromkeys(
+            i.get("subcategory") or "全部" for i in items
+            if cat in ("全部", i.get("category"))))
+        if cat in ("全部", "头衔类"):
+            # 稀有度按档位顺序接在后面。直接 append 漏掉的档会让顺序变成
+            # 「稀有 / 史诗 / 普通 / 传说 / 至臻」—— 商品自带的排前面、补的排后面。
+            others = [s for s in subs if s not in slg_titles.RARITY_ORDER]
+            subs = others + [r for r in slg_titles.RARITY_ORDER if r not in others]
+        return subs
+
+    def _on_shop_grid_configure(self, _event=None):
+        if self._shop_resize_job is not None:
+            try:
+                self.after_cancel(self._shop_resize_job)
+            except (ValueError, tk.TclError):
+                pass
+        self._shop_resize_job = self.after(80, self._shop_grid_resized)
+
+    def _shop_columns_now(self):
+        """当前网格宽度下的 (列数, 卡宽)，未 map 时回落到默认卡宽。"""
+        grid_w = self._shop_grid.winfo_width()
+        if grid_w <= 1:
+            return 1, self.SHOP_TILE_W
+        available = self._shop_grid._reverse_widget_scaling(grid_w)
+        return shop_columns(available, self.SHOP_TILE_W, self.SHOP_TILE_W_MIN,
+                            self.SHOP_TILE_GAP)
+
+    def _shop_grid_resized(self):
+        """窗口拉宽/缩窄后，每行放得下的张数变了就重排一次。"""
+        if getattr(self, "_panel_mode", None) != "shop":
+            return
+        cols = self._shop_columns_now()
+        if cols == getattr(self, "_shop_cols", None):
+            return
+        self._shop_cols = cols
+        self._render_shop()
+
+    def _shop_rail_view(self, items, cats, subs, cat, sub):
+        """左栏：上面主分类、下面当前分类的细分。
+
+        选中态是左侧一根竖条 + 高亮字，不是整块填色 —— 一栏里同时存在主分类和
+        子分类，全填色会分不出谁套着谁。
+        """
+        rail = self._shop_rail
+        for child in rail.winfo_children():
+            child.destroy()
+        ctk.CTkLabel(rail, text="分类", text_color=MUTED, anchor="w",
+                     font=ui_font(size=10)).pack(fill="x", pady=(0, 2))
+        for value in ["全部"] + cats:
+            self._rail_entry(rail, value, value == cat, 11,
+                             lambda v=value: self._pick_shop_filter("cat", v))
+        ctk.CTkLabel(rail, text="细分", text_color=MUTED, anchor="w",
+                     font=ui_font(size=10)).pack(fill="x", pady=(12, 2))
+        for value in ["全部"] + subs:
+            self._rail_entry(rail, value, value == sub, 10,
+                             lambda v=value: self._pick_shop_filter("sub", v))
+
+    def _rail_entry(self, parent, text, active, size, command):
+        row = ctk.CTkFrame(parent, fg_color="transparent", height=24)
+        row.pack(fill="x", pady=1)
+        ctk.CTkFrame(row, width=3, height=14, corner_radius=2,
+                     fg_color=ACCENT if active else "transparent").pack(
+            side="left", padx=(0, 5))
+        label = ctk.CTkLabel(row, text=text, anchor="w",
+                             text_color=ACCENT if active else TEXT,
+                             font=ui_font(size=size,
+                                          weight="bold" if active else "normal"))
+        label.pack(side="left", fill="x", expand=True)
+        for widget in (row, label):
+            widget.bind("<Button-1>", lambda e, c=command: c())
+
+    def _pick_shop_filter(self, kind, value):
+        if kind == "cat":
+            self._shop_cat = value
+            self._shop_sub = "全部"  # a subcategory only means something under its own
+        else:
+            self._shop_sub = value
+        self._render_shop()
+
+    def _shop_lottery_card(self, parent):
+        dev = slg_titles.dev_unlocked(self.conn)
+        done = (not dev
+                and slg_titles.lottery_draws_today(self.conn)
+                >= slg_titles.LOTTERY_DAILY_LIMIT)
+        row = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=10)
+        row.pack(fill="x", padx=16, pady=(10, 2))
+        # height is not decoration: a CTkFrame with width set and height left
+        # alone still asks for its 200px default, and this 4px bar was silently
+        # making the whole banner 200px tall and pushing the shelf off-screen.
+        ctk.CTkFrame(row, width=4, height=18, fg_color=ACCENT,
+                     corner_radius=2).pack(side="left", fill="y", padx=(0, 10))
+        ctk.CTkLabel(row, text="每日抽奖", text_color=ACCENT,
+                     font=ui_font(size=13, weight="bold")).pack(
+            side="left", padx=(0, 8))
+        blurb = "5 分/次 · %s · 大奖「幸运星」· 保底 %d 抽" % (
+            "不限次数" if dev else "每日 %d 次" % slg_titles.LOTTERY_DAILY_LIMIT,
+            slg_titles.LOTTERY_PITY)
+        ctk.CTkLabel(row, text=blurb, text_color=MUTED,
+                     font=ui_font(size=11)).pack(side="left")
+        if done:
+            ctk.CTkLabel(row, text="今日已抽", text_color=MUTED,
+                         font=ui_font(size=11)).pack(side="right", padx=12)
+        elif self._remote_flags.get("disable_lottery"):
+            ctk.CTkLabel(row, text="维护中", text_color=MUTED,
+                         font=ui_font(size=11)).pack(side="right", padx=12)
+        else:
+            ctk.CTkButton(row, text="抽一次", width=68, height=26, corner_radius=8,
+                          fg_color=ACCENT, text_color=ON_ACCENT,
+                          hover_color=CARD_HOVER, font=ui_font(size=12),
+                          command=self._do_lottery).pack(side="right", padx=12, pady=5)
+
+    def _do_lottery(self):
+        if self._remote_flags.get("disable_lottery"):
+            messagebox.showinfo("每日抽奖", "抽奖功能维护中，稍后再试", parent=self)
+            return
+        if not slg_titles.dev_unlocked(self.conn) and \
+                slg_titles.lottery_draws_today(self.conn) >= \
+                slg_titles.LOTTERY_DAILY_LIMIT:
+            messagebox.showinfo("每日抽奖",
+                                "今日已抽 %d 次，明天再来"
+                                % slg_titles.LOTTERY_DAILY_LIMIT, parent=self)
+            return
+        if slg_db.points_balance(self.conn) < slg_titles.LOTTERY_COST:
+            messagebox.showwarning("积分不足",
+                                   "抽奖需要 %d 积分" % slg_titles.LOTTERY_COST,
+                                   parent=self)
+            return
+        # The result is decided the moment the user commits: draw_lottery deducts
+        # the cost and rolls the prize up front. The reel below is only theatre.
+        ok, msg, prize = slg_titles.draw_lottery(self.conn)
+        if not ok:
+            messagebox.showwarning("每日抽奖", msg, parent=self)
+            return
+        slg_remote.report(self.conn, "lottery",
+                          {"grand": prize["kind"] == "title"})
+        self._refresh_shop_balance()
+        self._open_slot_machine(prize)
+
+    def _refresh_shop_balance(self):
+        lbl = getattr(self, "_shop_balance_label", None)
+        if lbl is not None and lbl.winfo_exists():
+            lbl.configure(text="%d 积分" % slg_db.points_balance(self.conn))
+
+    @staticmethod
+    def _lottery_label(prize):
+        # 文案只有一份，在 slg_titles 里 —— 弹窗、历史记录卡和测试读同一句话，
+        # 「重复头衔折算积分」这种分支才不会三处各写一遍。
+        return slg_titles.lottery_prize_text(prize)
+
+    @staticmethod
+    def _lottery_finals(prize):
+        """The three symbols the reels land on, read straight off the paytable.
+
+        This used to invent its own mapping and add a fake near-miss, so the
+        reels could show a combination the published table said nothing about.
+        Now the symbols are a lookup into the same table the 「抽奖概率」 dialog
+        renders, which is the only way the two can be guaranteed to agree.
+        """
+        symbols = slg_titles.symbols_for_prize(prize)
+        if symbols is None:  # the losing tier: any combination that pays nothing
+            return random.choice(slg_titles.LOTTERY_MISSES)
+        return tuple(random.choice(slg_titles.SLOT_SYMBOLS)
+                     if name == "*" else name for name in symbols)
+
+    def _open_paytable(self, parent=None):
+        """抽奖概率：每档中奖组合、奖品与概率，外加免责声明。
+
+        符号画的是 assets/slot 里那批真图（与滚轮同一份），所以「说明上写的」
+        和「滚轮上转出来的」不可能不一致——这正是之前那个假擦边演出的问题。
+        """
+        win = self._new_dialog("抽奖概率", "440x600", parent=parent)
+        ctk.CTkLabel(win, text="抽奖概率", text_color=TEXT,
+                     font=ui_font(size=16, weight="bold")).pack(
+            anchor="w", padx=18, pady=(16, 2))
+        ctk.CTkLabel(win, text="每次抽奖消耗 %d 积分。概率是长期期望，%d 抽保底"
+                               "只保「幸运星」，不保「幸运之王」"
+                     % (slg_titles.LOTTERY_COST, slg_titles.LOTTERY_PITY),
+                     text_color=MUTED, font=ui_font(size=10), justify="left",
+                     wraplength=400).pack(anchor="w", padx=18, pady=(0, 10))
+        imgs = self._slot_symbol_images(24)
+        body = ctk.CTkScrollableFrame(win, fg_color="transparent", width=410,
+                                      height=330)
+        body.pack(fill="both", expand=True, padx=14)
+        for symbols, prize_text, percent in slg_titles.lottery_paytable():
+            row = ctk.CTkFrame(body, fg_color=CARD, corner_radius=8)
+            row.pack(fill="x", pady=3)
+            start = ctk.CTkFrame(row, fg_color="transparent", width=104,
+                                 height=34)
+            start.pack(side="left", padx=(8, 6), pady=6)
+            start.pack_propagate(False)
+            if symbols is None:
+                ctk.CTkLabel(start, text="图案不搭", text_color=MUTED,
+                             font=ui_font(size=10)).pack(expand=True)
+            else:
+                for name in symbols:
+                    if name == "*":
+                        ctk.CTkLabel(start, text="任意", text_color=MUTED,
+                                     fg_color=CHIP, corner_radius=4, width=24,
+                                     height=20,
+                                     font=ui_font(size=9)).pack(
+                            side="left", padx=1)
+                    elif imgs.get(name) is not None:
+                        ctk.CTkLabel(start, image=imgs[name], text="").pack(
+                            side="left", padx=1)
+            ctk.CTkLabel(row, text=prize_text, text_color=TEXT,
+                         font=ui_font(size=12)).pack(side="left")
+            # 两位小数：0.01% 用 %.0f 会显示成「0%」，等于把最高一档抹掉。
+            ctk.CTkLabel(row, text="%.2f%%" % percent, text_color=ACCENT,
+                         font=ui_font(size=12, weight="bold")).pack(
+                side="right", padx=12)
+        ctk.CTkLabel(win, text=SLOT_DISCLAIMER, text_color=MUTED,
+                     font=ui_font(size=9), wraplength=400,
+                     justify="left").pack(padx=18, pady=(10, 16))
+        self._fit_dialog(win, 440, parent=parent)
+
+    def _lottery_sound_on(self):
+        return slg_db.get_pref(self.conn, "sound.lottery", "1") == "1"
+
+    def _shake_window(self, win, amp=5):
+        """Rattle the dialog for a beat - the thump of a reel landing."""
+        try:
+            size, _sep, pos = win.geometry().partition("+")
+            x, y = (int(v) for v in pos.split("+"))
+        except (ValueError, tk.TclError):
+            return
+        offsets = ((amp, -amp), (-amp, amp), (amp, -amp), (-amp, amp), (0, 0))
+
+        def step(i=0):
+            if i >= len(offsets):
+                return
+            try:
+                if not win.winfo_exists():
+                    return
+                dx, dy = offsets[i]
+                win.geometry("%s+%d+%d" % (size, x + dx, y + dy))
+            except tk.TclError:
+                return
+            win.after(35, lambda: step(i + 1))
+
+        step()
+
+    def _result_pulse(self, label, text, grand):
+        """A few frames of glitch jitter on the result line.
+
+        Touches only the label - never an overlay - so the result stays visible
+        the whole time. This replaces the old full-window stipple flash, whose
+        opaque canvas is what made the result read as a black screen.
+        """
+        color = ACCENT if grand else TEXT
+        glitch = "01#><*"
+        frames = 10
+
+        def step(i=0):
+            try:
+                if not label.winfo_exists():
+                    return
+            except tk.TclError:
+                return
+            if i >= frames:
+                label.configure(text=text, text_color=color)
+                return
+            if i % 2:
+                label.configure(text="".join(
+                    random.choice(glitch) if random.random() < 0.3 else ch
+                    for ch in text), text_color=_mix(color, "#ffffff", 0.5))
+            else:
+                label.configure(text=text, text_color=color)
+            label.after(50, lambda: step(i + 1))
+
+        step()
+
+    def _slot_symbol_images(self, size):
+        """Every reel symbol the paytable can name, loaded once and cached per size.
+
+        The names come from slg_titles.SYMBOL_NAMES rather than a list written out
+        here: a hand-kept list is what left the crown out, so a jackpot planted
+        three symbols the loader had never heard of and the winning row came up
+        empty - the "three empty boxes" bug wearing a new hat.
+
+        Kept on self so tkinter does not garbage-collect the PhotoImages mid-draw.
+        """
+        cache = getattr(self, "_slot_imgs", None)
+        if cache is None:
+            cache = self._slot_imgs = {}
+        if size not in cache:
+            imgs = {}
+            for name in slg_titles.SYMBOL_NAMES:
+                try:
+                    im = Image.open(asset_path("slot/" + name + ".png")
+                                    ).convert("RGBA")
+                    imgs[name] = ImageTk.PhotoImage(
+                        im.resize((size, size), Image.LANCZOS))
+                except Exception:  # noqa: BLE001 - a missing symbol must not crash the draw
+                    imgs[name] = None
+            cache[size] = imgs
+        return cache[size]
+
+    def _open_slot_machine(self, prize):
+        """拟真老虎机：三列滚动的符号带 + 一根拉杆。
+
+        点「拉杆」开始滚，再点一次停。但奖项在 `_do_lottery` 里就已定死，这里只是
+        把预定的最终符号滚到中行：最终符号种在每列第 1 格，减速停稳时 travel 落回
+        0，正好把它停在正中。视觉沿用霓虹边框、中行判定线、结果 glitch 脉冲。
+        """
+        grand = prize["kind"] == "title"
+        jackpot = grand and prize["value"] == slg_titles.LOTTERY_JACKPOT_TITLE
+        finals = self._lottery_finals(prize)
+        label = self._lottery_label(prize)
+        # 高度由内容决定，不再是写死的 600：以前内容比 600 高，最后一行免责声明
+        # 就被窗口底边切掉了。头（标题）和脚（按钮 + 保底 + 免责声明）固定，
+        # 中间那段可滚动，这样以后往机器上加东西也只会滚，不会把脚挤下去。
+        win = self._new_dialog("每日抽奖")
+        cell, rows, slots, pad = 52, 3, 14, 4
+        height, tiles = reel_geometry(cell, rows, pad, slots)
+
+        rim = ctk.CTkFrame(win, fg_color=ACCENT, corner_radius=12)
+        rim.pack(fill="both", expand=True, padx=1, pady=1)
+        card = ctk.CTkFrame(rim, fg_color=BG, corner_radius=11)
+        card.pack(fill="both", expand=True, padx=2, pady=2)
+
+        ctk.CTkLabel(card, text="每日抽奖", text_color=TEXT,
+                     font=ui_font(size=14, weight="bold")).pack(pady=(14, 8))
+
+        # 声明高度按内容给（滚轮 + 结果行 + 彩带 + 中奖头衔徽记那一行），
+        # 箱子本身是物理像素、CTk 的 height 是缩放单位，所以要除以缩放系数。
+        scale = ctk.ScalingTracker.get_window_scaling(win)
+        body = ctk.CTkScrollableFrame(card, fg_color="transparent", width=470,
+                                      height=int((height + 230) / scale))
+        body.pack(fill="both", expand=True)
+
+        machine = ctk.CTkFrame(body, fg_color=CARD, corner_radius=12)
+        machine.pack(padx=16, pady=(0, 4))
+        holder = ctk.CTkFrame(machine, fg_color="transparent")
+        holder.pack(side="left", padx=(10, 4), pady=10)
+
+        imgs = self._slot_symbol_images(cell)
+        reels = []
+        for idx in range(3):
+            box = ctk.CTkFrame(holder, fg_color=BG, corner_radius=8)
+            box.pack(side="left", padx=5)
+            canvas = tk.Canvas(box, width=cell + 2 * pad, height=height,
+                               bg=BG, highlightthickness=0)
+            canvas.pack()
+            # The middle row is the payline: a faint accent frame around it.
+            payline = canvas.create_rectangle(
+                pad, pad + cell, pad + cell, pad + 2 * cell,
+                outline=_mix(CARD, ACCENT, 0.5), width=1)
+            # The tape is a loop, so slot 1 is where the reel must come to rest.
+            # Filling `tiles` entries from that loop (rather than one pass of
+            # `slots`) is what keeps symbols under the window at every offset.
+            cycle = [random.choice(slg_titles.SLOT_SYMBOLS) for _ in range(slots)]
+            cycle[1] = finals[idx]
+            strip = []
+            for k in range(tiles):
+                img = imgs.get(cycle[k % slots])
+                if img is None:
+                    continue
+                item = canvas.create_image(
+                    pad + cell / 2, pad + k * cell + cell / 2, image=img)
+                strip.append(item)
+            reels.append({"canvas": canvas, "strip": strip, "travel": 0.0,
+                          "i": 0, "schedule": [], "crossed": 0,
+                          "payline": payline, "speed": 0.10})
+
+        lever = ctk.CTkButton(machine, text="拉杆", width=60, height=120,
+                              corner_radius=10, fg_color=ACCENT,
+                              text_color=ON_ACCENT, hover_color=CARD_HOVER,
+                              font=ui_font(size=15, weight="bold"))
+        lever.pack(side="left", padx=(0, 10), pady=10)
+
+        result = ctk.CTkLabel(body, text="拉动拉杆开始抽奖", text_color=MUTED,
+                              font=ui_font(size=15, weight="bold"))
+        result.pack(pady=(12, 0))
+        prize_slot = ctk.CTkFrame(body, fg_color="transparent")
+        prize_slot.pack()
+        confetti = tk.Canvas(body, width=440, height=84, bg=BG,
+                             highlightthickness=0)
+        confetti.pack()
+        actions = ctk.CTkFrame(card, fg_color="transparent")
+        actions.pack(pady=(8, 0))
+        ctk.CTkButton(actions, text="抽奖概率", height=34, width=100,
+                      corner_radius=8, fg_color=CHIP, text_color=TEXT,
+                      hover_color=CARD_HOVER, font=ui_font(size=13),
+                      command=lambda: self._open_paytable(win)).pack(
+            side="left", padx=(0, 8))
+        button = ctk.CTkButton(actions, text="知道了", height=34, width=120,
+                               corner_radius=8, fg_color=ACCENT,
+                               text_color=ON_ACCENT, hover_color=CARD_HOVER,
+                               font=ui_font(size=13), state="disabled",
+                               command=lambda: (win.destroy(), self.open_shop()))
+        button.pack(side="left")
+        # 免责声明：奖品是软件内的积分和虚拟头衔，不是钱，也不是赌博。
+        # 保底进度：为什么值得接着抽，得让用户看见，不能只写在奖项说明里。
+        ctk.CTkLabel(card, text="保底进度 %d / %d" % (
+            slg_titles.lottery_pity(self.conn), slg_titles.LOTTERY_PITY),
+            text_color=MUTED, font=ui_font(size=10)).pack(pady=(8, 0))
+        ctk.CTkLabel(card, text=SLOT_DISCLAIMER, text_color=MUTED,
+                     font=ui_font(size=9), wraplength=440,
+                     justify="left").pack(padx=16, pady=(10, 12))
+        self._fit_dialog(win, 520)
+        sound = self._lottery_sound_on()
+        spinning = False
+        stopping = False
+        settled = [0]
+
+        def _advance(r, step):
+            r["travel"] += step
+            for item in r["strip"]:
+                r["canvas"].move(item, 0, -step * cell)
+            # The same comparison that used to be `>= slots`: a deceleration can
+            # land travel on 11.999999999999998, and `>= 12` is False, so the
+            # tape never wrapped and the reels came out empty. The epsilon folds
+            # that last sliver of a revolution back into the loop.
+            while r["travel"] >= slots - 1e-9:
+                r["travel"] -= slots
+                for item in r["strip"]:
+                    r["canvas"].move(item, 0, slots * cell)
+
+        def _alive(r):
+            try:
+                return r["canvas"].winfo_exists()
+            except tk.TclError:
+                return False
+
+        def _flash_payline(r, color=ACCENT):
+            """Light the payline as its reel lands, then fade it back."""
+            if not _alive(r):
+                return
+            r["canvas"].itemconfigure(r["payline"], outline=color)
+            r["canvas"].after(
+                180, lambda: _alive(r) and r["canvas"].itemconfigure(
+                    r["payline"], outline=_mix(CARD, ACCENT, 0.5)))
+
+        def _spin_tick(r):
+            if not _alive(r) or not spinning:
+                return
+            # Ramp up over the first ~20 ticks instead of starting at full tilt:
+            # a reel that is already at top speed on its first frame reads as
+            # the strip appearing, not as it beginning to turn.
+            r["speed"] = min(0.34, r["speed"] + 0.06)
+            _advance(r, r["speed"])
+            r["canvas"].after(16, lambda: _spin_tick(r))
+
+        def _reveal():
+            result.configure(text=label, text_color=ACCENT if grand else TEXT)
+            self._refresh_shop_balance()
+            if sound:
+                for freq, dur in lottery_jingle(grand, jackpot):
+                    _play_tone(freq, dur)
+            if grand:
+                # 徽记按实际中的那一枚画：写死 LOTTERY_GRAND_TITLE 会把幸运之王
+                # 显示成幸运星，等于把最高一档抹成下一档。
+                self._title_badge(prize_slot, prize["value"]).pack()
+                self._confetti(confetti, 440, 84, 0, label=None,
+                               ramp=("#ffd76a", "#e0a800", "#ffffff", "#e84393"))
+                if jackpot:
+                    _jackpot_sweep()
+                    _pulse_paylines(beats=16)
+                else:
+                    _pulse_paylines()
+            else:
+                self._confetti(confetti, 440, 84, prize["value"])
+            self._result_pulse(result, label, grand)
+            button.configure(state="normal")
+
+        def _jackpot_sweep():
+            """外框走一整圈色相环，再缓缓落回强调色。
+
+            0.01% 的奖只有一次演出机会，不能跟 1% 的幸运星长得一样 —— 至臻头衔
+            那条帧间连续色相环拿来用在这里，慢到看得出是流光。"""
+            frames = 60
+
+            def step(i=0):
+                try:
+                    if not rim.winfo_exists():
+                        return
+                except tk.TclError:
+                    return
+                if i >= frames:
+                    rim.configure(fg_color=ACCENT)
+                    return
+                rim.configure(fg_color=_rainbow(i / float(frames)))
+                rim.after(40, lambda: step(i + 1))
+
+            step()
+
+        def _pulse_paylines(beats=6):
+            """A gold heartbeat on all three paylines after a title win."""
+            gold, rest = "#ffd76a", _mix(CARD, ACCENT, 0.5)
+
+            def step(i=0):
+                for r in reels:
+                    if not _alive(r):
+                        return
+                    r["canvas"].itemconfigure(
+                        r["payline"], outline=gold if i % 2 else rest)
+                if i < beats:
+                    reels[0]["canvas"].after(140, lambda: step(i + 1))
+
+            step()
+
+        def _settle_tick(r):
+            if not _alive(r):
+                return
+            if r["i"] >= len(r["schedule"]):
+                self._shake_window(win)
+                _flash_payline(r)
+                settled[0] += 1
+                if settled[0] == 3:
+                    _reveal()
+                return
+            delay, step = r["schedule"][r["i"]]
+            r["i"] += 1
+            _advance(r, step)
+            if sound and int(r["travel"]) > r["crossed"]:
+                r["crossed"] = int(r["travel"])
+                _play_tone(1500, 14)
+            r["canvas"].after(delay, lambda: _settle_tick(r))
+
+        def stop_all():
+            # Land each reel on its planted final symbol: the deceleration runs
+            # for a whole cycle plus whatever phase is left, so travel ends at 0
+            # (mod slots) and index 1 sits on the middle payline.
+            for idx, r in enumerate(reels):
+                phase = r["travel"] % slots
+                dist = slots + ((-phase) % slots)
+                r["schedule"] = lottery_spin_schedule(slots=dist)
+                r["i"] = 0
+                r["crossed"] = 0
+                r["canvas"].after(idx * 420, lambda r=r: _settle_tick(r))
+
+        def toggle():
+            nonlocal spinning, stopping
+            if stopping:
+                return
+            if not spinning:
+                spinning = True
+                lever.configure(text="停止")
+                for r in reels:
+                    _spin_tick(r)
+            else:
+                spinning = False
+                stopping = True
+                lever.configure(text="停止中", state="disabled")
+                stop_all()
+
+        lever.configure(command=toggle)
+
+    def _shop_tile(self, parent, item, owned, equipped, points, width=None):
+        """One shelf product as a fixed-size card.
+
+        Rarity drives the whole look: border, banner and glyph all take the
+        rarity colour, and 传说/至臻 keep it moving. Five tiers that differed only
+        by the colour of one line of text read as one flat grey shelf - which is
+        what "looks like a rush job" was describing.
+
+        `width` comes from shop_columns() so the rack fits two cards a row at the
+        default window; the fallback keeps the old fixed size for callers that
+        have no grid width to measure.
+        """
+        width = width or self.SHOP_TILE_W
+        is_title = item["kind"] == "title"
+        color = self._title_color(item["id"]) if is_title else ACCENT
+        rarity = ((slg_titles.title_by_id(item["id"]) or {}).get("rarity", "")
+                  if is_title else "")
+        has = item["id"] in owned
+        using = has and item["id"] == (equipped or "")
+        cost = item.get("cost") or 0
+        short = 0 if (item.get("locked") or has) else max(0, cost - points)
+
+        card = ctk.CTkFrame(parent, width=width,
+                            height=self.SHOP_TILE_H, fg_color=CARD,
+                            corner_radius=10, border_width=1,
+                            border_color=self._tile_border(color, rarity, has))
+        card.pack_propagate(False)
+
+        # Bottom action row first, so the preview fills whatever is left above it.
+        foot = ctk.CTkFrame(card, fg_color="transparent")
+        foot.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
+        if item.get("locked"):
+            self._tile_note(foot, "即将开放")
+        elif item["kind"] == "makeup":
+            ctk.CTkButton(foot, text="补签", height=26, corner_radius=8,
+                          fg_color=ACCENT, text_color=ON_ACCENT,
+                          hover_color=CARD_HOVER, font=ui_font(size=12),
+                          command=lambda i=item, c=card: self._use_makeup(i, c)
+                          ).pack(fill="x")
+        elif has:
+            self._tile_note(foot, "使用中" if using else "已拥有")
+        else:
+            ctk.CTkButton(foot, text="兑换", height=26, corner_radius=8,
+                          fg_color=ACCENT, text_color=ON_ACCENT,
+                          hover_color=CARD_HOVER, font=ui_font(size=12),
+                          command=lambda i=item, c=card: self._buy_item(i, c)
+                          ).pack(fill="x")
+
+        preview = ctk.CTkFrame(card, fg_color="transparent")
+        preview.pack(fill="both", expand=True)
+
+        band = self._tile_band(preview, item, color, rarity)
+        band.pack(fill="x", padx=6, pady=(6, 0))
+        if rarity == "至臻":
+            self._pulse_border(card, color)
+        if has:
+            ctk.CTkLabel(band, text="使用中" if using else "已拥有", height=16,
+                         corner_radius=8,
+                         fg_color=ACCENT if using else CHIP,
+                         text_color=ON_ACCENT if using else MUTED,
+                         font=ui_font(size=9)).place(relx=1.0, x=-4, y=4,
+                                                     anchor="ne")
+
+        name_row = ctk.CTkFrame(preview, fg_color="transparent")
+        name_row.pack(fill="x", padx=8, pady=(6, 0))
+        ctk.CTkLabel(name_row, text=item["name"],
+                     text_color=MUTED if has else color,
+                     font=ui_font(size=12, weight="bold")).pack(side="left")
+        if item.get("limited_until"):
+            ctk.CTkLabel(name_row, text="限时", text_color=ON_ACCENT,
+                         fg_color=ACCENT, corner_radius=6, height=14,
+                         font=ui_font(size=9)).pack(side="left", padx=(4, 0))
+
+        price = ctk.CTkFrame(preview, fg_color="transparent")
+        price.pack(fill="x", padx=8, pady=(2, 0))
+        if short:
+            # 「还差 N 分」比一个买不起的价格有用：它是个缺口，不是一句拒绝。
+            ctk.CTkLabel(price, text="还差 %d 分" % short, text_color=MUTED,
+                         font=ui_font(size=10)).pack(anchor="w")
+            bar = ctk.CTkProgressBar(price, height=4, corner_radius=2,
+                                     fg_color=CHIP, progress_color=ACCENT)
+            bar.set(min(1.0, points / cost) if cost else 0.0)
+            bar.pack(fill="x", pady=(3, 0))
+        else:
+            ctk.CTkLabel(price, text="%d 积分" % cost, text_color=MUTED,
+                         font=ui_font(size=10)).pack(anchor="w")
+
+        # Bound last so the banner, the state chip and the price block are all
+        # one hit target - binding preview earlier left the banner dead.
+        self._clickable(preview, lambda e, i=item: self._shop_detail(i))
+        return card
+
+    @staticmethod
+    def _tile_border(color, rarity, has):
+        """卡面描边。已拥有的一律压成灰：货架上要一眼分出「我有的」和「还没有的」。"""
+        if has:
+            return CHIP
+        if rarity == "传说":
+            return _mix(BG, color, 0.8)
+        if rarity == "史诗":
+            return _mix(BG, color, 0.55)
+        return _mix(BG, color, 0.3)
+
+    def _tile_band(self, parent, item, color, rarity):
+        """卡面主视觉：稀有度底色 + 大字符。传说扫一道光，至臻循环流光。
+
+        A canvas rather than a frame + label because the shine has to travel
+        across the banner, and there is nothing to travel with in a plain frame.
+        """
+        holder = ctk.CTkFrame(parent, height=72, fg_color="transparent")
+        holder.pack_propagate(False)
+        tint = _mix(CARD, color, 0.22)
+        c = tk.Canvas(holder, highlightthickness=0, bg=CARD)
+        c.pack(fill="both", expand=True)
+        glyph = self._shop_glyph(item)
+        font = ui_tkfont(size=28, weight="bold")
+        paint = {"size": None, "pill": [], "text": None, "shine": None}
+
+        def repaint():
+            w, h = c.winfo_width(), c.winfo_height()
+            if w <= 1 or h <= 1 or paint["size"] == (w, h):
+                return
+            paint["size"] = (w, h)
+            c.delete("all")
+            _rounded_rect(c, 0, 0, w - 1, h - 1, 8, tint)
+            # 圆角底色是 _rounded_rect 拼出来的 6 个图元；抓住它们才能在至臻档
+            # 整块改色，只改其中一块会让圆角跟主体脱色。
+            paint["pill"] = list(c.find_all())
+            paint["text"] = c.create_text(w // 2, h // 2, text=glyph,
+                                          fill=color, font=font)
+            paint["shine"] = c.create_rectangle(
+                -40, h * 0.12, -18, h * 0.88,
+                fill=_mix(color, "#ffffff", 0.7), outline="", state="hidden")
+
+        c.bind("<Configure>", lambda e: repaint())
+
+        if rarity in ("传说", "至臻"):
+            n = {"i": 0}
+
+            def tick():
+                try:
+                    if not c.winfo_exists():
+                        return
+                except tk.TclError:
+                    return
+                n["i"] += 1
+                repaint()
+                if paint["size"] is None:
+                    c.after(40, tick)
+                    return
+                w, h = paint["size"]
+                if rarity == "传说":
+                    x = -40 + (n["i"] * 4) % (w + 60)
+                    c.coords(paint["shine"], x, h * 0.12, x + 22, h * 0.88)
+                    c.itemconfig(paint["shine"], state="normal")
+                else:
+                    # 至臻：底色整块跟着色相缓慢流动，字形反过来压成近白 —— 和
+                    # 个人面板那枚徽章同一套语言。色标间插值，不再是 6 色硬切。
+                    hue = _rainbow(n["i"] / 180.0)
+                    for item in paint["pill"]:
+                        c.itemconfig(item, fill=_mix(CARD, hue, 0.26))
+                    c.itemconfig(paint["text"], fill=_mix(hue, "#ffffff", 0.55))
+                    c.itemconfig(paint["shine"], state="hidden")
+                c.after(40, tick)
+
+            c.after(60, tick)
+        return holder
+
+    @staticmethod
+    def _pulse_border(widget, color):
+        """至臻的描边自己呼吸。一圈静止的金边只是黄色边框。"""
+        n = {"i": 0}
+
+        def tick():
+            try:
+                if not widget.winfo_exists():
+                    return
+            except tk.TclError:
+                return
+            n["i"] += 1
+            p = 1 - abs(2 * ((n["i"] % 40) / 39.0) - 1)
+            widget.configure(border_color=_mix(BG, color, 0.45 + 0.55 * p))
+            widget.after(60, tick)
+
+        widget.after(60, tick)
+
+    def _clickable(self, widget, handler):
+        """Bind a click handler to a widget and every descendant, so an image
+        card's whole preview area is one hit target."""
+        widget.bind("<Button-1>", handler)
+        for child in widget.winfo_children():
+            self._clickable(child, handler)
+
+    def _shop_detail(self, item):
+        """Click-through detail: a large glyph, name + rarity, a description and
+        a single buy action. The card's own button still buys directly."""
+        is_title = item["kind"] == "title"
+        color = self._title_color(item["id"]) if is_title else ACCENT
+        rarity = (slg_titles.title_by_id(item["id"]) or {}).get("rarity", "") \
+            if is_title else ""
+        desc = item.get("description") or item.get("note") or ""
+        win = self._new_dialog(item["name"], "360x460")
+
+        band = ctk.CTkFrame(win, height=120, fg_color=_mix(BG, color, 0.22),
+                            corner_radius=10)
+        band.pack(fill="x", padx=16, pady=(16, 0))
+        band.pack_propagate(False)
+        ctk.CTkLabel(band, text=self._shop_glyph(item), text_color=color,
+                     font=ui_font(size=56, weight="bold")).pack(expand=True)
+
+        ctk.CTkLabel(win, text=item["name"], text_color=TEXT,
+                     font=ui_font(size=18, weight="bold")).pack(pady=(12, 0))
+        if rarity:
+            ctk.CTkLabel(win, text=rarity, text_color=color,
+                         font=ui_font(size=12)).pack(pady=(2, 0))
+        if desc:
+            ctk.CTkLabel(win, text=desc, text_color=MUTED, font=ui_font(size=12),
+                         justify="left", wraplength=300).pack(
+                fill="x", padx=16, pady=(12, 0))
+
+        locked = item.get("locked")
+        # 价格照常报数字，锁定状态由下面的按钮说 —— 两个地方都写「即将开放」，
+        # 一张卡上就重复了两遍同一句废话。
+        ctk.CTkLabel(win, text="%d 积分" % item["cost"], text_color=ACCENT,
+                     font=ui_font(size=16, weight="bold")).pack(pady=(12, 0))
+
+        if locked:
+            ctk.CTkButton(win, text="即将开放", height=36, corner_radius=8,
+                          state="disabled", fg_color=CHIP, text_color=MUTED,
+                          font=ui_font(size=13)).pack(fill="x", padx=16, pady=(16, 0))
+        elif item["kind"] == "makeup":
+            ctk.CTkButton(win, text="补签一次", height=36, corner_radius=8,
+                          fg_color=ACCENT, text_color=ON_ACCENT,
+                          hover_color=CARD_HOVER, font=ui_font(size=13),
+                          command=lambda: (win.destroy(), self._use_makeup(item))
+                          ).pack(fill="x", padx=16, pady=(16, 0))
+        elif item["id"] in slg_db.owned_title_ids(self.conn):
+            ctk.CTkButton(win, text="已拥有", height=36, corner_radius=8,
+                          state="disabled", fg_color=CHIP, text_color=MUTED,
+                          font=ui_font(size=13)).pack(fill="x", padx=16, pady=(16, 0))
+        else:
+            ctk.CTkButton(win, text="兑换", height=36, corner_radius=8,
+                          fg_color=ACCENT, text_color=ON_ACCENT,
+                          hover_color=CARD_HOVER, font=ui_font(size=13),
+                          command=lambda: (win.destroy(), self._buy_item(item))
+                          ).pack(fill="x", padx=16, pady=(16, 0))
+
+    @staticmethod
+    def _tile_note(parent, text):
+        ctk.CTkLabel(parent, text=text, text_color=MUTED,
+                     font=ui_font(size=11)).pack()
+
+    def _shop_glyph(self, item):
+        """The oversized mark on a tile: a rarity glyph for titles, else a kind one."""
+        if item["kind"] == "title":
+            t = slg_titles.title_by_id(item["id"]) or {}
+            return self.SHOP_TITLE_GLYPHS.get(t.get("rarity"), "●")
+        return self.SHOP_KIND_GLYPHS.get(item["kind"], "◈")
+
+    def _buy_item(self, item, card=None):
+        if not slg_titles.buy(self.conn, item):
+            messagebox.showwarning("积分不足", "积分不足，无法兑换", parent=self)
+            return
+        slg_remote.report(self.conn, "buy", {"item": item["id"]})
+        self._shop_fly = (self._title_color(item["id"]),
+                         "已获得「%s」" % item["name"])
+        self._flash_and_reopen(card)
+
+    def _use_makeup(self, item, card=None):
+        ok, msg, bonus = slg_titles.buy_makeup_card(self.conn)
+        if not ok:
+            messagebox.showwarning("补签卡", msg, parent=self)
+            return
+        slg_remote.report(self.conn, "buy", {"item": item["id"]})
+        if bonus:
+            msg += " · 累签 +%d 积分" % bonus
+        self._shop_fly = (ACCENT, msg)
+        self._flash_and_reopen(card)
+
+    def _flash_and_reopen(self, card, delay=170):
+        """兑换成功先让卡面闪一下，再重建货架。
+
+        只重绘的话整块面板无声换掉，看起来像没点中 —— 而一个「兑换成功」的模态
+        框又挡操作。这一下比两者都轻。
+        """
+        if card is not None:
+            try:
+                if card.winfo_exists():
+                    flash = ctk.CTkFrame(card, fg_color="#ffffff",
+                                         corner_radius=10)
+                    flash.place(x=0, y=0, relwidth=1, relheight=1)
+
+                    def _drop(w=flash):
+                        try:
+                            if w.winfo_exists():
+                                w.destroy()
+                        except tk.TclError:
+                            pass
+
+                    flash.after(delay, _drop)
+            except tk.TclError:
+                pass
+        self.after(delay + 30, self._reopen_shop_if_showing)
+
+    def _reopen_shop_if_showing(self):
+        # The rebuild is scheduled, so the user may have left the shop or picked
+        # a game in the meantime - only the shop panel should come back.
+        if getattr(self, "_panel_mode", None) == "shop":
             self.open_shop()
         else:
-            messagebox.showwarning("积分不足", "积分不足，无法兑换", parent=win)
+            self._shop_fly = None
+
+    def _shop_fly_in(self, color, text):
+        """提货反馈：一块稀有度色的牌子从货架上方落下来。
+
+        tk 的 canvas 没有透明度，所以只做位移不做淡出 —— 落地这个动作本身就是
+        「到手了」的信号。
+        """
+        host = getattr(self, "_shop_grid", None)
+        if host is None:
+            return
+        try:
+            if not host.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        chip = ctk.CTkLabel(host, text=text, height=26, corner_radius=13,
+                            fg_color=color, text_color=ON_ACCENT,
+                            font=ui_font(size=12, weight="bold"))
+        target = 6
+        step = {"y": -30}
+
+        def _drop(w=chip):
+            try:
+                if w.winfo_exists():
+                    w.destroy()
+            except tk.TclError:
+                pass
+
+        def tick():
+            try:
+                if not chip.winfo_exists():
+                    return
+            except tk.TclError:
+                return
+            step["y"] = min(step["y"] + 6, target)
+            chip.place_configure(y=step["y"])
+            if step["y"] < target:
+                chip.after(16, tick)
+            else:
+                chip.after(1500, _drop)
+
+        chip.place(relx=0.5, y=step["y"], anchor="n")
+        chip.after(16, tick)
 
     def open_redeem(self):
         win = self._new_dialog("兑换码", "360x240")
@@ -3689,6 +5668,8 @@ class App(ctk.CTk):
 
         def do():
             ok, msg = slg_titles.redeem(self.conn, entry.get())
+            if ok:
+                slg_remote.report(self.conn, "redeem", {"success": True})
             feedback.configure(text=msg, text_color=ACCENT if ok else DANGER_TEXT)
 
         ctk.CTkButton(win, text="兑换", height=34, corner_radius=8, fg_color=ACCENT,
@@ -3753,6 +5734,34 @@ class App(ctk.CTk):
         ctk.CTkButton(row, text="保存", width=90, height=32, corner_radius=8,
                       fg_color=ACCENT, text_color=ON_ACCENT, hover_color=CARD_HOVER,
                       command=save).pack(side="right")
+
+    def _open_profile_collections(self):
+        """个人中心「收藏」卡：列出所有收藏夹，点一个就跳过去。"""
+        cols = slg_db.list_collections(self.conn)
+        win = self._new_dialog("我的收藏夹", "360x440")
+        ctk.CTkLabel(win, text="点一个收藏夹跳过去", text_color=TEXT,
+                     font=ui_font(size=14, weight="bold")).pack(
+            fill="x", padx=16, pady=(14, 8))
+        body = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=12)
+        if not cols:
+            ctk.CTkLabel(body, text="还没有收藏夹。点开任意游戏，用详情页的"
+                                    "「收藏夹…」新建一个。",
+                         text_color=MUTED, font=ui_font(size=12), justify="left",
+                         wraplength=300).pack(anchor="w", padx=6, pady=10)
+        for c in cols:
+            def go(name=c["name"]):
+                win.destroy()
+                self._on_collection(name)
+                self._refresh_collection_menu()
+            ctk.CTkButton(body, text="%s（%d）" % (c["name"], c["count"]),
+                          height=32, corner_radius=8, fg_color=CHIP,
+                          text_color=TEXT, hover_color=CARD_HOVER, anchor="w",
+                          font=ui_font(size=12),
+                          command=go).pack(fill="x", pady=3)
+        ctk.CTkButton(win, text="关闭", height=32, corner_radius=8,
+                      fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+                      command=win.destroy).pack(fill="x", padx=16, pady=(10, 14))
 
     def open_collection_manager(self):
         """Create and delete collections, from 更多工具."""
@@ -4067,7 +6076,7 @@ class App(ctk.CTk):
         moved in here and the sort controls moved up into the space, which also
         left room for the gear beside them.
         """
-        win = self._new_dialog("设置", "420x360")
+        win = self._new_dialog("设置", "420x440")
         ctk.CTkLabel(win, text="主题", text_color=TEXT, anchor="w",
                      font=ui_font(size=14, weight="bold")).pack(
             fill="x", padx=16, pady=(16, 0))
@@ -4084,6 +6093,17 @@ class App(ctk.CTk):
                                "所以会有一小段延迟；手动选浅色或深色则会被记住。",
                      text_color=MUTED, font=ui_font(size=11), justify="left",
                      anchor="w", wraplength=380).pack(fill="x", padx=16, pady=(6, 14))
+        ctk.CTkLabel(win, text="抽奖音效", text_color=TEXT, anchor="w",
+                     font=ui_font(size=14, weight="bold")).pack(
+            fill="x", padx=16, pady=(0, 0))
+        sound = ctk.CTkSwitch(win, text="每日抽奖的转盘声与中奖声", onvalue="1",
+                              offvalue="0", font=ui_font(size=12),
+                              text_color=MUTED, progress_color=ACCENT,
+                              command=lambda: slg_db.set_pref(
+                                  self.conn, "sound.lottery", sound.get()))
+        sound.pack(fill="x", padx=16, pady=(8, 14))
+        if self._lottery_sound_on():
+            sound.select()
         self._dialog_rows(win, (
             ("查看新手引导…",
              "重新打开首次启动时的那份功能简介和使用说明。",
@@ -4112,7 +6132,8 @@ class App(ctk.CTk):
         # 520 rather than 480: the group row pushed the 完全免费 line past the
         # bottom edge, and a disclaimer nobody can scroll to is not a disclaimer.
         win = self._new_dialog("关于", "440x620")
-        ctk.CTkLabel(win, text="", image=load_avatar(84)).pack(pady=(18, 6))
+        ctk.CTkLabel(win, text="", image=load_avatar(84, own=False)).pack(
+            pady=(18, 6))
         ctk.CTkLabel(win, text=APP_TITLE, text_color=TEXT,
                      font=ui_font(size=18, weight="bold")).pack(pady=(0, 0))
         ctk.CTkLabel(win, text="作者 · %s" % AUTHOR, text_color=MUTED,
@@ -4419,7 +6440,8 @@ class App(ctk.CTk):
                       command=pick_cover).pack(side="right")
 
         folder = {"path": prefill_folder}
-        ctk.CTkLabel(body, text="本地目录（可选）", text_color=MUTED,
+        ctk.CTkLabel(body, text="本地目录（可选，选好后自动读取标题/开发商/版本/引擎）",
+                     text_color=MUTED,
                      font=ui_font(size=11), anchor="w").pack(fill="x", pady=(8, 2))
         folder_row = ctk.CTkFrame(body, fg_color="transparent")
         folder_row.pack(fill="x")
@@ -4430,9 +6452,24 @@ class App(ctk.CTk):
 
         def pick_folder():
             path = filedialog.askdirectory(title="选择游戏所在文件夹", parent=win)
-            if path:
-                folder["path"] = path
-                folder_label.configure(text=os.path.basename(path))
+            if not path:
+                return
+            folder["path"] = path
+            folder_label.configure(text=os.path.basename(path))
+            import slg_scan
+            info = slg_scan.autofill_folder(path)
+            if info["title"] and not title_e.get().strip():
+                title_e.delete(0, "end")
+                title_e.insert(0, info["title"])
+            if info["developer"] and not dev_e.get().strip():
+                dev_e.delete(0, "end")
+                dev_e.insert(0, info["developer"])
+            if info["engine"] and not engine_e.get().strip():
+                engine_e.delete(0, "end")
+                engine_e.insert(0, info["engine"])
+            if info["version"] and not ver_e.get().strip():
+                ver_e.delete(0, "end")
+                ver_e.insert(0, info["version"])
 
         ctk.CTkButton(folder_row, text="选择…", width=72, height=26,
                       corner_radius=6, fg_color=CHIP, text_color=TEXT,
@@ -4736,166 +6773,371 @@ class App(ctk.CTk):
             580, int(round(win.winfo_reqheight()
                            / ctk.ScalingTracker.get_window_scaling(win)))))
 
+    # 帮助文档的章节表：(key, 左栏标题, 构造函数名)。挂成类属性而不是写在 open_help
+    # 里面，是为了让「有哪些章节、什么顺序」能在不开窗口的情况下被断言。
+    HELP_SECTIONS = (
+        ("start",      "三步上手",       "_help_start"),
+        ("what",       "这个软件是什么", "_help_what"),
+        ("browse",     "界面与筛选",     "_help_browse"),
+        ("collection", "收藏夹",         "_help_collection"),
+        ("profile",    "个人中心与积分", "_help_profile"),
+        ("signin",     "每日签到",       "_help_signin"),
+        ("titles",     "头衔",           "_help_titles"),
+        ("shop",       "商城与每日抽奖", "_help_shop"),
+        ("addgame",    "添加我的游戏",   "_help_add_game"),
+        ("scan",       "扫描本地目录",   "_help_scan"),
+        ("translate",  "翻译与标签",     "_help_translate"),
+        ("hanhua",     "汉化工具",       "_help_hanhua"),
+        ("sync",       "同步与数据",     "_help_sync"),
+        ("backup",     "备份与恢复",     "_help_backup"),
+        ("update",     "更新推送",       "_help_update"),
+        ("faq",        "常见问题",       "_help_faq"),
+        ("about",      "声明与关于",     "_help_about"),
+    )
+
     def open_help(self):
-        win = self._new_dialog("帮助文档", "600x680")
+        """帮助文档：左栏目录，右栏当前章节。
+
+        一列到底的长滚动在 v0.22 之后不够用了 —— 收藏夹、个人中心、签到、头衔、
+        商城抽奖、添加我的游戏都没有位置，而想找的那一节只能靠翻。左栏是目录，
+        右栏一次只画一节：多点一次的成本，换掉了一直往下滚的成本。
+        """
+        win = self._new_dialog("帮助文档", "880x660")
         win.after(120, win.lift)
-
         ctk.CTkLabel(win, text="帮助文档", text_color=TEXT,
-                     font=ui_font(size=17, weight="bold")).pack(pady=(16, 0), padx=22,
-                                                              anchor="w")
-        frame = ctk.CTkScrollableFrame(win, fg_color="transparent")
-        frame.pack(fill="both", expand=True, padx=10, pady=(6, 12))
+                     font=ui_font(size=17, weight="bold")).pack(
+            pady=(16, 8), padx=22, anchor="w")
 
-        def head(text):
-            ctk.CTkLabel(frame, text=text, text_color=ACCENT,
-                         font=ui_font(size=14, weight="bold")).pack(
-                anchor="w", padx=8, pady=(18, 6))
+        body = ctk.CTkFrame(win, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(1, weight=1)
+        nav = ctk.CTkScrollableFrame(body, fg_color=CARD, corner_radius=10,
+                                     width=158)
+        nav.grid(row=0, column=0, sticky="nsw", padx=(0, 12))
+        self._help_content = ctk.CTkScrollableFrame(body, fg_color=CARD,
+                                                    corner_radius=10)
+        self._help_content.grid(row=0, column=1, sticky="nsew")
+        self._help_nav = {}
+        for key, title, _builder in self.HELP_SECTIONS:
+            btn = ctk.CTkButton(
+                nav, text=title, anchor="w", height=32, corner_radius=8,
+                fg_color="transparent", text_color=TEXT,
+                hover_color=CARD_HOVER, font=ui_font(size=13),
+                command=lambda k=key: self._show_help_section(k))
+            btn.pack(fill="x", padx=6, pady=2)
+            self._help_nav[key] = btn
+        self._show_help_section(self.HELP_SECTIONS[0][0])
 
-        def sub(text):
-            ctk.CTkLabel(frame, text=text, text_color=MUTED,
-                         font=ui_font(size=13, weight="bold")).pack(
-                anchor="w", padx=8, pady=(12, 4))
+    def _show_help_section(self, key):
+        frame = self._help_content
+        for child in frame.winfo_children():
+            child.destroy()
+        self._help_frame = frame
+        for name, btn in self._help_nav.items():
+            active = name == key
+            btn.configure(fg_color=ACCENT if active else "transparent",
+                          text_color=ON_ACCENT if active else TEXT)
+        title = next(t for k, t, _b in self.HELP_SECTIONS if k == key)
+        ctk.CTkLabel(frame, text=title, text_color=TEXT,
+                     font=ui_font(size=17, weight="bold")).pack(
+            anchor="w", padx=10, pady=(12, 2))
+        builder = next(b for k, _t, b in self.HELP_SECTIONS if k == key)
+        getattr(self, builder)()
 
-        def body(text, color=None):
-            ctk.CTkLabel(frame, text=text, text_color=color or TEXT,
-                         font=ui_font(size=13), wraplength=520,
-                         justify="left").pack(anchor="w", padx=8, pady=(0, 6))
+    # --- 章节排版小件：章节构造函数用它们写内容，对应旧版的 head/sub/body/qa ----
+    def _help_head(self, text):
+        ctk.CTkLabel(self._help_frame, text=text, text_color=ACCENT,
+                     font=ui_font(size=14, weight="bold")).pack(
+            anchor="w", padx=10, pady=(18, 6))
 
-        def qa(question, answer):
-            """A question and its answer rendered as one visual unit.
+    def _help_sub(self, text):
+        ctk.CTkLabel(self._help_frame, text=text, text_color=MUTED,
+                     font=ui_font(size=13, weight="bold")).pack(
+            anchor="w", padx=10, pady=(12, 4))
 
-            The question carries the emphasis: it is what someone scrolls the
-            page looking for, so it gets the bold accent treatment while the
-            answer stays plain. Loose gap above the question and a tight one
-            under the answer is what keeps one pair from running into the next.
-            """
-            ctk.CTkLabel(frame, text=question, text_color=ACCENT,
-                         font=ui_font(size=13, weight="bold"), wraplength=520,
-                         justify="left").pack(anchor="w", padx=8, pady=(10, 2))
-            ctk.CTkLabel(frame, text=answer, text_color=TEXT,
-                         font=ui_font(size=13), wraplength=520,
-                         justify="left").pack(anchor="w", padx=8, pady=(0, 8))
+    def _help_body(self, text, color=None):
+        ctk.CTkLabel(self._help_frame, text=text, text_color=color or TEXT,
+                     font=ui_font(size=13), wraplength=520,
+                     justify="left").pack(anchor="w", padx=10, pady=(0, 6))
 
-        head("三步上手")
-        body("第 1 步　点左下角的「更新游戏数据」，从服务器拉取游戏目录。")
-        body("第 2 步　点开任意一款游戏，在右侧用星星给它打分。")
-        body("第 3 步　用标签筛选，再把顶栏排序切成「按xp推荐」，挑下一款要玩的。")
-        body("打分越多，推荐越准——这是它和普通游戏列表最大的区别。", color=MUTED)
+    def _help_qa(self, question, answer):
+        """A question and its answer rendered as one visual unit.
 
-        head("这个软件是什么")
-        body("一个 dikgames 站点游戏的本地资料库。游戏目录由作者的服务器从站点整理好，"
-             "同步时下载进本地数据库，再按标签、评分、下载状态去挑你想玩的那些。"
-             "浏览、搜索、筛选都不联网；封面图跟着目录一起下载，下完一款存一款。")
-        body("数据库和封面不在程序旁边，在 %LOCALAPPDATA%\\slgking\\ 下面："
-             "slgking.db 和 covers 文件夹。想备份或换电脑，把那个目录整个带走。"
-             "exe 删了数据还在，换台机器数据留在原处。")
+        The question carries the emphasis: it is what someone scrolls the page
+        looking for, so it gets the bold accent treatment while the answer stays
+        plain. Loose gap above the question and a tight one under the answer is
+        what keeps one pair from running into the next.
+        """
+        ctk.CTkLabel(self._help_frame, text=question, text_color=ACCENT,
+                     font=ui_font(size=13, weight="bold"), wraplength=520,
+                     justify="left").pack(anchor="w", padx=10, pady=(10, 2))
+        ctk.CTkLabel(self._help_frame, text=answer, text_color=TEXT,
+                     font=ui_font(size=13), wraplength=520,
+                     justify="left").pack(anchor="w", padx=10, pady=(0, 8))
 
-        head("网络与梯子")
-        body("游戏目录不再直连 dikgames，改从作者的服务器下载（国内可直连，不用梯子）。"
-             "翻译用的是 Google 和各家大模型的公开接口，这些接口在墙外，"
-             "需要先开梯子（VPN / 代理），否则翻译会连接失败。")
-        body("没开梯子时，翻译会在 8 秒内明确报「网络错误：连接超时」，而不是一直卡着不动。",
-             color=MUTED)
-        body("未使用梯子导致的翻译失败等问题与作者无关。",
-             color=DANGER_TEXT)
-        _link_button(frame, SITE_LABEL, SITE_URL).pack(fill="x", padx=8, pady=(0, 6))
+    def _help_link(self, label, url):
+        _link_button(self._help_frame, label, url).pack(fill="x", padx=10,
+                                                        pady=(0, 6))
 
-        head("常见问题")
+    def _help_start(self):
+        self._help_body("第 1 步　点左下角的「更新游戏数据」，从服务器拉取游戏目录。")
+        self._help_body("第 2 步　点开任意一款游戏，在右侧用星星给它打分。")
+        self._help_body("第 3 步　用标签筛选，再把顶栏排序切成「按xp推荐」，挑下一款要玩的。")
+        self._help_body("打分越多，推荐越准——这是它和普通游戏列表最大的区别。",
+                        color=MUTED)
+        self._help_head("还有一层：个人成长体系")
+        self._help_body("右上角的「个人」「每日签到」「积分商城」是攒积分换头衔的那一套，"
+                        "和挑游戏互不干扰：签到攒分，商城里换头衔或抽奖。"
+                        "左侧栏的「更多工具…」是设一次就够的工具，左下角的「更多…」"
+                        "是同步与维护动作。")
 
-        sub("同步与数据")
-        qa("Q：同步失败了怎么办？",
-           "A：同步从服务器下载目录，中断了再点一次「更新游戏数据」就行，"
-           "已经下好的不会重复下。服务器偶尔抖动，等一会儿再试。")
+    def _help_what(self):
+        self._help_body("一个 dikgames 站点游戏的本地资料库。游戏目录由作者的服务器从"
+                        "站点整理好，同步时下载进本地数据库，再按标签、评分、下载状态"
+                        "去挑你想玩的那些。浏览、搜索、筛选都不联网；封面图跟着目录"
+                        "一起下载，下完一款存一款。")
+        self._help_body("数据库和封面不在程序旁边，在 %LOCALAPPDATA%\\slgking\\ 下面："
+                        "slgking.db 和 covers 文件夹。想备份或换电脑，把那个目录整个"
+                        "带走。exe 删了数据还在，换台机器数据留在原处。")
 
-        qa("Q：同步跑太久，能停吗？",
-           "A：能。任务跑起来之后，左下角那颗按钮会变成「停止」，点一下就停；"
-           "已经抓到的部分会保存，下次接着来。正在飞行中的那一个网页请求要等它"
-           "返回，通常不到一秒。")
+    def _help_browse(self):
+        self._help_head("左栏")
+        self._help_body("「我添加的游戏」是你自己加进来的那些（见「添加我的游戏」）；"
+                        "「收藏夹」是个下拉框，选中某个收藏夹后主列表只显示它里面的游戏。"
+                        "「更多工具…」是设一次就够的设置，「更多…」是同步与维护动作。")
+        self._help_head("卡片与详情")
+        self._help_body("主列表每张卡片显示封面、标题、版本、评分、前几个标签和状态点。"
+                        "点开一款，右侧详情页是封面、简介、标签、评分、状态，"
+                        "以及一排动作按钮。")
+        self._help_head("筛选与排序")
+        self._help_qa("Q：搜索、筛选、标签库之间的区别？",
+                      "A：搜索栏按游戏名找；卡片上的标签或「标签库…」里的左键加入筛选、"
+                      "右键排除；「更多工具…」→「偏好权重…」会按你打过的五星评分算出"
+                      "你倾向的标签，正数是你喜欢的。")
+        self._help_body("顶栏排序有「按xp推荐」「热度」「更新时间」「评分」，"
+                        "旁边的箭头切换升序降序。", color=MUTED)
 
-        qa("Q：左下角「更多…」里面那几个是干什么的？",
-           "A：都是不常用的维护动作，点开每个下面都有一句说明。\n"
-           "「下载封面」：补下缺的封面缩略图。正常「同步」会从服务器把封面一起"
-           "拉下来，这个只是用来补漏下的，或者哪张图当时没抓到。\n"
-           "「补齐热度」：在本地重算热度，不联网。")
+    def _help_collection(self):
+        self._help_body("收藏夹是你自己的分组，和站点标签无关——想按「正在追的」「纯爱」"
+                        "「NTR」还是任何你自己的口径分都可以。")
+        self._help_body("怎么放进去：点开一款游戏，右侧详情页点「收藏夹…」，勾选要放进"
+                        "去的分组。已经在某个收藏夹里时，详情页会多一个「移出此收藏夹」。")
+        self._help_body("怎么建和删：左栏「更多工具…」→「管理收藏夹…」；也可以直接在"
+                        "某个收藏夹里点「删除此收藏夹」——只删分组，游戏本身不受影响。")
+        self._help_body("想只看某个收藏夹里的游戏，用左栏那个下拉框切过去；切回"
+                        "「收藏夹」就是全部。", color=MUTED)
 
-        qa("Q：封面显示灰色方块？",
-           "A：说明这张封面还没下载。正常「同步」会把封面一起拉下来，所以先再点一次"
-           "同步；还是灰的就点左下角「更多…」→「下载封面」补，让它慢慢跑完。")
+    def _help_profile(self):
+        self._help_body("右上角「个人」和游戏详情共用右侧那块面板：点它会先把你正在看的"
+                        "游戏盖住，点回去就恢复。里面是昵称、头像、当前头衔、积分余额，"
+                        "以及「修改昵称」「查看头衔」「兑换码」三个入口。")
+        self._help_body("积分怎么来：每日签到 +%d 分；每日抽奖有机会抽到史诗头衔与积分；"
+                        "兑换码换头衔；版本更新还会发一笔维护补偿积分。"
+                        % slg_titles.DAILY_SIGNIN_POINTS)
+        self._help_body("昵称、积分、头衔都只存在你自己的机器上"
+                        "（%LOCALAPPDATA%\\slgking\\slgking.db），没有账号也没有云端。",
+                        color=MUTED)
+        self._help_body("这一套社交属性——签到、积分、头衔、抽奖——都是在给后续的"
+                        "「云端评论版本」铺路：等账号体系上线，现在攒的这些会跟着迁过去。"
+                        "所以先别急，慢慢攒就行。", color=MUTED)
 
-        qa("Q：「扫描本地目录」扫哪里？",
-           "A：在左侧栏「更多工具…」→「扫描本地目录…」里，第一次点它会让你选一个"
-           "文件夹，选完就记住了。想换一个，在那行上点右键重新选。\n"
-           "选中文件夹之后，库里同名（或近似同名）的游戏会被标成「已下载」，"
-           "并记下本地版本号，方便和站点上的最新版对比。")
+    def _help_signin(self):
+        self._help_body("右上角「每日签到」，每天一次，签完按钮变成「今日已签到」并变灰，"
+                        "第二天自动恢复。签到 +%d 积分，带撒花动画。"
+                        % slg_titles.DAILY_SIGNIN_POINTS)
+        self._help_body("签到按本机日期计算，每天一次。", color=MUTED)
 
-        sub("翻译")
-        qa("Q：翻译要怎么开？",
-           "A：点左侧栏的「更多工具…」→「翻译设置…」，有两条路。\n"
-           "· 免费机翻：什么都不用填，选上就能用，简介和游戏名都翻。质量一般，"
-           "偶尔会被 Google 限流，过几分钟再试。\n"
-           "· AI 翻译：填一个 OpenAI 兼容接口的 Key（DeepSeek、硅基流动、Kimi、"
-           "智谱、通义、OpenAI 都行），质量明显更好。\n"
-           "译文存在本地数据库里，翻一次就一直有效，不会重复花钱。")
+    def _help_titles(self):
+        self._help_body("「个人」→「查看头衔」，能看到全部头衔和各自的获取方式。已拥有的"
+                        "可以随时「装备」或「取消」，装备中的那个会显示在个人页上，"
+                        "带对应的颜色和流光。")
+        self._help_body("头衔分几档，档名不公开——颜色和动效就是全部提示：越少见的头衔"
+                        "颜色越跳、动得越多。")
+        self._help_body("获取途径：兑换码（群里的每日码、活动码）、积分商城兑换、"
+                        "每日抽奖大奖，以及开发者特权。", color=MUTED)
 
-        qa("Q：点了翻译，等很久什么都没有？",
-           "A：先看有没有开梯子——翻译接口都在墙外，没开梯子必然连不上。"
-           "现在这种情况会在 8 秒内报「网络错误：连接超时」；如果超过 8 秒还没有任何"
-           "提示，那是 bug，请到 GitHub 上反馈。")
+    def _help_shop(self):
+        self._help_body("右上角「积分商城」，和「个人」一样在右侧面板里打开。顶上按"
+                        "「头衔类 / 物品类」和子分类筛选，下面是商品网格，点「兑换」"
+                        "直接扣积分。")
+        self._help_head("每日抽奖")
+        self._help_body("5 积分一次、每天 3 次，三列老虎机。大奖是史诗头衔「幸运星」，"
+                        "中奖概率固定 1%；其余结果返还积分。")
 
-        qa("Q：为什么标签只能用 AI 翻？",
-           "A：标签是全库共用的固定术语，一百多张卡片都显示同一份。机翻每次给的"
-           "译法都不一样（netorare 这轮叫「寝取」下轮叫「NTR」），整个库会读起来"
-           "前后矛盾。所以标签翻译需要 AI 引擎——在「更多工具…」→「翻译设置…」里选一个服务商，"
-           "填好 Key，然后点「翻译标签」就行，一趟大概花 1 分钱。")
+    def _help_add_game(self):
+        self._help_body("不在这份站点目录里的游戏可以自己加：左栏「添加我的游戏…」"
+                        "打开的是添加窗口；加完的那些在左栏「我添加的游戏」这个视图里"
+                        "看，和站点目录分开。")
+        self._help_body("先选游戏文件夹，程序会试着自动读取能读到的部分——标题、开发商、"
+                        "版本号、引擎（Ren'Py / Unity / RPG Maker / HTML 都认），填进"
+                        "对应的输入框；读不到的留空自己写。简介、标签、封面由你填。")
+        self._help_body("加进来的游戏默认只出现在左侧「我添加的游戏」；填齐信息后可以勾"
+                        "「加入主列表」，让它和站点目录里的游戏混在一起显示。")
+        self._help_body("自己加的游戏不会被同步覆盖，删掉站点目录里的对应条目也还在。",
+                        color=MUTED)
 
-        qa("Q：为什么有些游戏名还是英文？",
-           "A：名字里的版本号（v1.20、EP03）和方括号里的社团名，AI 经常忍不住去改。"
-           "改过的名字会被丢掉，改用原文——这类名字会记一笔「不适合翻译」，"
-           "之后不会再重复请求。简介不受影响，照常翻。")
+    def _help_scan(self):
+        self._help_body("「更多工具…」→「扫描本地目录…」：第一次点会让你选一个文件夹，"
+                        "选完就记住了。想换一个，在那行上点右键重新选。")
+        self._help_body("选中之后，库里同名（或近似同名）的游戏会被标成「已下载」，"
+                        "并记下本地版本号，方便和站点上的最新版对比。")
 
-        sub("界面与设置")
-        qa("Q：搜索、筛选、标签库之间的区别？",
-           "A：搜索栏按游戏名找；卡片上的标签或「标签库…」里的左键加入筛选、右键排除；"
-           "「更多工具…」→「偏好权重…」会按你打过的五星评分算出你倾向的标签。")
+    def _help_translate(self):
+        self._help_body("翻译和站点目录是两条路：目录走作者的服务器（国内可直连，不用"
+                        "梯子）；翻译走 Google 和各家大模型的公开接口，那些接口在墙外，"
+                        "必须先开梯子（VPN / 代理），否则一定会连接失败。")
+        self._help_body("没开梯子时，翻译会在 8 秒内明确报「网络错误：连接超时」，"
+                        "而不是一直卡着不动。", color=MUTED)
+        self._help_body("未使用梯子导致的翻译失败等问题与作者无关。",
+                        color=DANGER_TEXT)
+        self._help_link(SITE_LABEL, SITE_URL)
+        self._help_qa("Q：翻译要怎么开？",
+                      "A：点左侧栏的「更多工具…」→「翻译设置…」，有两条路。\n"
+                      "· 免费机翻：什么都不用填，选上就能用，简介和游戏名都翻。"
+                      "质量一般，偶尔会被 Google 限流，过几分钟再试。\n"
+                      "· AI 翻译：填一个 OpenAI 兼容接口的 Key（DeepSeek、硅基流动、"
+                      "Kimi、智谱、通义、OpenAI 都行），质量明显更好。\n"
+                      "译文存在本地数据库里，翻一次就一直有效，不会重复花钱。")
+        self._help_qa("Q：点了翻译，等很久什么都没有？",
+                      "A：先看有没有开梯子——翻译接口都在墙外，没开梯子必然连不上。"
+                      "现在这种情况会在 8 秒内报「网络错误：连接超时」；如果超过 8 秒"
+                      "还没有任何提示，那是 bug，请到 GitHub 上反馈。")
+        self._help_qa("Q：为什么标签只能用 AI 翻？",
+                      "A：标签是全库共用的固定术语，一百多张卡片都显示同一份。机翻每次"
+                      "给的译法都不一样（netorare 这轮叫「寝取」下轮叫「NTR」），整个"
+                      "库会读起来前后矛盾。所以标签翻译需要 AI 引擎——在「更多工具…」→"
+                      "「翻译设置…」里选一个服务商，填好 Key，然后点「翻译标签」就行，"
+                      "一趟大概花 1 分钱。")
+        self._help_qa("Q：为什么有些游戏名还是英文？",
+                      "A：名字里的版本号（v1.20、EP03）和方括号里的社团名，AI 经常忍"
+                      "不住去改。改过的名字会被丢掉，改用原文——这类名字会记一笔"
+                      "「不适合翻译」，之后不会再重复请求。简介不受影响，照常翻。")
+        self._help_head("标签译名")
+        self._help_body("「更多工具…」→「标签译名…」可以给标签写中文名，改完列表和"
+                        "筛选条立刻跟着变。标签本身还是站点原文，只有显示名被替换。")
 
-        qa("Q：右上角那颗齿轮是干什么的？",
-           "A：打开「设置」——浅色/深色/跟随系统在这里切，"
-           "「关于本软件…」也在里面（版本信息、检查软件更新、GitHub 主页、"
-           "反馈邮箱、数据目录）。设一次的工具在左侧栏的「更多工具…」里，"
-           "和这个是两个不同的门。")
+    def _help_sync(self):
+        self._help_body("左下角「更新游戏数据」从作者的服务器拉目录。服务器每天中午"
+                        "（北京时间 12:23）自动去站点增量同步一次，你这边只拉结果——"
+                        "所以不需要梯子，也不会因为爬站被封 IP。")
+        self._help_body("要不要下载只看一个信号：目录的更新时间。没变就直接跳过，变了"
+                        "整库下载后按游戏标识合并——你自己的评分、备注、收藏夹、翻译"
+                        "都不会被动。")
+        self._help_qa("Q：同步失败了怎么办？",
+                      "A：中断了再点一次「更新游戏数据」就行，已经下好的不会重复下。"
+                      "服务器偶尔抖动，等一会儿再试。")
+        self._help_qa("Q：同步跑太久，能停吗？",
+                      "A：能。任务跑起来之后，左下角那颗按钮会变成「停止」，点一下就停；"
+                      "已经抓到的部分会保存，下次接着来。正在飞行中的那一个请求要等它"
+                      "返回，通常不到一秒。")
+        self._help_qa("Q：封面显示灰色方块？",
+                      "A：说明这张封面还没落到本地。封面和目录一起从服务器拉，"
+                      "再点一次「更新游戏数据」通常就有了；还是灰的，点左下角"
+                      "「更多…」→「下载封面」单独补，让它慢慢跑完（全量约 250 MB）。")
+        self._help_qa("Q：左下角「更多…」里面那几个是干什么的？",
+                      "A：都是不常用的维护动作，点开每个下面都有一句说明。\n"
+                      "「下载封面」：补下缺的封面缩略图。\n"
+                      "「补齐热度」：在本地重算热度，不联网。")
 
-        qa("Q：深色主题里的「跟随系统」是怎么工作的？",
-           "A：程序每 5 秒采样一次 Windows 的浅色/深色设置，变了就跟着换，"
-           "所以会有一小段延迟。手动选「浅色」或「深色」则会记住，下次打开还是它。")
+    def _help_faq(self):
+        self._help_sub("界面与设置")
+        self._help_qa("Q：右上角那颗齿轮是干什么的？",
+                      "A：打开「设置」——浅色/深色/跟随系统在这里切，抽奖音效的开关"
+                      "也在这里，「关于本软件…」同样在里面（版本信息、检查软件更新、"
+                      "GitHub 主页、反馈邮箱、数据目录）。设一次的工具在左侧栏的"
+                      "「更多工具…」里，和这个是两个不同的门。")
+        self._help_qa("Q：深色主题里的「跟随系统」是怎么工作的？",
+                      "A：程序每 5 秒采样一次 Windows 的浅色/深色设置，变了就跟着换，"
+                      "所以会有一小段延迟。手动选「浅色」或「深色」则会记住，"
+                      "下次打开还是它。")
+        self._help_qa("Q：窗口太小/字太大，排版挤了？",
+                      "A：窗口可以随意拉伸，右侧面板会跟着变宽，商城的商品网格也会"
+                      "自动多排一列。")
+        self._help_sub("同步与数据")
+        self._help_qa("Q：目录多久更新一次？",
+                      "A：服务器每天中午自动同步一次站点，你这边点「更新游戏数据」"
+                      "拿到的就是最新快照。")
+        self._help_qa("Q：换电脑了，我的评分还在吗？",
+                      "A：评分、备注、收藏夹、头衔、积分都在 %LOCALAPPDATA%\\slgking\\"
+                      "slgking.db 里，把那个目录整个拷过去就还在（见「备份与恢复」）。")
+        self._help_sub("抽奖与积分")
+        self._help_qa("Q：抽奖的概率是怎么定的？",
+                      "A：固定概率：头衔 1%，其余是积分奖励。")
+        self._help_qa("Q：抽中头衔了，界面怎么没变？",
+                      "A：头衔到手了但没自动装备。「个人」→「查看头衔」里找到它，"
+                      "点「装备」才会显示在个人页。")
+        self._help_qa("Q：积分能不能送人/换钱？",
+                      "A：不能。积分只存在本机，没有账号、没有服务器记录，"
+                      "也没法转给别人。")
+        self._help_sub("翻译")
+        self._help_qa("Q：翻译相关的问题在哪？",
+                      "A：见左栏的「翻译与标签」一节，那边的答案更全。")
 
-        head("下载的游戏是英文的怎么办")
-        body("dikgames 是英文流站点，站上绝大多数游戏都没有官方中文，下载到"
-             "英文版本是正常的，不是文件坏了。想看懂，按顺序装这两个工具：\n"
-             "1. 露娜翻译器（LunaTranslator）：开源免费，边玩边实时机翻游戏文本；\n"
-             "2. 作者的 RenPy 汉化小工具：搭配露娜翻译器，把 RenPy 游戏做成离线汉化。")
-        _link_button(frame, LUNA_LABEL, LUNA_URL).pack(fill="x", padx=8, pady=(0, 4))
-        _link_button(frame, RPYKIT_LABEL, RPYKIT_URL).pack(fill="x", padx=8, pady=(0, 6))
+    def _help_hanhua(self):
+        self._help_body("dikgames 是英文流站点，站上绝大多数游戏都没有官方中文，下载到"
+                        "英文版本是正常的，不是文件坏了。想看懂，按顺序装这两个工具：\n"
+                        "1. 露娜翻译器（LunaTranslator）：开源免费，边玩边实时机翻游戏文本；\n"
+                        "2. 作者的 RenPy 汉化小工具：搭配露娜翻译器，把 RenPy 游戏做成离线汉化。")
+        self._help_link(LUNA_LABEL, LUNA_URL)
+        self._help_link(RPYKIT_LABEL, RPYKIT_URL)
+        self._help_body("RenPy 游戏想整包离线汉化，用第二个工具：它按脚本把文本抽出来、"
+                        "翻好再塞回去。露娜翻译器对付的是运行时的实时翻译，两个可以并存。",
+                        color=MUTED)
 
-        head("声明与关于")
-        body("本软件只是一个游戏资料检索库，里面没有任何游戏文件，也不提供"
-             "任何下载。想下载游戏请前往游戏官网，或者自己去找下载地址。\n"
-             "检索到的信息和游戏的版权都归原站点与作者所有。", color=DANGER_TEXT)
-        body("作者 · %s" % AUTHOR, color=MUTED)
+    def _help_backup(self):
+        self._help_body("「更多工具…」→「备份与恢复…」把你自己产生的数据导出成一个 json："
+                        "评分、备注、状态、收藏夹、手动加的标签译名。导入时用文件里的内容"
+                        "覆盖这几项。")
+        self._help_body("文件名默认带当天日期（slgking-备份-20260922.json），存哪儿都行，"
+                        "换电脑时拷过去，新机器上导入一次就回来了。", color=MUTED)
+        self._help_qa("Q：备份里包含游戏目录和封面吗？",
+                      "A：不含。目录和封面随时能从服务器重新拉，备份只装那些服务器上"
+                      "没有的东西——也就是你的数据。")
+        self._help_qa("Q：导入会删掉我现在的东西吗？",
+                      "A：会覆盖同一款游戏的评分、备注和状态，以及整个收藏夹和标签"
+                      "译名。导入前先导出一份当前数据，就等于给自己留了后悔药。")
+        self._help_qa("Q：最彻底的备份方式？",
+                      "A：把 %LOCALAPPDATA%\\slgking 整个目录拷走。里面是 slgking.db"
+                      "（全部数据）和 covers（封面缓存），拷过去就是完整还原，"
+                      "连积分和头衔都在。代价是 200 MB 上下。")
+        self._help_qa("Q：备份里有没有密钥之类的东西？",
+                      "A：没有。导出时会跳过开发者密钥和机器翻译缓存，那个文件可以"
+                      "放心发给别人。")
+
+    def _help_update(self):
+        self._help_body("软件每次启动会静默问一次 GitHub 有没有新版本，有的话在左侧栏"
+                        "底部显示一行「有新版本 x.y.z，点击查看」，点开是更新说明。")
+        self._help_body("想手动问一次：右上角齿轮 →「关于本软件…」→「检查更新」。"
+                        "手动检查时，没有新版本也会回一句「已是最新版本」，"
+                        "自动检查则只在真的有新版时才吭声。", color=MUTED)
+        self._help_qa("Q：它会不会自己装新版本？",
+                      "A：不会。它只负责告诉你，下载和替换都由你自己来——从 GitHub"
+                      "发布页下新版的 exe，覆盖原来那个即可，数据都在数据目录里，"
+                      "不会丢。")
+        self._help_qa("Q：检查更新失败要管吗？",
+                      "A：不用。可能是网络波动或 GitHub 抽风，不影响任何功能，"
+                      "下次启动还会再问。")
+
+    def _help_about(self):
+        self._help_body("本软件只是一个游戏资料检索库，里面没有任何游戏文件，也不提供"
+                        "任何下载。想下载游戏请前往游戏官网，或者自己去找下载地址。\n"
+                        "检索到的信息和游戏的版权都归原站点与作者所有。",
+                        color=DANGER_TEXT)
+        self._help_body("作者 · %s" % AUTHOR, color=MUTED)
         # The button rather than a bare link: someone who opens 帮助文档 looking
         # for the source should not have to spot an 11px underlined label.
-        _link_button(frame, GITHUB_LABEL, GITHUB_URL).pack(
-            fill="x", padx=8, pady=(0, 6))
-        body("版本 " + build_stamp(), color=MUTED)
-        body("本软件完全免费。没有收费版、没有付费激活、没有隐藏收费入口。\n"
-             "如果你是通过付费渠道拿到它的，请立即举报。", color=DANGER_TEXT)
-        body("用得还行的话，欢迎在 GitHub 点个 star，也帮忙推荐给周围的朋友。"
-             "有想法、有 bug、想要什么功能，发邮件到 %s，"
-             "或者加交流群 %s。" % (CONTACT_EMAIL, QQ_GROUP),
-             color=MUTED)
-        _link_button(frame, "发邮件给作者", CONTACT_MAILTO).pack(
-            fill="x", padx=8, pady=(0, 6))
-        _copy_button(frame, "复制交流群号：%s" % QQ_GROUP, QQ_GROUP, self).pack(
-            fill="x", padx=8, pady=(0, 6))
+        self._help_link(GITHUB_LABEL, GITHUB_URL)
+        self._help_body("版本 " + build_stamp(), color=MUTED)
+        self._help_body("本软件完全免费。没有收费版、没有付费激活、没有隐藏收费入口。\n"
+                        "如果你是通过付费渠道拿到它的，请立即举报。", color=DANGER_TEXT)
+        self._help_body("用得还行的话，欢迎在 GitHub 点个 star，也帮忙推荐给周围的朋友。"
+                        "有想法、有 bug、想要什么功能，发邮件到 %s，"
+                        "或者加交流群 %s。" % (CONTACT_EMAIL, QQ_GROUP),
+                        color=MUTED)
+        self._help_link("发邮件给作者", CONTACT_MAILTO)
+        _copy_button(self._help_frame, "复制交流群号：%s" % QQ_GROUP, QQ_GROUP,
+                     self).pack(fill="x", padx=10, pady=(0, 6))
 
     @staticmethod
     def _tag_btn_text(pending, allowed=True):
@@ -5013,6 +7255,100 @@ class App(ctk.CTk):
             self.queue.put(("done", text))
         except Exception as exc:  # noqa: BLE001
             self.queue.put(("done", "标签翻译失败：%s" % str(exc)[:150]))
+
+    # --- remote config / telemetry ---------------------------------------------
+
+    def _apply_startup_compensation(self):
+        """版本升级维护补偿：版本号变了发一次积分，静默失败不阻断启动。"""
+        try:
+            amount = slg_titles.apply_update_compensation(self.conn, APP_VERSION)
+        except Exception:  # noqa: BLE001 - compensation must never break launch
+            return
+        if amount:
+            self.queue.put(("note", "版本更新，已发放 %d 积分维护补偿" % amount))
+
+    def _start_remote_check(self):
+        """Fetch the server's config.json and fire the launch events, off-thread."""
+        threading.Thread(target=self._remote_worker, daemon=True).start()
+
+    def _remote_worker(self):
+        cfg = slg_remote.fetch_config()
+        # Launch + snapshot events go out on their own connection, the same rule
+        # the sync/update workers follow: self.conn belongs to the tk thread.
+        try:
+            with slg_db.session() as conn:
+                slg_remote.report(conn, "launch",
+                                  {"platform": sys.platform,
+                                   "games": slg_db.stats(conn)["games"]})
+                slg_remote.report(conn, "snapshot", {
+                    "points": slg_db.points_balance(conn),
+                    "titles": len(slg_db.owned_title_ids(conn)),
+                    "collection": slg_db.collection_count(conn),
+                })
+        except Exception:  # noqa: BLE001 - telemetry must never raise
+            pass
+        self.queue.put(("remote", cfg))
+
+    def _handle_remote_config(self, cfg):
+        self._remote_config = cfg or {}
+        flags = self._remote_config.get("flags") or {}
+        self._remote_flags = flags
+
+        if flags.get("disable_signin"):
+            if self.signin_btn is not None and self.signin_btn.winfo_exists():
+                self.signin_btn.configure(text="签到维护中", state="disabled")
+
+        # Announcement: only the first time this id is seen.
+        ann = self._remote_config.get("announcement") or {}
+        if ann.get("id") and str(ann.get("id")) != slg_db.get_pref(
+                self.conn, slg_remote.PREF_ANNOUNCE_SEEN, ""):
+            slg_db.set_pref(self.conn, slg_remote.PREF_ANNOUNCE_SEEN,
+                            str(ann.get("id")))
+            self._show_announcement(ann)
+
+        # Forced update beats the soft GitHub notice.
+        minv = self._remote_config.get("min_version")
+        if minv and slg_update.is_newer(minv, APP_VERSION):
+            self._show_forced_update(minv)
+
+        # Maintenance: disable the sync button and warn once.
+        if self._remote_config.get("maintenance"):
+            self._show_maintenance(self._remote_config.get("maintenance_msg"))
+
+    def _show_announcement(self, ann):
+        title = ann.get("title") or "公告"
+        body = ann.get("body") or ""
+        win = self._new_dialog("公告", "420x340")
+        ctk.CTkLabel(win, text=title, text_color=TEXT,
+                     font=ui_font(size=16, weight="bold")).pack(
+            fill="x", padx=20, pady=(18, 8))
+        ctk.CTkLabel(win, text=body, text_color=TEXT, font=ui_font(size=13),
+                     justify="left", wraplength=360).pack(
+            fill="x", padx=20, pady=(0, 12))
+        ctk.CTkButton(win, text="知道了", height=34, width=120, corner_radius=8,
+                      fg_color=ACCENT, text_color=ON_ACCENT, hover_color=CARD_HOVER,
+                      font=ui_font(size=13), command=win.destroy).pack(pady=(8, 0))
+
+    def _show_forced_update(self, min_version):
+        win = self._new_dialog("需要更新", "420x300")
+        ctk.CTkLabel(win, text="请更新到最新版本", text_color=TEXT,
+                     font=ui_font(size=16, weight="bold")).pack(
+            fill="x", padx=20, pady=(18, 4))
+        ctk.CTkLabel(win, text="当前版本 %s 已不再支持，需要 %s 及以上版本。"
+                     % (APP_VERSION, min_version), text_color=MUTED,
+                     font=ui_font(size=13), justify="left", wraplength=360).pack(
+            fill="x", padx=20, pady=(0, 12))
+        ctk.CTkButton(win, text="前往下载", height=34, corner_radius=8,
+                      fg_color=ACCENT, text_color=ON_ACCENT, hover_color=CARD_HOVER,
+                      font=ui_font(size=13),
+                      command=lambda: (webbrowser.open(slg_update.RELEASES_URL),
+                                       win.destroy())).pack(fill="x", padx=20, pady=(8, 0))
+
+    def _show_maintenance(self, msg):
+        text = msg or "服务器维护中，同步功能暂时不可用，请稍后再试。"
+        if self.sync_btn is not None and self.sync_btn.winfo_exists():
+            self.sync_btn.configure(state="disabled")
+        messagebox.showinfo("维护中", text, parent=self)
 
     # --- software updates ------------------------------------------------------
 
@@ -5189,6 +7525,12 @@ class App(ctk.CTk):
     def do_sync(self):
         """Pull the pre-built catalogue from the server - no direct scraping."""
         if self.busy:
+            return
+        if self._remote_config.get("maintenance"):
+            messagebox.showwarning(
+                "维护中",
+                self._remote_config.get("maintenance_msg")
+                or "服务器维护中，同步功能暂时不可用", parent=self)
             return
         self._run_job("同步中…", self._sync_worker)
 
@@ -5399,6 +7741,10 @@ class App(ctk.CTk):
             self._end_job(payload, refill=True)
         elif kind == "update":
             self._show_update(payload)
+        elif kind == "remote":
+            self._handle_remote_config(payload)
+        elif kind == "stats":
+            self._fill_stats(payload)
         elif kind == "note":
             self._set_settings_status(payload)
         elif kind == "overview":

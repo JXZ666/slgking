@@ -6,6 +6,13 @@ REM while the window title is Chinese.
 setlocal
 cd /d "%~dp0"
 
+REM Two channels: "build_exe.bat" builds the stable slgking.exe, and
+REM "build_exe.bat test" builds the personal slgking_test.exe. The spec reads
+REM SLGKING_EXE_NAME to pick the name; the version string inside each exe is
+REM whatever slg_gui.APP_VERSION is on the current branch.
+set "SLGKING_EXE_NAME=slgking"
+if /i "%~1"=="test" set "SLGKING_EXE_NAME=slgking_test"
+
 where python >nul 2>nul || (echo Python not found on PATH & exit /b 1)
 
 python -c "import PyInstaller" >nul 2>nul || (
@@ -31,5 +38,5 @@ REM the terminal they were launched from and leaves a double-click alone.
 python -m PyInstaller --noconfirm --clean slgking.spec || exit /b 1
 
 echo.
-echo Built: %CD%\dist\slgking.exe
+echo Built: %CD%\dist\%SLGKING_EXE_NAME%.exe
 endlocal

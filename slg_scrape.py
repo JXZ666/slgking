@@ -19,6 +19,7 @@ site is ~1000 games and there is no reason to hammer it.
 import gzip
 import html
 import http.client
+import json
 import os
 import queue
 import re
@@ -118,6 +119,32 @@ def http_get(url, timeout=TIMEOUT, direct=False):
                    "image/avif,image/webp,*/*;q=0.8"),
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate",
+        "Connection": "close",
+    })
+    opener = _DIRECT_OPENER if direct else None
+    with (opener.open(req, timeout=timeout) if opener
+          else urllib.request.urlopen(req, timeout=timeout)) as resp:
+        raw = resp.read()
+        enc = (resp.headers.get("Content-Encoding") or "").lower()
+    if enc == "gzip" or raw[:2] == b"\x1f\x8b":
+        return gzip.decompress(raw)
+    if enc == "deflate":
+        return zlib.decompress(raw, -zlib.MAX_WBITS)
+    return raw
+
+
+def http_post(url, payload, timeout=TIMEOUT, direct=False):
+    """One POST with a JSON body, raw bytes back. Raises on failure.
+
+    The author's own server is the only POST target, so `direct=True` is the
+    normal call: the telemetry endpoint must bypass any system/VPN proxy exactly
+    like http_get does for the manifest, or a user's proxy swallows the report.
+    """
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "User-Agent": UA,
+        "Content-Type": "application/json; charset=utf-8",
+        "Accept": "application/json",
         "Connection": "close",
     })
     opener = _DIRECT_OPENER if direct else None

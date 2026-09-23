@@ -1,5 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+
+# The exe name is read from the environment so one spec serves both the stable
+# build (slgking.exe) and the personal test build (slgking_test.exe). build_exe.bat
+# sets SLGKING_EXE_NAME for the test pass; the default is the shipped name.
+_EXE_NAME = os.environ.get("SLGKING_EXE_NAME", "slgking")
+
 
 a = Analysis(
     ['slg_main.py'],
@@ -10,6 +17,7 @@ a = Analysis(
     datas=[('assets/slgking.ico', 'assets'),
            ('assets/tag_zh.json', 'assets'),
            ('assets/avatar.png', 'assets'),
+           ('assets/slot', 'assets/slot'),
            ('assets/seed/slgking.db', 'assets/seed'),
            ('assets/seed/covers', 'assets/seed/covers')],
     hiddenimports=[],
@@ -28,7 +36,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='slgking',
+    name=_EXE_NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

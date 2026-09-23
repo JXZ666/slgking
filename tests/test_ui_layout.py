@@ -7,6 +7,7 @@ screen. Run with:
     python -m unittest discover tests
 """
 
+import itertools
 import os
 import sys
 import tempfile
@@ -14,6 +15,7 @@ import time
 import tkinter as tk
 import traceback
 import unittest
+from datetime import date
 from unittest import mock
 
 # SidebarFit below builds a real App, and App.__init__ opens the database at
@@ -25,9 +27,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import slg_db  # noqa: E402
 import slg_gui  # noqa: E402
+import slg_remote  # noqa: E402
+import slg_titles  # noqa: E402
 import slg_translate  # noqa: E402
 
 import customtkinter as ctk  # noqa: E402
+
+
+class _InlineThread:
+    """Runs a threading.Thread's target on the caller's stack.
+
+    The stats panel fills itself from a background worker, so a test that races
+    that worker would be the flakiest thing in the suite.
+    """
+
+    def __init__(self, target=None, daemon=None, **kwargs):
+        self._target = target
+
+    def start(self):
+        self._target()
 
 
 class FlowRows(unittest.TestCase):
@@ -53,6 +71,191 @@ class FlowRows(unittest.TestCase):
         self.assertGreater(rows[-1], 10)
         # Rows only ever step up by one, so the placement loop cannot skip a row.
         self.assertEqual(rows, sorted(rows))
+
+
+class ShopColumns(unittest.TestCase):
+    """商城货架的列数/卡宽。纯函数，因为这段算法才是「商品不见了」的根因。
+
+    背景：右侧面板是窗口的 40%。默认窗口 1180 时网格只有 192 逻辑像素，而两张
+    104 的卡 + 8 间距 = 216 放不下，FlowFrame 就把 4 件商品拉成 4 行，底下的
+    被挤出视野 —— 看起来像商品消失了。所以宽度得按实测反推，不能再写死。
+    """
+
+    MAX = slg_gui.App.SHOP_TILE_W
+    MIN = slg_gui.App.SHOP_TILE_W_MIN
+    GAP = slg_gui.App.SHOP_TILE_GAP
+
+    def _cols(self, avail):
+        return slg_gui.shop_columns(avail, self.MAX, self.MIN, self.GAP)
+
+    def test_default_window_fits_two_columns(self):
+        # 192 = 默认 1180 窗口下实测的网格宽度。这条是用户报的那个 bug 的守卫。
+        cols, tile_w = self._cols(192)
+        self.assertEqual(cols, 2, "默认窗口还是只放得下一列")
+        self.assertGreaterEqual(tile_w, self.MIN)
+        self.assertLessEqual(tile_w * 2 + self.GAP, 192, "两张卡放不下")
+
+    def test_narrow_panel_falls_back_to_one_wider_column(self):
+        cols, tile_w = self._cols(128)
+        self.assertEqual(cols, 1)
+        self.assertEqual(tile_w, self.MAX, "单列时该用最宽的卡")
+
+    def test_roomy_panel_uses_the_widest_tiles(self):
+        cols, tile_w = self._cols(280)
+        self.assertEqual((cols, tile_w), (2, self.MAX))
+
+    def test_very_roomy_panel_adds_a_column_rather_than_stretching(self):
+        cols, tile_w = self._cols(400)
+        self.assertEqual(cols, 3)
+        self.assertEqual(tile_w, self.MAX)
+
+    def test_tiles_never_overflow_the_available_width(self):
+        for avail in range(80, 900, 7):
+            cols, tile_w = self._cols(avail)
+            self.assertGreaterEqual(cols, 1)
+            self.assertGreaterEqual(tile_w, self.MIN)
+            self.assertLessEqual(tile_w, self.MAX)
+            if cols > 1:
+                self.assertLessEqual(tile_w * cols + self.GAP * (cols - 1), avail,
+                                     "%dpx 里塞了 %d 列 %dpx" % (avail, cols, tile_w))
+
+
+class LotterySpinSchedule(unittest.TestCase):
+    """The reel's deceleration curve, which is the whole animation.
+
+    Pure maths on purpose: the curve is what makes the spin read as a real reel
+    slowing down, and it is the part that would be painful to eyeball in a
+    window that is on screen for two seconds.
+    """
+
+    def test_steps_sum_to_exactly_one_revolution(self):
+        # Land a hair short and the strip stops between two symbols, which
+        # looks like a rendering bug rather than a result.
+        for slots in (12, 18, 24):
+            with self.subTest(slots=slots):
+                spun = sum(step for _d, step
+                           in slg_gui.lottery_spin_schedule(slots=slots))
+                self.assertAlmostEqual(spun, slots, places=6)
+
+    def test_it_starts_fast_and_ends_slow(self):
+        steps = [s for _d, s in slg_gui.lottery_spin_schedule()]
+        self.assertGreater(steps[0], steps[-3] * 3,
+                           "第一步和最后一步该差一个数量级")
+
+    def test_the_delays_grow_monotonically(self):
+        delays = [d for d, _s in slg_gui.lottery_spin_schedule()]
+        body = delays[:-2]  # the last two are the rebound
+        self.assertEqual(body, sorted(body), "间隔必须一直变长，否则会一顿一顿的")
+        self.assertLess(body[0], 40)
+        self.assertGreater(body[-1], 100)
+        self.assertLess(max(delays), 400, "最后一跳等太久就不像有个轮子在转了")
+
+    def test_the_rebound_returns_to_start(self):
+        sched = slg_gui.lottery_spin_schedule(bounce=0.06)
+        self.assertLess(sched[-2][1], 0, "倒数第二步应该是往回弹一点")
+        self.assertGreater(sched[-1][1], 0)
+        self.assertAlmostEqual(sched[-2][1] + sched[-1][1], 0,
+                               msg="过冲和回弹不对称，停下时就不在原位了")
+
+    def test_a_degenerate_tick_count_still_works(self):
+        # ticks=1 collapses the span to zero, which is a division by zero in
+        # the delay ramp unless it is clamped.
+        sched = slg_gui.lottery_spin_schedule(ticks=1)
+        self.assertAlmostEqual(sum(s for _d, s in sched), 18, places=6)
+
+
+class ReelTapeCoverage(unittest.TestCase):
+    """「三个空框」的回归测试。
+
+    卷带只铺一圈（slots 格）时，位移到一圈末尾就把整条带子推出画布，剩下三个
+    空框。这条测试锁住 reel_geometry 给出的格数：任意相位下都要有符号压在可视区
+    上，包括 travel 落在 11.999999999999998（浮点误差差一点点到 12）这种边界。
+    """
+
+    CELL, ROWS, PAD, SLOTS = 52, 3, 4, 14
+
+    def _covered(self, travel, slots=None):
+        """落在画布可视区上的贴纸下标。"""
+        slots = slots or self.SLOTS
+        height, tiles = slg_gui.reel_geometry(self.CELL, self.ROWS, self.PAD,
+                                              slots)
+        hits = []
+        for k in range(tiles):
+            y = self.PAD + k * self.CELL + self.CELL / 2 - travel * self.CELL
+            if y + self.CELL / 2 > 0 and y - self.CELL / 2 < height:
+                hits.append(k)
+        return hits
+
+    def test_the_window_stays_covered_at_every_phase(self):
+        for slots in (12, 14, 18):
+            with self.subTest(slots=slots):
+                for i in range(2001):
+                    travel = slots * i / 2001.0
+                    self.assertTrue(
+                        self._covered(travel, slots),
+                        "travel=%.12f 时画布上一个符号都没有（就是那个空框 bug）"
+                        % travel)
+
+    def test_the_boundary_phases_that_caused_the_bug(self):
+        for travel in (0.0, self.SLOTS - 1e-15, self.SLOTS - 1e-9,
+                       self.SLOTS - 1e-12):
+            with self.subTest(travel=travel):
+                self.assertTrue(self._covered(travel))
+
+    def test_a_bare_loop_of_slots_tiles_would_leave_the_window_empty(self):
+        """留下反例：只用 slots 格就是老写法，它在末尾会露空。
+
+        没有这条，把 reel_geometry 的容差改回去也不会有人发现。
+        """
+        height, tiles = slg_gui.reel_geometry(self.CELL, self.ROWS, self.PAD,
+                                              self.SLOTS)
+        self.assertGreater(tiles, self.SLOTS)
+        self.assertEqual(tiles - self.SLOTS, -(-height // self.CELL))
+
+
+class ReelLanding(unittest.TestCase):
+    """停稳之后，预定符号必须正好压在判定线上。
+
+    判定线是中间那一行，中心 = pad + 1*cell + cell/2 = 82 = 画布中心。
+    """
+
+    CELL, PAD, SLOTS = 52, 4, 14
+
+    def test_index_one_is_centred_on_the_payline(self):
+        height, _tiles = slg_gui.reel_geometry(self.CELL, 3, self.PAD,
+                                               self.SLOTS)
+        self.assertEqual(height, 164)
+        self.assertAlmostEqual(self.PAD + self.CELL + self.CELL / 2,
+                               height / 2)
+
+    def test_the_planted_symbol_is_what_the_payline_shows_at_rest(self):
+        """停稳时压在判定线上的是带子上的 index 1 = 预定的那一格。
+
+        卷带按 `cycle[k % slots]` 铺、且 tick 数多铺了几格，所以「travel 差一点点
+        到一整圈」时压在判定线上的是 `cycle[(1 + slots) % slots]`，还是 cycle[1]
+        —— 这正是只补容差不补格数会漏掉的那一半。
+        """
+        slots = self.SLOTS
+        _height, tiles = slg_gui.reel_geometry(self.CELL, 3, self.PAD, slots)
+        cycle = list(range(slots))  # 拿下标当「符号」，方便比对
+        tape = [cycle[k % slots] for k in range(tiles)]
+        for k in range(tiles):
+            y = self.PAD + k * self.CELL + self.CELL / 2
+            if abs(y - 82) < self.CELL / 2:
+                self.assertEqual(tape[k], cycle[1])
+
+
+class ReelWrap(unittest.TestCase):
+    """换行的浮点容差：减速曲线会把 travel 停在 11.999999999999998。"""
+
+    def test_a_hair_short_of_a_revolution_still_wraps(self):
+        slots = 14
+        travel = slots - 1e-15
+        # 旧写法 `while travel >= slots` 在这里为 False，卷带不换行 -> 空框。
+        self.assertFalse(travel >= slots)
+        while travel >= slots - 1e-9:
+            travel -= slots
+        self.assertLess(travel, 0.0)  # 折回后是个绝对值极小的负数（-1e-15）
 
 
 class GameTagsBulk(unittest.TestCase):
@@ -450,15 +653,486 @@ class SidebarFit(unittest.TestCase):
         self._assert_has_height(slg_gui.SORT_ARROW[True], "反序按钮")
         self.assertIsNotNone(self.app.sort_dir_btn)
 
-    def test_the_profile_button_sits_in_the_reserved_row_below_sort(self):
-        # 个人 moved out of the sort cluster (`right`) into the toolbar frame
-        # itself, gridded into the reserved empty cell row=1, column=1.
+    def test_the_profile_buttons_fill_the_reserved_row_below_sort(self):
+        # 个人/每日签到/积分商城 sit side by side in the toolbar's reserved
+        # row=1 column=1, right-aligned below the sort cluster (not in `right`).
         self.assertIsNotNone(self.app.profile_btn)
-        self.assertIs(self.app.profile_btn.master, self.app.toolbar)
-        info = self.app.profile_btn.grid_info()
+        self.assertIsNotNone(self.app.signin_btn)
+        self.assertIsNotNone(self.app.shop_btn)
+        row_frame = self.app.profile_btn.master
+        self.assertIs(self.app.signin_btn.master, row_frame)
+        self.assertIs(self.app.shop_btn.master, row_frame)
+        self.assertIs(row_frame.master, self.app.toolbar)
+        info = row_frame.grid_info()
         self.assertEqual(info.get("row"), 1)
         self.assertEqual(info.get("column"), 1)
         self._assert_has_height("个人", "个人按钮")
+        self._assert_has_height("每日签到", "签到按钮")
+        self._assert_has_height("积分商城", "商城按钮")
+
+    def _panel_texts(self):
+        """Every label text in the detail panel, wherever it sits."""
+        out = []
+
+        def walk(widget):
+            for child in widget.winfo_children():
+                if type(child).__module__.startswith("customtkinter"):
+                    try:
+                        text = child.cget("text")
+                    except Exception:  # noqa: BLE001 - most widgets have no text
+                        text = None
+                    if isinstance(text, str):
+                        out.append(text)
+                    walk(child)
+
+        walk(self.app.detail)
+        return out
+
+    def _texts_in(self, widget):
+        """Every label text inside one widget, wherever it sits."""
+        out = []
+
+        def walk(node):
+            for child in node.winfo_children():
+                try:
+                    text = child.cget("text")
+                except Exception:  # noqa: BLE001 - most widgets have no text
+                    text = None
+                if isinstance(text, str):
+                    out.append(text)
+                walk(child)
+
+        walk(widget)
+        return out
+
+    def _calendar_cells(self):
+        """签到日历里每个日期格子，键是日号。
+
+        格子是 gridded 的 CTkLabel，文字就是日号 —— 面板上别处没有这种纯数字
+        标签，所以按「有 grid_info」筛出来就够，不必记住它挂在哪个 frame 下。
+        """
+        cells = {}
+
+        def walk(node):
+            for child in node.winfo_children():
+                if isinstance(child, ctk.CTkLabel):
+                    try:
+                        text = child.cget("text")
+                        gridded = bool(child.grid_info())
+                    except Exception:  # noqa: BLE001
+                        text, gridded = "", False
+                    if gridded and text.isdigit():
+                        cells[int(text)] = child
+                walk(child)
+
+        walk(self.app.detail)
+        return cells
+
+    def _close_profile(self):
+        self.app._panel_mode = None
+        self.app._destroy_detail()
+        self._finish()
+
+    def _shop_tiles(self):
+        """The product cards currently drawn in the shop grid."""
+        grid = getattr(self.app, "_shop_grid", None)
+        self.assertIsNotNone(grid, "商城没有网格容器")
+        tiles = []
+        for child in grid.winfo_children():
+            tiles.extend(getattr(child, "_items", []))
+        return tiles
+
+    def _close_shop(self):
+        self.app.selected = None
+        self.app._panel_mode = None
+        self.app._destroy_detail()
+        self._finish()
+
+    def _settled_shop_tiles(self):
+        """The tiles once the grid has really laid them out.
+
+        FlowFrame._layout() returns early while it is unmapped, so every card
+        sits at (0, 0) and any assertion about rows or columns silently
+        describes a layout that was never computed. Waiting for mapping is what
+        turns that into a real measurement.
+        """
+        tiles = []
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            self.app.update()
+            tiles = self._shop_tiles()
+            if tiles and len({t.winfo_x() for t in tiles}) > 1:
+                return tiles
+            time.sleep(0.01)
+        return tiles
+
+    def test_the_shop_is_a_wrapping_grid_not_one_card_per_row(self):
+        # 之前是「分组标题 + 每件商品一个横条」一层层往下 pack，三件商品就得
+        # 滚动；商品涨到几十件就是一条不见底的列表。
+        self.app.open_shop()
+        try:
+            tiles = self._settled_shop_tiles()
+            self.assertGreaterEqual(len(tiles), 3, "商城里没有商品")
+            for tile in tiles:
+                # The tile, not the app: CTk scales frame geometry by the 1.5x
+                # display factor, and the App itself is on window scaling.
+                h = tile._reverse_widget_scaling(tile.winfo_reqheight())
+                self.assertLessEqual(h, self.app.SHOP_TILE_H + 2,
+                                     "商品卡 %dpx 高，固定尺寸没生效" % h)
+                # The card is a fixed box with pack_propagate off, so content
+                # taller than it gets squeezed in silence - which is how the
+                # 兑换 button once came out 12px tall instead of 26.
+                for child in tile.winfo_children():
+                    self.assertLessEqual(
+                        child.winfo_y() + child.winfo_height(),
+                        tile.winfo_height(),
+                        "商品卡里的内容被裁掉了")
+            # 列数必须等于按这个宽度算出来的列数。卡片全停在 x=0（网格没 map，
+            # _layout 直接 return）时这里就是 1 ≠ cols，会失败 —— 旧断言读
+            # 「第一行 ≥ 2 张」，而没布局时所有卡都在 y=0、全被判成第一行，
+            # 恒过，每行一张反而守不住。
+            cols, tile_w = self.app._shop_cols
+            xs = {t.winfo_x() for t in tiles}
+            self.assertEqual(len(xs), cols,
+                             "卡片没排成 %d 列，实际 x=%s" % (cols, sorted(xs)))
+            # 「默认窗口放得下两列」由 test_the_default_window_fits_two_shop_columns
+            # 按测得的网格宽度守着；这里不管本机窗口多宽，只管排出来的列数和
+            # _shop_cols 说的一致。
+
+            # 同一坐标系里比：winfo_x()/winfo_width() 都是缩放后的物理像素，
+            # 跟 FlowFrame 自己的宽度比才对（反缩放一半会差 1.5 倍）。
+            flows = [c for c in self.app._shop_grid.winfo_children()
+                     if isinstance(c, slg_gui.FlowFrame)]
+            flow_w = flows[0].winfo_width() if flows else 0
+            for tile in tiles:
+                right = tile.winfo_x() + tile.winfo_width()
+                self.assertLessEqual(right, flow_w + 1, "商品卡越出了网格右边界")
+        finally:
+            self._close_shop()
+
+    def test_the_shop_filters_by_category_and_subcategory(self):
+        self.app.open_shop()
+        try:
+            self.app.update()
+            chips = self._panel_texts()
+            for want in ("全部", "头衔类", "物品类", "稀有", "史诗", "消耗品"):
+                self.assertIn(want, chips, "筛选条上少了「%s」" % want)
+            total = len(self._shop_tiles())
+
+            self.app._pick_shop_filter("cat", "头衔类")
+            self.app.update()
+            titles = self._shop_tiles()
+            self.assertTrue(titles, "头衔类筛完空了")
+            self.assertLess(len(titles), total, "切到「头衔类」商品数没变")
+
+            self.app._pick_shop_filter("cat", "物品类")
+            self.app.update()
+            self.assertTrue(self._shop_tiles(), "物品类筛完空了")
+
+            # A subcategory only means something under the category it belongs
+            # to; switching category has to drop back to 全部 rather than keep a
+            # filter that shows nothing.
+            self.app._pick_shop_filter("sub", "消耗品")
+            self.app._pick_shop_filter("cat", "头衔类")
+            self.app.update()
+            self.assertEqual(self.app._shop_sub, "全部")
+            self.assertTrue(self._shop_tiles(), "换了分类之后筛选残留，网格空了")
+        finally:
+            self._close_shop()
+
+    def test_the_titles_rail_lists_every_rarity_even_the_empty_ones(self):
+        # 用户报的 bug：全部里还看得到「史诗」，切到「头衔类」就没了。细分栏当时
+        # 只列真的存在的细分，于是档次凭空消失 —— 现在五档列全，没货的那档点进去
+        # 如实说没货。
+        self.app.open_shop()
+        try:
+            self.app._pick_shop_filter("cat", "头衔类")
+            self.app.update()
+            texts = self._panel_texts()
+            for rarity in slg_titles.RARITY_ORDER:
+                self.assertIn(rarity, texts, "头衔类细分栏少了「%s」" % rarity)
+            self.app._pick_shop_filter("sub", "至臻")
+            self.app.update()
+            self.assertFalse(self._shop_tiles(), "至臻档本来就没货")
+            self.assertIn("该分类暂无商品，敬请期待", self._panel_texts())
+        finally:
+            self._close_shop()
+
+    def test_owned_shop_items_sink_below_the_ones_you_still_lack(self):
+        drawn = []
+        real = self.app._shop_tile
+
+        def spy(parent, item, owned, equipped, points, width=None):
+            drawn.append(item["id"])
+            return real(parent, item, owned, equipped, points, width=width)
+
+        self.app.open_shop()
+        try:
+            with mock.patch.object(slg_db, "owned_title_ids",
+                                   return_value={"senior_user"}), \
+                    mock.patch.object(self.app, "_shop_tile", side_effect=spy):
+                drawn.clear()
+                self.app._render_shop()
+            self.assertIn("senior_user", drawn)
+            self.assertEqual(drawn[-1], "senior_user",
+                             "已拥有的商品没沉到底部：%s" % drawn)
+            self.assertEqual(drawn.count("senior_user"), 1, "商品重复了")
+        finally:
+            self._close_shop()
+
+    def test_every_title_offers_a_how_to_obtain_dialog(self):
+        self.app.open_titles()
+        try:
+            self.app.update()
+            win = self._dialog("我的头衔")
+            self.assertIsNotNone(win, "头衔弹窗没打开")
+            how_to = [b for b in self._buttons_in(win)
+                      if b.cget("text") == "获得方式"]
+            self.assertEqual(len(how_to), len(slg_titles.TITLES),
+                             "不是每枚头衔都有「获得方式」按钮")
+
+            t = slg_titles.TITLES[0]
+            how_to[0].invoke()
+            self.app.update()
+            info = self._dialog(t["name"])
+            self.assertIsNotNone(info, "「获得方式」没开出简介弹窗")
+            texts = self._texts_in(info)
+            self.assertIn(t["desc"], texts, "弹窗里没有简介")
+            self.assertIn(slg_titles.obtain_title_text(t), texts,
+                          "弹窗里没有获取路径")
+        finally:
+            for child in list(self.app.winfo_children()):
+                if isinstance(child, ctk.CTkToplevel):
+                    child.destroy()
+            self.app.update()
+
+    def test_the_signin_calendar_only_offers_days_you_can_backfill(self):
+        signed = {1, 2, 3}
+        today = date.today()
+        with mock.patch.object(slg_db, "signin_month_days",
+                               return_value=set(signed)):
+            self.app.open_profile()
+            self.app.update()
+            cells = self._calendar_cells()
+        try:
+            self.assertTrue(cells, "签到日历没画出来")
+            missed = [d for d in range(1, today.day) if d not in signed]
+            if not missed:
+                self.skipTest("本月还没有漏签日，无从验证补签入口")
+            for day, cell in cells.items():
+                clickable = bool(cell._label.bind("<Button-1>"))
+                should = day in missed
+                self.assertEqual(
+                    clickable, should,
+                    "%d 号该%s可点" % (day, "" if should else "不"))
+                if should:
+                    self.assertEqual(cell.cget("cursor"), "hand2",
+                                     "%d 号没给手型光标" % day)
+        finally:
+            self._close_profile()
+
+    def test_the_lottery_stays_a_banner_above_the_grid(self):
+        # 抽奖是每天一次的特殊项，混进商品网格里会和普通商品抢注意力，也不该
+        # 被分类筛选藏起来。
+        self.app.open_shop()
+        try:
+            self.app.update()
+            texts = self._panel_texts()
+            self.assertTrue(any(t in ("抽一次", "今日已抽") for t in texts),
+                            "商城顶上没有抽奖入口：%s" % texts)
+            self.assertIn("每日抽奖", texts)
+        finally:
+            self._close_shop()
+
+    def test_dev_mode_unlocks_the_daily_lottery_limit(self):
+        slg_db.set_pref(self.app.conn, "dev.unlocked", "1")
+        try:
+            self.app.open_shop()
+            self.app.update()
+            texts = self._panel_texts()
+            self.assertTrue(any("不限次数" in t for t in texts),
+                            "开发者模式下抽奖副标题没变：%s" % texts)
+            self.assertIn("抽一次", texts, "开发者模式下抽奖入口被当日限制挡掉了")
+        finally:
+            self._close_shop()
+            slg_db.set_pref(self.app.conn, "dev.unlocked", "")
+
+    def test_the_lottery_result_states_the_prize_only(self):
+        # 抽奖结果只报「拿到了什么」：盈亏/期望属于内部数值，不该出现在用户眼前。
+        for pts in (2, 5, 20):
+            text = self.app._lottery_label({"kind": "points", "value": pts})
+            self.assertEqual(text, "获得 %d 积分" % pts)
+        grand = self.app._lottery_label({"kind": "title", "value": "lucky_star"})
+        self.assertIn("幸运星", grand)
+
+    def test_the_lottery_says_so_when_nothing_was_won(self):
+        # 0 分占三成。既然对照表公开了「图案不搭 = 谢谢参与」，落空就得如实说，
+        # 而不是报一句「获得 0 积分」让用户以为那也算中了点什么。
+        text = self.app._lottery_label({"kind": "points", "value": 0})
+        self.assertIn("谢谢参与", text)
+
+    def test_makeup_card_has_a_use_button(self):
+        self.app.open_shop()
+        try:
+            self.app.update()
+            self.app._pick_shop_filter("cat", "物品类")
+            self.app.update()
+            texts = []
+            for tile in self._shop_tiles():
+                stack = list(tile.winfo_children())
+                while stack:
+                    w = stack.pop()
+                    stack.extend(w.winfo_children())
+                    try:
+                        t = w.cget("text")
+                    except Exception:  # noqa: BLE001 - most widgets have no text
+                        t = None
+                    if isinstance(t, str):
+                        texts.append(t)
+            self.assertIn("补签卡", texts, "商城没有补签卡：%s" % texts)
+            self.assertIn("补签", texts, "补签卡没有「补签」按钮：%s" % texts)
+        finally:
+            self._close_shop()
+
+    def test_lottery_finals_grand_is_three_sevens(self):
+        # 用户拍板：摇到 777 才是头衔大奖。
+        finals = self.app._lottery_finals({"kind": "title", "value": "lucky_star"})
+        self.assertEqual(finals, ("seven", "seven", "seven"))
+
+    def test_lottery_finals_points_uses_known_symbols(self):
+        finals = self.app._lottery_finals({"kind": "points", "value": 3})
+        self.assertEqual(len(finals), 3)
+        for name in finals:
+            self.assertIn(name, slg_titles.SLOT_SYMBOLS)
+
+    def test_every_prize_tier_lands_on_its_published_symbols(self):
+        """「抽奖概率」写的那组符号 = 滚轮实际停的那组。
+
+        这两者曾经是两个独立的映射（说明写星星、演出却能冒出一组表上没有的
+        组合），所以这条断言是这次改动真正要锁住的东西。两边都走
+        symbols_for_prize()，所以这里比的是「演出」而不是「表本身」。
+        """
+        for _weight, kind, value in slg_titles.LOTTERY_PRIZES:
+            if not value:
+                continue
+            prize = {"kind": kind, "value": value}
+            declared = slg_titles.symbols_for_prize(prize)
+            self.assertIsNotNone(declared, "第 %s 档没有对照的符号组合" % (value,))
+            for _ in range(12):  # 展开 "*" 通配，多跑几次覆盖到每一种取值
+                for got, want in zip(self.app._lottery_finals(prize), declared):
+                    if want != "*":
+                        self.assertEqual(got, want)
+
+    def test_a_miss_never_looks_like_a_winning_combination(self):
+        """落空时抽到的图案必须构不成任何中奖组合，否则等于骗人。"""
+        winning = set()
+        for symbols in slg_titles.LOTTERY_SYMBOLS.values():
+            for combo in itertools.product(slg_titles.SLOT_SYMBOLS, repeat=3):
+                if all(s == "*" or s == c for s, c in zip(symbols, combo)):
+                    winning.add(combo)
+        self.assertTrue(winning, "中奖组合集合是空的，这条测试就没意义了")
+        for _ in range(40):
+            got = self.app._lottery_finals({"kind": "points", "value": 0})
+            self.assertIn(got, slg_titles.LOTTERY_MISSES)
+            self.assertNotIn(got, winning,
+                             "落空却摆出了一个中奖图案：%s" % (got,))
+
+    def test_the_lottery_sound_is_on_by_default(self):
+        # 默认开（用户要求的效果），但读的是 pref，所以设置里能关掉；一个写死的
+        # True 会让那颗开关看起来能用其实没用。
+        with mock.patch.object(slg_db, "get_pref", return_value="") as gp:
+            self.app._lottery_sound_on()
+        self.assertEqual(gp.call_args.args[1], "sound.lottery")
+        self.assertEqual(gp.call_args.args[2], "1", "默认值不是开")
+
+    # --- 抽奖弹窗：脚必须留在窗口里 ------------------------------------------
+
+    def _close_lottery(self):
+        for child in list(self.app.winfo_children()):
+            if isinstance(child, ctk.CTkToplevel) and child.title() in (
+                    "每日抽奖", "抽奖概率"):
+                child.destroy()
+        self.app.update()
+
+    def _open_lottery(self, prize=None):
+        self.app._open_slot_machine(
+            prize or {"kind": "title", "value": "king_of_luck"})
+        self.app.update()
+        win = self._dialog("每日抽奖")
+        self.assertIsNotNone(win, "抽奖窗口没开出来")
+        return win
+
+    def test_the_lottery_disclaimer_is_not_clipped_by_the_window(self):
+        # 免责声明是箱底最后一行。窗口高度以前写死 600，内容比它高，这一行就落在
+        # 窗口之外 —— 用户只看得到半行。现在头脚固定、中间滚动，这条断言钉的就是
+        # 「整段都在窗口内」。
+        win = self._open_lottery()
+        try:
+            hits = [w for w in self._find("无货币价值") if w.winfo_ismapped()]
+            self.assertTrue(hits, "免责声明没出现在抽奖窗口里")
+            label = hits[0]
+            self.assertLessEqual(
+                label.winfo_rooty() + label.winfo_height(),
+                win.winfo_rooty() + win.winfo_height(),
+                "免责声明被窗口底边切掉了")
+            # 一行只有 20 上下；这里该有两三行，压成一行高说明后面几行还在窗口外。
+            self.assertGreaterEqual(label.winfo_height(), 30,
+                                    "免责声明只排了一行，后面被截了")
+        finally:
+            self._close_lottery()
+
+    def test_the_paytable_lists_every_tier_with_two_decimals(self):
+        win = self._open_lottery({"kind": "points", "value": 1})
+        try:
+            buttons = [b for b in self._buttons_in(win)
+                       if b.cget("text") == "抽奖概率"]
+            self.assertTrue(buttons, "抽奖弹窗里没有「抽奖概率」按钮")
+            self.assertFalse(self._find("奖项说明"), "旧名字「奖项说明」还在")
+            buttons[0].invoke()
+            self.app.update()
+            table = self._dialog("抽奖概率")
+            self.assertIsNotNone(table, "点了按钮没开出概率表")
+            texts = self._texts_in(table)
+            for _symbols, name, percent in slg_titles.lottery_paytable():
+                self.assertIn(name, texts, "概率表少了「%s」" % name)
+                self.assertIn("%.2f%%" % percent, texts,
+                              "「%s」的概率没显示成两位小数" % name)
+            self.assertIn("0.01%", texts, "最高一档显示成了 0%")
+        finally:
+            self._close_lottery()
+
+    def test_the_title_popup_keeps_its_longest_text_inside_the_scroller(self):
+        # 「获得方式」文案最长的就是幸运之王那句。滚动区窗口只有 ~464 物理像素，
+        # 换行宽度写大了最后几个字会被右边缘吃掉 —— 这里量的是文字实际占的宽度。
+        # CTk 6.0 把滚动区挂在自己的 Canvas 下，所以要整棵子树找，不能只看一层。
+        t = slg_titles.title_by_id(slg_titles.LOTTERY_JACKPOT_TITLE)
+        want = slg_titles.obtain_title_text(t)
+        self.app._title_info(t)
+        self.app.update()
+        try:
+            win = self._dialog(t["name"])
+            self.assertIsNotNone(win, "头衔弹窗没开出来")
+            body = None
+            stack = list(win.winfo_children())
+            while stack:
+                node = stack.pop()
+                if isinstance(node, ctk.CTkScrollableFrame):
+                    body = node
+                    break
+                stack.extend(node.winfo_children())
+            self.assertIsNotNone(body, "头衔弹窗没有滚动区")
+            self.assertIn(want, self._texts_in(body), "获取方式不是完整的一句")
+            viewport = body._parent_canvas.winfo_width()
+            self.assertGreater(viewport, 1, "滚动区还没排出来")
+            labels = [w for w in self._find(want) if w.winfo_ismapped()]
+            self.assertTrue(labels, "获取方式那条标签没排出来")
+            for label in labels:
+                self.assertLessEqual(label.winfo_width(), viewport,
+                                     "这段文字比滚动区还宽，右边会被切掉")
+        finally:
+            if win.winfo_exists():
+                win.destroy()
+            self.app.update()
 
     def test_toggling_reverses_the_arrow_and_the_query(self):
         original = self.app.sort_desc
@@ -652,6 +1326,7 @@ class SidebarFit(unittest.TestCase):
             self.app.update()
             win = self._dialog("帮助文档")
             self.assertIsNotNone(win, "帮助文档没打开")
+            self._help_click("声明与关于")
             hits = [hit for hit in self._find(slg_gui.QQ_GROUP)
                     if self._inside(hit, win)]
             self.assertTrue(hits, "帮助文档里没有群号")
@@ -1635,19 +2310,36 @@ class SidebarFit(unittest.TestCase):
             win.destroy()
             self.app.update()
 
-    def _help_lines(self):
-        """Every label text in 帮助文档, in the order it was packed.
+    def _help_nav_titles(self, win):
+        """The left-hand chapter list, top to bottom.
 
-        The doc is a single scrolling column of labels with no structure of its
-        own, so pack order is the only thing that says where a section sits.
+        Read off the live buttons rather than off HELP_SECTIONS: the point is to
+        catch a chapter that is declared but never built, or built but left
+        unmapped behind a zero-height frame.
+        """
+        self.app.update()  # a freshly built Toplevel is unmapped until Tk runs
+        nav = getattr(self.app, "_help_nav", None)
+        self.assertTrue(nav, "帮助文档没有左栏目录")
+        for btn in nav.values():
+            self.assertTrue(btn.winfo_ismapped(), "目录里有按钮没显示出来")
+        return [btn.cget("text") for btn in nav.values()]
+
+    def _help_click(self, title):
+        """Click a chapter in the left nav; raises if it is not there."""
+        for btn in self.app._help_nav.values():
+            if btn.cget("text") == title:
+                btn.invoke()
+                self.app.update()
+                return
+        raise AssertionError("左栏里没有「%s」" % title)
+
+    def _help_pane_lines(self, win):
+        """Label texts in the right-hand pane, in pack order.
 
         Only the customtkinter widgets are read: every CTkLabel wraps a plain
         tkinter.Label carrying the same text, so walking raw children reports
         each line twice - and the inner one is not the widget that was packed.
         """
-        self.app.open_help()
-        win = self._dialog("帮助文档")
-        self.assertIsNotNone(win, "帮助文档没打开")
         lines = []
 
         def walk(widget):
@@ -1659,54 +2351,94 @@ class SidebarFit(unittest.TestCase):
                         text = None
                     if isinstance(text, str):
                         lines.append(text)
-                walk(child)
+                    walk(child)
 
-        walk(win)
+        walk(self.app._help_content)
         return lines
+
+    def test_the_help_nav_lists_every_chapter(self):
+        # One scrolling column stopped being usable the moment the growth
+        # system landed: seventeen chapters, findable only by scrolling.
+        self.app.open_help()
+        try:
+            win = self._dialog("帮助文档")
+            self.assertIsNotNone(win, "帮助文档没打开")
+            got = self._help_nav_titles(win)
+        finally:
+            self._close("帮助文档")
+        want = [title for _key, title, _builder in self.app.HELP_SECTIONS]
+        self.assertEqual(got, want, "左栏和声明的章节对不上")
+        self.assertGreaterEqual(len(got), 15)
 
     def test_the_help_doc_opens_with_the_three_step_ladder(self):
         # The three clicks that make the app worth using lived only in the
         # first-run welcome, which is gone by the time anyone needs reminding.
+        self.app.open_help()
         try:
-            lines = self._help_lines()
+            win = self._dialog("帮助文档")
+            self.assertIsNotNone(win, "帮助文档没打开")
+            self.assertEqual(self._help_nav_titles(win)[0], "三步上手",
+                             "三步上手 应该是第一节，且开箱就在右栏")
+            lines = self._help_pane_lines(win)
         finally:
             self._close("帮助文档")
         steps = [t for t in lines if t.startswith(("第 1 步", "第 2 步", "第 3 步"))]
-        self.assertEqual(len(steps), 3, lines[:12])
+        self.assertEqual(len(steps), 3, lines)
         index = [lines.index(s) for s in steps]
         self.assertEqual(index, sorted(index), "三步的顺序乱了")
-        self.assertLess(lines.index("三步上手"), lines.index("这个软件是什么"),
-                        "三步上手 应该在开篇")
 
     def test_the_help_faq_is_grouped(self):
         # Twelve answers in a flat run meant the one you wanted was found by
         # scrolling, not by looking.
+        self.app.open_help()
         try:
-            lines = self._help_lines()
+            win = self._dialog("帮助文档")
+            self.assertIsNotNone(win, "帮助文档没打开")
+            self._help_click("常见问题")
+            lines = self._help_pane_lines(win)
         finally:
             self._close("帮助文档")
-        start = lines.index("常见问题")
-        end = lines.index("下载的游戏是英文的怎么办")
-        for group in ("同步与数据", "翻译", "界面与设置"):
+        groups = ("界面与设置", "同步与数据", "抽奖与积分", "翻译")
+        for group in groups:
             self.assertIn(group, lines, lines)
-            self.assertTrue(start < lines.index(group) < end,
-                            "%s 不在常见问题里" % group)
-        self.assertTrue(any(t.startswith("Q：") for t in lines), "问答没了")
+        index = [lines.index(g) for g in groups]
+        self.assertEqual(index, sorted(index), "问答分组乱了")
+        self.assertGreaterEqual(sum(1 for t in lines if t.startswith("Q：")), 8,
+                                "问答删太多了")
 
     def test_the_help_disclaimers_come_last(self):
         # The no-download notice used to sit between 常见问题 and the
         # English-game instructions, interrupting the one part of the doc that
         # tells someone what to actually do next.
+        self.app.open_help()
         try:
-            lines = self._help_lines()
+            win = self._dialog("帮助文档")
+            self.assertIsNotNone(win, "帮助文档没打开")
+            self.assertEqual(self._help_nav_titles(win)[-1], "声明与关于")
+            self._help_click("声明与关于")
+            lines = self._help_pane_lines(win)
         finally:
             self._close("帮助文档")
-        games = lines.index("下载的游戏是英文的怎么办")
-        disclaimer = next(i for i, t in enumerate(lines)
-                          if "不提供任何下载" in t)
+        no_download = next(i for i, t in enumerate(lines)
+                           if "不提供任何下载" in t)
         free = next(i for i, t in enumerate(lines) if "完全免费" in t)
-        self.assertGreater(disclaimer, games, "无下载声明不该夹在教程中间")
-        self.assertGreater(free, disclaimer, "免费声明应该在最后")
+        self.assertLess(no_download, free, "免费声明应该在最后")
+        self.assertTrue(any("GitHub" in t for t in lines), lines)
+
+    def test_the_help_doc_covers_the_growth_system(self):
+        # v0.22 加的收藏夹、个人中心/签到/积分/头衔、商城抽奖、添加我的游戏、
+        # 备份恢复、更新推送，帮助文档里一个都没有——这就是「跟不上版本」。
+        self.app.open_help()
+        try:
+            win = self._dialog("帮助文档")
+            self.assertIsNotNone(win, "帮助文档没打开")
+            titles = self._help_nav_titles(win)
+        finally:
+            self._close("帮助文档")
+        for want in ("收藏夹", "个人中心与积分", "每日签到", "头衔",
+                     "商城与每日抽奖", "添加我的游戏", "扫描本地目录",
+                     "备份与恢复", "更新推送"):
+            self.assertIn(want, titles)
 
     def test_the_sidebar_offers_sync_and_one_more_button(self):
         # Four buttons in a column - 28/38/34/28 px tall, two muted and one
@@ -1925,6 +2657,88 @@ class SidebarFit(unittest.TestCase):
             self.app._update_found = None
             self.app.update_label.pack_forget()
             self.app.update()
+
+
+    # --- 数据统计面板 -------------------------------------------------------
+    #
+    # Every one of the four states used to render as the same empty panel, and
+    # three of them are not "no data yet" - they are "the server was never
+    # deployed", "your key is wrong" and "the network is down". These pin that
+    # the panel says which one it is, in the words that name the fix.
+
+    def _open_stats(self, result):
+        with mock.patch.object(slg_remote, "fetch_stats", return_value=result), \
+                mock.patch.object(slg_gui.threading, "Thread", _InlineThread):
+            self.app._show_stats_panel()
+        self.app._drain()
+        self.app.update()
+        self.addCleanup(self._close_window, self.app._stats_win)
+        return self.app._stats_body
+
+    @staticmethod
+    def _close_window(win):
+        try:
+            if win.winfo_exists():
+                win.destroy()
+        except tk.TclError:
+            pass
+
+    @staticmethod
+    def _texts(widget):
+        out = []
+
+        def walk(node):
+            for child in node.winfo_children():
+                try:
+                    text = child.cget("text")
+                except Exception:  # noqa: BLE001 - most widgets have no text
+                    text = None
+                if isinstance(text, str):
+                    out.append(text)
+                walk(child)
+
+        walk(widget)
+        return out
+
+    def test_the_stats_panel_translates_event_names(self):
+        body = self._open_stats(("ok", {
+            "events": {"launch": 5, "signin": 2}, "devices": 3,
+            "last_report": "2026-09-22T10:00:00"}))
+        texts = self._texts(body)
+        self.assertIn("启动", texts)
+        self.assertIn("签到", texts, "事件名没翻成中文，面板像给开发看的原始日志")
+
+    def test_the_stats_panel_shows_devices_and_a_short_timestamp(self):
+        body = self._open_stats(("ok", {
+            "events": {"launch": 5}, "devices": 7,
+            "last_report": "2026-09-22T10:00:00"}))
+        texts = self._texts(body)
+        self.assertIn("7", texts)
+        self.assertIn("09-22 10:00:00", texts)
+
+    def test_an_unknown_event_is_still_listed(self):
+        # A new event type ships before its label does; dropping it silently
+        # would make the panel look like the event never fired.
+        body = self._open_stats(("ok", {
+            "events": {"brand_new": 1}, "devices": 1, "last_report": None}))
+        self.assertIn("brand_new", self._texts(body))
+
+    def test_an_undeployed_server_names_the_command_that_fixes_it(self):
+        body = self._open_stats(("missing", None))
+        texts = self._texts(body)
+        self.assertTrue(any("deploy_server.py --user ubuntu" in t for t in texts),
+                        "面板没给出修复命令，用户只能看到一片空白")
+
+    def test_a_key_mismatch_points_at_the_local_key_file(self):
+        body = self._open_stats(("locked", None))
+        texts = self._texts(body)
+        self.assertTrue(any("stats_key.txt" in t for t in texts),
+                        "没告诉用户是哪个文件里的密钥对不上")
+
+    def test_the_panel_survives_an_empty_but_deployed_server(self):
+        body = self._open_stats(("ok", {"events": {}, "devices": 0,
+                                        "last_report": None}))
+        self.assertTrue(self._texts(body))
 
 
 if __name__ == "__main__":
