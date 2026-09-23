@@ -15,6 +15,8 @@ import os
 import queue
 import random
 import sys
+import subprocess
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -25,7 +27,7 @@ from datetime import date
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
-from PIL import Image, ImageDraw, ImageGrab, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 try:  # Windows-only, and the reel sounds are a nicety rather than a feature
     import winsound
@@ -42,7 +44,7 @@ import slg_translate
 import slg_update
 import slg_util
 
-APP_VERSION = "0.22.0"
+APP_VERSION = "0.22.2"
 # The sidebar shows the number and nothing else. build_stamp() still carries
 # the channel and the build time, but it belongs on the 关于 page now: a
 # timestamp in the corner of every screen was answering a question the user
@@ -2111,12 +2113,6 @@ class App(ctk.CTk):
         text = ("%d 款 · %d 标签\n评分 %d 款 · 已下载 %d 款"
                 % (stats["games"], stats["tags"], stats["rated"],
                    stats["downloaded"]))
-        # Only while there is something to report. "简介缺 0 款" forever would be
-        # noise in the one column with no room to spare, and the number is the
-        # only thing that tells the user why a panel is showing the placeholder
-        # and roughly how many syncs are left.
-        if gaps["overview"]:
-            text += "\n简介缺 %d 款（同步补齐）" % gaps["overview"]
         self.stat_label.configure(text=text)
         # The count rides on the door rather than on the button behind it: the
         # dialog is rebuilt on every open, so a number cached in a closed window
@@ -2628,11 +2624,12 @@ class App(ctk.CTk):
             d, parts, "url", "在浏览器打开 dikgames 页面", pady=(10, 4)))
 
         order.extend(self._build_detail_back_profile(d, parts))
-        order.extend(self._build_detail_share(d, parts))
+        order.extend(self._build_detail_launch(d, parts))
         order.extend(self._build_detail_open_folder(d, parts))
         order.extend(self._build_detail_collect(d, parts))
         order.extend(self._build_detail_remove_collection(d, parts))
         order.extend(self._build_detail_promote(d, parts))
+        order.extend(self._build_detail_edit(d, parts))
         order.extend(self._build_detail_delete(d, parts))
 
         order.extend(self._build_detail_status(d, parts))
@@ -2701,8 +2698,10 @@ class App(ctk.CTk):
         translation they wanted to write by hand.
         """
         wanted = {"url": show_url, "open_folder": show_folder,
+                  "launch": show_folder,
                   "remove_collection": show_remove,
-                  "promote": show_user, "delete_game": show_user}
+                  "promote": show_user, "edit_game": show_user,
+                  "delete_game": show_user}
         keys = [key for key, _w, _p in self._detail_order if wanted.get(key, True)]
         if keys == self._detail_shown:
             return
@@ -2727,6 +2726,9 @@ class App(ctk.CTk):
         if folder:
             p["open_folder"].configure(
                 command=lambda f=folder: self._open_local_folder(f))
+            p["launch"].configure(command=lambda g=game: self._launch_game(g))
+            p["launch"].bind("<Button-3>",
+                             lambda e, g=game: self._re_pick_exe(g))
         if is_user:
             if game.get("promoted"):
                 p["promote"].configure(text="移出主列表",
@@ -3051,16 +3053,18 @@ class App(ctk.CTk):
         return [("heat", label, {"anchor": "w", "padx": 18, "pady": (10, 0)})]
 
     def _detail_action(self, d, parts, key, text, command=None, accent=False,
-                       pady=(0, 4), text_color=None):
+                       pady=(0, 4), text_color=None, filled=False):
         """A filled detail-panel action button, registered under `key`.
 
         share/open_folder/collect/url/remove_collection are one widget restyled
         five times; the constructor's seven kwargs are the thing that drifted.
         """
-        btn = ctk.CTkButton(d, text=text, height=30, corner_radius=8,
-                            fg_color=CHIP,
-                            text_color=text_color or (ACCENT if accent else TEXT),
-                            hover_color=CARD_HOVER, command=command)
+        btn = ctk.CTkButton(
+            d, text=text, height=30, corner_radius=8,
+            fg_color=ACCENT if filled else CHIP,
+            text_color=(ON_ACCENT if filled
+                        else text_color or (ACCENT if accent else TEXT)),
+            hover_color=CARD_HOVER, command=command)
         parts[key] = btn
         return [(key, btn, {"fill": "x", "padx": 18, "pady": pady})]
 
@@ -3068,9 +3072,9 @@ class App(ctk.CTk):
         return self._detail_action(d, parts, "back_profile", "返回个人",
                                    self.open_profile)
 
-    def _build_detail_share(self, d, parts):
-        return self._detail_action(d, parts, "share", "分享截图",
-                                   self._share_screenshot, accent=True)
+    def _build_detail_launch(self, d, parts):
+        return self._detail_action(d, parts, "launch", "启动游戏",
+                                   accent=True, filled=True)
 
     def _build_detail_open_folder(self, d, parts):
         return self._detail_action(d, parts, "open_folder", "打开本地目录",
@@ -3086,6 +3090,10 @@ class App(ctk.CTk):
 
     def _build_detail_promote(self, d, parts):
         return self._detail_action(d, parts, "promote", "加入主列表", accent=True)
+
+    def _build_detail_edit(self, d, parts):
+        return self._detail_action(d, parts, "edit_game", "编辑此游戏",
+                                   self._edit_user_game)
 
     def _build_detail_delete(self, d, parts):
         return self._detail_action(d, parts, "delete_game", "删除此游戏",
@@ -3131,11 +3139,50 @@ class App(ctk.CTk):
         self.selected = None
         self.refresh()
 
+    def _edit_user_game(self):
+        game = self.selected
+        if game is not None and game.get("origin") == "user":
+            self.open_add_game(game=game)
+
     def _open_local_folder(self, folder):
         if os.path.isdir(folder):
             os.startfile(folder)
         else:
             messagebox.showinfo("找不到目录", "本地目录已不存在：\n%s" % folder)
+
+    def _launch_game(self, game):
+        exe = game.get("exe_path")
+        if not exe or not os.path.isfile(exe):
+            exe = self._pick_game_exe(game["id"], game.get("folder_path"))
+            if not exe:
+                return
+            game["exe_path"] = exe
+        self._start_game_exe(exe)
+
+    def _re_pick_exe(self, game):
+        exe = self._pick_game_exe(game["id"], game.get("folder_path"))
+        if exe:
+            game["exe_path"] = exe
+            self._start_game_exe(exe)
+
+    def _pick_game_exe(self, game_id, folder):
+        initial = folder if folder and os.path.isdir(folder) else os.path.expanduser("~")
+        path = filedialog.askopenfilename(
+            title="选择游戏启动程序（.exe）", parent=self, initialdir=initial,
+            filetypes=[("程序", "*.exe"), ("所有文件", "*.*")])
+        if not path:
+            return None
+        path = os.path.normpath(path)
+        with slg_db.session() as conn:
+            slg_db.set_local_exe(conn, game_id, path)
+        return path
+
+    def _start_game_exe(self, exe):
+        try:
+            subprocess.Popen([exe], cwd=os.path.dirname(exe))
+        except OSError as exc:
+            messagebox.showerror("启动失败",
+                                 "无法启动：\n%s\n%s" % (exe, exc), parent=self)
 
     def _build_detail_comments(self, d, parts):
         """The comment list for the selected game, rebuilt per game.
@@ -3648,23 +3695,6 @@ class App(ctk.CTk):
             box.insert("1.0", note)
         self._set_progress("评价已还原")
 
-    def _share_screenshot(self):
-        if not self.selected:
-            return
-        self.update()
-        d = self.detail
-        x, y = d.winfo_rootx(), d.winfo_rooty()
-        box = (x, y, x + d.winfo_width(), y + d.winfo_height())
-        img = ImageGrab.grab(bbox=box, all_screens=True)
-        outdir = os.path.join(slg_db.app_dir(), "分享")
-        os.makedirs(outdir, exist_ok=True)
-        path = os.path.join(outdir, "%s_%s.png" % (
-            self.selected.get("slug", "game"),
-            time.strftime("%Y%m%d_%H%M%S")))
-        img.save(path)
-        self._set_progress("截图已保存：%s" % path)
-        messagebox.showinfo("分享", "详情截图已保存到：\n%s" % path)
-
     # --- dialogs --------------------------------------------------------------
 
     def _new_dialog(self, title, geometry=None, parent=None):
@@ -4045,7 +4075,7 @@ class App(ctk.CTk):
                     % slg_remote.stats_key_path())
         else:
             text = ("连不上服务器，或对方返回的不是统计数据。\n"
-                    "先确认网络能打开 43.130.240.89:8080。")
+                    "先确认网络能打开 slg-king.com。")
         ctk.CTkLabel(body, text=text, text_color=MUTED, font=ui_font(size=11),
                      wraplength=390, justify="left").pack(anchor="w", pady=8)
 
@@ -4236,6 +4266,21 @@ class App(ctk.CTk):
             ("积分支出", flow["spent"]),
         ))
 
+        # 操作：三个入口横排。放在「我的数据」正下方、签到日历之前，是为了让
+        # 「兑换码」这类高频入口首屏可见 —— 原先压在面板最底部，小窗下必须滚到
+        # 底才看得到，等于"找不到入口"。
+        self._profile_section(d, "操作")
+        acts = ctk.CTkFrame(d, fg_color="transparent")
+        acts.pack(fill="x", padx=16)
+        for i, (text, fn) in enumerate((("修改昵称", self._edit_nickname),
+                                        ("查看头衔", self.open_titles),
+                                        ("兑换码", self.open_redeem))):
+            ctk.CTkButton(acts, text=text, height=34, corner_radius=8,
+                          fg_color=CHIP, text_color=TEXT,
+                          hover_color=CARD_HOVER, font=ui_font(size=13),
+                          command=fn).pack(side="left", expand=True, fill="x",
+                                           padx=(0, 0 if i == 2 else 6))
+
         # 本月签到：日历 + 连续/累计 + 累签奖励。
         sign = slg_db.signin_days(self.conn)
         today = date.today()
@@ -4304,20 +4349,6 @@ class App(ctk.CTk):
                                        fg_color=CHIP, progress_color=ACCENT)
         title_bar.set(owned_count / total_titles if total_titles else 0.0)
         title_bar.pack(fill="x", padx=16)
-
-        # 操作：三个入口横排。通栏三条按钮会在面板底部堆成一堵墙，而这三个动作
-        # 权重相同、又都是短词，一行放得下。
-        self._profile_section(d, "操作")
-        acts = ctk.CTkFrame(d, fg_color="transparent")
-        acts.pack(fill="x", padx=16)
-        for i, (text, fn) in enumerate((("修改昵称", self._edit_nickname),
-                                        ("查看头衔", self.open_titles),
-                                        ("兑换码", self.open_redeem))):
-            ctk.CTkButton(acts, text=text, height=34, corner_radius=8,
-                          fg_color=CHIP, text_color=TEXT,
-                          hover_color=CARD_HOVER, font=ui_font(size=13),
-                          command=fn).pack(side="left", expand=True, fill="x",
-                                           padx=(0, 0 if i == 2 else 6))
 
         # 开发者区：仅解锁开发者特权者可见，独立成块、ACCENT 边框区分。
         if dev:
@@ -6380,10 +6411,12 @@ class App(ctk.CTk):
                       hover_color=CARD_HOVER, command=save
                       ).pack(fill="x", padx=18, pady=(8, 16))
 
-    def open_add_game(self, prefill_title="", prefill_folder=""):
-        """Add a game the user owns that is not in the dikgames catalogue."""
-        win = self._new_dialog("添加我的游戏", "460x760")
-        ctk.CTkLabel(win, text="把自己本地的游戏加进库",
+    def open_add_game(self, prefill_title="", prefill_folder="", game=None):
+        """Add a game the user owns, or edit one already added (game is set)."""
+        editing = game is not None
+        win = self._new_dialog("编辑我的游戏" if editing else "添加我的游戏",
+                               "460x760")
+        ctk.CTkLabel(win, text=("改完点保存即可" if editing else "把自己本地的游戏加进库"),
                      text_color=TEXT, font=ui_font(size=16, weight="bold"),
                      anchor="w").pack(fill="x", padx=18, pady=(14, 2))
         ctk.CTkLabel(win, text="默认只出现在左侧「我添加的游戏」。\n"
@@ -6405,10 +6438,17 @@ class App(ctk.CTk):
             return e
 
         title_e = field("标题（必填）")
-        title_e.insert(0, prefill_title)
+        title_e.insert(0, game["title"] if editing else prefill_title)
         dev_e = field("开发商")
         engine_e = field("引擎")
         ver_e = field("版本")
+        if editing:
+            if game.get("developer"):
+                dev_e.insert(0, game["developer"])
+            if game.get("engine"):
+                engine_e.insert(0, game["engine"])
+            if game.get("version"):
+                ver_e.insert(0, game["version"])
 
         ctk.CTkLabel(body, text="简介", text_color=MUTED,
                      font=ui_font(size=11), anchor="w").pack(fill="x", pady=(8, 2))
@@ -6416,6 +6456,8 @@ class App(ctk.CTk):
                               text_color=TEXT, border_color=CHIP, border_width=1,
                               font=ui_font(size=12), wrap="word")
         ov_e.pack(fill="x")
+        if editing and game.get("overview"):
+            ov_e.insert("1.0", game["overview"])
 
         cover = {"path": None}
         ctk.CTkLabel(body, text="封面（可选）", text_color=MUTED,
@@ -6439,14 +6481,16 @@ class App(ctk.CTk):
                       hover_color=CARD_HOVER, font=ui_font(size=11),
                       command=pick_cover).pack(side="right")
 
-        folder = {"path": prefill_folder}
+        folder = {"path": (game.get("folder_path") if editing
+                           else prefill_folder) or None}
         ctk.CTkLabel(body, text="本地目录（可选，选好后自动读取标题/开发商/版本/引擎）",
                      text_color=MUTED,
                      font=ui_font(size=11), anchor="w").pack(fill="x", pady=(8, 2))
         folder_row = ctk.CTkFrame(body, fg_color="transparent")
         folder_row.pack(fill="x")
         folder_label = ctk.CTkLabel(folder_row,
-                                    text=os.path.basename(prefill_folder) if prefill_folder else "未选择",
+                                    text=(os.path.basename(folder["path"])
+                                          if folder["path"] else "未选择"),
                                     text_color=MUTED, font=ui_font(size=11), anchor="w")
         folder_label.pack(side="left", fill="x", expand=True)
 
@@ -6478,10 +6522,12 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(body, text="标签", text_color=MUTED,
                      font=ui_font(size=11), anchor="w").pack(fill="x", pady=(8, 2))
-        flow, vars_ = self._tag_checklist(body, set())
+        current_tags = (set(slg_db.game_tags(self.conn, game["id"]))
+                        if editing else set())
+        flow, vars_ = self._tag_checklist(body, current_tags)
         self._tag_new_entry(body, flow, vars_)
 
-        promoted = ctk.BooleanVar(value=False)
+        promoted = ctk.BooleanVar(value=bool(game.get("promoted")) if editing else False)
         self._tag_checkbox(body, "加入主列表（需填齐标题/开发商/引擎/版本/至少1个标签）",
                            promoted).pack(anchor="w", pady=(12, 0))
 
@@ -6515,15 +6561,26 @@ class App(ctk.CTk):
                 except Exception:  # noqa: BLE001 - a bad image must not block saving
                     cover_file = None
             with slg_db.session() as conn:
-                slg_db.add_user_game(
-                    conn, title,
-                    developer=dev_e.get().strip() or None,
-                    engine=engine_e.get().strip() or None,
-                    version=ver_e.get().strip() or None,
-                    overview=ov_e.get("1.0", "end-1c").strip() or None,
-                    cover_file=cover_file, tags=chosen,
-                    folder_path=folder["path"] or None,
-                    promoted=want_promote)
+                if editing:
+                    slg_db.update_user_game(
+                        conn, game["id"], title,
+                        developer=dev_e.get().strip() or None,
+                        engine=engine_e.get().strip() or None,
+                        version=ver_e.get().strip() or None,
+                        overview=ov_e.get("1.0", "end-1c").strip() or None,
+                        cover_file=cover_file, tags=chosen,
+                        folder_path=folder["path"] or None,
+                        promoted=want_promote)
+                else:
+                    slg_db.add_user_game(
+                        conn, title,
+                        developer=dev_e.get().strip() or None,
+                        engine=engine_e.get().strip() or None,
+                        version=ver_e.get().strip() or None,
+                        overview=ov_e.get("1.0", "end-1c").strip() or None,
+                        cover_file=cover_file, tags=chosen,
+                        folder_path=folder["path"] or None,
+                        promoted=want_promote)
             win.destroy()
             self.refresh()
 
@@ -7437,11 +7494,19 @@ class App(ctk.CTk):
         ctk.CTkButton(row, text="稍后", height=32, width=90, corner_radius=8,
                       fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
                       font=ui_font(size=12), command=win.destroy).pack(side="left")
-        ctk.CTkButton(row, text="前往下载", height=32, width=110, corner_radius=8,
+        ctk.CTkButton(row, text="立即更新", height=32, width=110, corner_radius=8,
                       fg_color=ACCENT, text_color=ON_ACCENT, hover_color=CARD_HOVER,
                       font=ui_font(size=12),
-                      command=lambda: (webbrowser.open(self._update_url),
-                                       win.destroy())).pack(side="left", padx=(8, 0))
+                      command=lambda: (win.destroy(),
+                                       self._start_self_update(release))
+                      ).pack(side="left", padx=(8, 0))
+        if not release.get("asset_url"):
+            ctk.CTkButton(row, text="前往下载", height=32, width=110,
+                          corner_radius=8, fg_color=CHIP, text_color=TEXT,
+                          hover_color=CARD_HOVER, font=ui_font(size=12),
+                          command=lambda: (webbrowser.open(self._update_url),
+                                           win.destroy())
+                          ).pack(side="left", padx=(8, 0))
         row.pack(pady=(0, 16))
 
     def _repaint_update_notice(self):
@@ -7451,6 +7516,76 @@ class App(ctk.CTk):
 
     def _open_update_page(self, event=None):
         webbrowser.open(self._update_url)
+
+    def _start_self_update(self, release):
+        """Download the matching release asset and hand off to the batch updater.
+
+        Only the formal build self-updates: the test build has no GitHub asset,
+        so `asset_url` is None there and this falls back to the release page.
+        """
+        if not getattr(sys, "frozen", False):
+            webbrowser.open(release["url"])
+            return
+        url = release.get("asset_url")
+        if not url:
+            webbrowser.open(release["url"])
+            return
+        if not messagebox.askyesno(
+                "更新", "下载并安装 %s？\n程序会自动重启。" % release["version"],
+                parent=self):
+            return
+        dest = os.path.join(tempfile.gettempdir(), "slgking_update",
+                            os.path.basename(sys.executable))
+        self._set_progress("正在下载 %s …" % release["version"])
+        threading.Thread(target=self._update_download_worker,
+                         args=(release, dest), daemon=True).start()
+
+    def _update_download_worker(self, release, dest):
+        try:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+        except OSError:
+            pass
+        if slg_update.download_asset(release, dest):
+            self.queue.put(("update_ready", dest))
+        else:
+            self.queue.put(("note", "下载更新失败，请前往 GitHub 手动下载"))
+
+    def _install_update(self, dest):
+        """Run the batch that swaps the running exe for the downloaded one.
+
+        Windows locks a running exe, so the swap happens in a detached cmd that
+        waits for this process to exit, then deletes the old file, moves the new
+        one into its place, and restarts it. `%~1`/`%~2` keep paths with spaces
+        intact.
+        """
+        if not os.path.isfile(dest):
+            self._set_settings_status("更新文件缺失，请重新检查更新")
+            return
+        old = sys.executable
+        bat = os.path.join(os.path.dirname(dest), "update.bat")
+        script = (
+            "@echo off\r\n"
+            "setlocal\r\n"
+            ":loop\r\n"
+            "ping 127.0.0.1 -n 2 >nul\r\n"
+            "del /f /q \"%~1\" >nul 2>&1\r\n"
+            "if exist \"%~1\" goto loop\r\n"
+            "move /y \"%~2\" \"%~1\" >nul\r\n"
+            "start \"\" \"%~1\"\r\n"
+            "del /f /q \"%~f0\"\r\n"
+        )
+        try:
+            with open(bat, "w") as fh:
+                fh.write(script)
+            subprocess.Popen(
+                ["cmd", "/c", bat, old, dest],
+                creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP
+                               | subprocess.DETACHED_PROCESS),
+                close_fds=True)
+        except OSError:
+            self._set_settings_status("无法启动更新脚本，请前往 GitHub 手动下载")
+            return
+        self.destroy()
 
     # --- background work ------------------------------------------------------
 
@@ -7741,6 +7876,8 @@ class App(ctk.CTk):
             self._end_job(payload, refill=True)
         elif kind == "update":
             self._show_update(payload)
+        elif kind == "update_ready":
+            self._install_update(payload)
         elif kind == "remote":
             self._handle_remote_config(payload)
         elif kind == "stats":

@@ -7,7 +7,9 @@ window to be tested.
 """
 
 import json
+import os
 import re
+import sys
 from datetime import datetime, timedelta
 
 import slg_db
@@ -67,9 +69,52 @@ def latest_release(timeout=8):
         return {"version": tag,
                 "url": data.get("html_url") or RELEASES_URL,
                 "name": data.get("name") or tag,
-                "body": data.get("body") or ""}
+                "body": data.get("body") or "",
+                "asset_url": _match_asset(data.get("assets") or [])}
     except Exception:  # noqa: BLE001 - see the docstring
         return None
+
+
+def _match_asset(assets):
+    """The download URL for the asset matching the running exe, or None.
+
+    The release carries one asset per channel (slgking.exe for the formal build;
+    the test build has no GitHub asset). Matching on the running exe's basename
+    keeps a test build from silently overwriting itself with the formal one, and
+    a source checkout (sys.executable is python.exe) simply gets None.
+    """
+    running = os.path.basename(sys.executable)
+    if not running:
+        return None
+    for asset in assets:
+        if asset.get("name") == running:
+            return asset.get("browser_download_url")
+    return None
+
+
+def download_asset(release, dest_path, timeout=180):
+    """Fetch the release asset to `dest_path`. Returns True on success.
+
+    Unlike the manifest fetch, this goes through the normal opener (no
+    direct=True): GitHub is a public host and must respect any VPN/proxy the
+    user relies on. The asset is a ~30MB exe, so the timeout is generous and the
+    bytes are streamed straight to disk rather than held in memory.
+    """
+    url = release.get("asset_url")
+    if not url:
+        return False
+    try:
+        raw = slg_scrape.http_get(url, timeout=timeout)
+    except Exception:  # noqa: BLE001 - a failed download is a message, not a crash
+        return False
+    try:
+        tmp = dest_path + ".part"
+        with open(tmp, "wb") as fh:
+            fh.write(raw)
+        os.replace(tmp, dest_path)
+        return True
+    except OSError:
+        return False
 
 
 def check(conn, local_version, now=None, force=False):

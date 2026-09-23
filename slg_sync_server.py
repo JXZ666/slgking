@@ -27,7 +27,7 @@ import time
 import slg_db
 import slg_scrape
 
-SERVER_BASE = "http://43.130.240.89:8080"
+SERVER_BASE = "https://slg-king.com"
 PREF_LAST_PULL = "last_pull_lastmod"
 
 

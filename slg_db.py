@@ -98,7 +98,8 @@ CREATE TABLE IF NOT EXISTS local (
     has_translation INTEGER NOT NULL DEFAULT 0,
     has_fontpatch   INTEGER NOT NULL DEFAULT 0,
     size_bytes      INTEGER,
-    scanned_at      TEXT
+    scanned_at      TEXT,
+    exe_path        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS state (
@@ -372,6 +373,10 @@ def _migrate(conn):
     if "promoted" not in have:
         conn.execute("ALTER TABLE games ADD COLUMN promoted INTEGER NOT NULL DEFAULT 0")
         conn.commit()
+    have = {row["name"] for row in conn.execute("PRAGMA table_info(local)")}
+    if "exe_path" not in have:
+        conn.execute("ALTER TABLE local ADD COLUMN exe_path TEXT")
+        conn.commit()
     # Hand-written rows move out of the translation cache into their own table.
     # Deleting them from `translations` is what stops them from having already
     # destroyed the machine row underneath - but it also means anyone who edited
@@ -573,6 +578,29 @@ def add_user_game(conn, title, developer=None, engine=None, version=None,
     return game_id
 
 
+def update_user_game(conn, game_id, title, developer=None, engine=None,
+                     version=None, overview=None, cover_file=None,
+                     tags=(), folder_path=None, promoted=0):
+    """Rewrite a game the user added themselves.
+
+    The user is the only writer of their own rows, so this is a plain UPDATE,
+    not the scraper's COALESCE merge. cover_file=None means "keep the current
+    cover", folder_path=None means "keep the current folder"; the edit dialog
+    passes them through only when the user actually changed them.
+    """
+    conn.execute(
+        "UPDATE games SET title=?, version=?, developer=?, engine=?,"
+        " overview=?, promoted=? WHERE id=?",
+        (title, version, developer, engine, overview,
+         int(bool(promoted)), game_id))
+    if cover_file:
+        conn.execute("UPDATE games SET cover_file=? WHERE id=?",
+                     (cover_file, game_id))
+    if folder_path:
+        set_local_folder(conn, game_id, folder_path)
+    set_tags(conn, game_id, tags, clear=True)
+
+
 def delete_game(conn, game_id):
     """Delete a game row. Callers must only pass origin='user' games.
 
@@ -597,6 +625,16 @@ def set_local_folder(conn, game_id, folder_path, folder_version=None):
         " folder_version=excluded.folder_version,"
         " scanned_at=excluded.scanned_at",
         (game_id, folder_path, folder_version))
+
+
+def set_local_exe(conn, game_id, exe_path):
+    """Remember which exe launches this locally-installed game."""
+    conn.execute(
+        "INSERT INTO local (game_id, exe_path, scanned_at)"
+        " VALUES (?,?,datetime('now'))"
+        " ON CONFLICT(game_id) DO UPDATE SET"
+        " exe_path=excluded.exe_path, scanned_at=excluded.scanned_at",
+        (game_id, exe_path))
 
 
 def add_alias(conn, game_id, alias, source="user"):
@@ -778,7 +816,7 @@ def find_games(conn, include=(), exclude=(), search=None, statuses=None,
 
     sql = """
         SELECT g.*, s.status, s.note, s.my_rating, l.folder_path, l.folder_version,
-               l.has_translation, l.has_fontpatch,
+               l.has_translation, l.has_fontpatch, l.exe_path,
                COALESCE((SELECT AVG(my_rating - 3.0) FROM state
                          WHERE my_rating IS NOT NULL), 0)
              + (COALESCE(g.rating, 0)
@@ -1393,7 +1431,7 @@ def export_user_data(conn):
         " WHERE g.origin = 'user' ORDER BY g.slug, t.name")]
     out["user_local"] = [dict(r) for r in conn.execute(
         "SELECT g.slug, l.folder_path, l.folder_version, l.has_translation,"
-        " l.has_fontpatch, l.size_bytes, l.scanned_at"
+        " l.has_fontpatch, l.size_bytes, l.scanned_at, l.exe_path"
         " FROM local l JOIN games g ON g.id = l.game_id"
         " WHERE g.origin = 'user'")]
     out["user_game_aliases"] = [dict(r) for r in conn.execute(
@@ -1499,11 +1537,11 @@ def _import_user_games(conn, data):
             continue
         conn.execute(
             "INSERT OR REPLACE INTO local (game_id, folder_path, folder_version,"
-            " has_translation, has_fontpatch, size_bytes, scanned_at)"
-            " VALUES (?,?,?,?,?,?,?)",
+            " has_translation, has_fontpatch, size_bytes, scanned_at, exe_path)"
+            " VALUES (?,?,?,?,?,?,?,?)",
             (game_id, rec.get("folder_path"), rec.get("folder_version"),
              rec.get("has_translation") or 0, rec.get("has_fontpatch") or 0,
-             rec.get("size_bytes"), rec.get("scanned_at")))
+             rec.get("size_bytes"), rec.get("scanned_at"), rec.get("exe_path")))
 
     for rec in data.get("user_game_aliases", []):
         game_id = _game_id_by_slug(conn, rec.get("slug"))

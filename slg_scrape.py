@@ -98,8 +98,8 @@ _STATUS_WORDS = {"final", "complete", "completed", "finished", "full release"}
 
 
 # An opener that ignores any system/env proxy. The author's own catalogue server
-# (43.130.240.89:8080) must be reached directly: it is a raw IP on a non-standard
-# port, and a user's VPN/proxy otherwise swallows the request (502 / timeout).
+# (slg-king.com, proxied by Cloudflare) is fetched directly so a misconfigured
+# proxy cannot swallow the request; Cloudflare's edge is reachable either way.
 # The scraper itself still uses the default opener, because dikgames needs it.
 _DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
