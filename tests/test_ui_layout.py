@@ -761,7 +761,8 @@ class SidebarFit(unittest.TestCase):
         while time.time() < deadline:
             self.app.update()
             tiles = self._shop_tiles()
-            if tiles and len({t.winfo_x() for t in tiles}) > 1:
+            if (tiles and len({t.winfo_x() for t in tiles}) > 1
+                    and getattr(self.app, "_shop_resize_job", None) is None):
                 return tiles
             time.sleep(0.01)
         return tiles
@@ -971,26 +972,16 @@ class SidebarFit(unittest.TestCase):
         text = self.app._lottery_label({"kind": "points", "value": 0})
         self.assertIn("谢谢参与", text)
 
-    def test_makeup_card_has_a_use_button(self):
+    def test_makeup_is_not_a_shop_item(self):
         self.app.open_shop()
         try:
             self.app.update()
             self.app._pick_shop_filter("cat", "物品类")
             self.app.update()
-            texts = []
-            for tile in self._shop_tiles():
-                stack = list(tile.winfo_children())
-                while stack:
-                    w = stack.pop()
-                    stack.extend(w.winfo_children())
-                    try:
-                        t = w.cget("text")
-                    except Exception:  # noqa: BLE001 - most widgets have no text
-                        t = None
-                    if isinstance(t, str):
-                        texts.append(t)
-            self.assertIn("补签卡", texts, "商城没有补签卡：%s" % texts)
-            self.assertIn("补签", texts, "补签卡没有「补签」按钮：%s" % texts)
+            self.assertNotIn("makeup_card",
+                             {item["id"] for item in slg_titles.available_shop_items()})
+            self.assertTrue(callable(slg_titles.buy_makeup_card),
+                            "日历直接补签逻辑被一并删除")
         finally:
             self._close_shop()
 
@@ -1624,6 +1615,11 @@ class SidebarFit(unittest.TestCase):
         # Leave the list showing the real catalogue: the pool keeps every row
         # it has ever built, and a later test measuring the sidebar would be
         # measuring these fake cards instead.
+        if getattr(self.app, "_panel_mode", None) == "comments":
+            self.app._panel_mode = "game"
+            self.app._set_shop_wide_layout(False)
+            self.app.selected = None
+            self.app._destroy_detail()
         with mock.patch.object(self.app, "_render_stats"), \
                 mock.patch.object(self.app, "_render_detail_if_stale"):
             self.app.page = 1
@@ -1883,12 +1879,15 @@ class SidebarFit(unittest.TestCase):
         Setup only - it wipes the box, so reading through it proves nothing.
         Use _composer_text() for assertions.
         """
-        box = self.app._detail_parts["comments_entry"]
+        if getattr(self.app, "_panel_mode", None) != "comments":
+            self.app.open_comments()
+            self.app.update()
+        box = self.app._comment_entry
         box.delete("1.0", "end")
         return box
 
     def _composer_text(self):
-        return self.app._detail_parts["comments_entry"].get("1.0", "end-1c")
+        return self.app._comment_entry.get("1.0", "end-1c")
 
     def _drop_comments(self, slug):
         self.app.conn.execute("DELETE FROM comments WHERE game_slug = ?", (slug,))
@@ -1945,17 +1944,19 @@ class SidebarFit(unittest.TestCase):
             self._finish()
 
     def test_half_typed_text_survives_a_refresh_but_not_a_game_change(self):
-        # A refresh comes through the panel on every sync tick and every cover
-        # that lands. It must not wipe what is being typed - but switching games
-        # must, or the box would carry the last game's draft onto the next one.
+        # Loading another comment page must not wipe a draft. Switching games
+        # returns to details, and opening the next game's comments starts clean.
         self._pool_reset()
         try:
             game = self._panel_game(0)
             self._select(game)
-            self._composer().insert("1.0", "还没写完")
-            self.app._fill_detail_comments(self.app.selected)
+            box = self._composer()
+            box.insert("1.0", "还没写完")
+            self.app._load_comment_page(1)
             self.assertEqual(self._composer_text(), "还没写完")
             self.app.select(self._panel_game(1))
+            self.app.open_comments()
+            self.app.update()
             self.assertEqual(self._composer_text(), "")
         finally:
             self.app.selected = None
@@ -1978,19 +1979,12 @@ class SidebarFit(unittest.TestCase):
         self._pool_reset()
         try:
             self._select(self._panel_game(0))
-            row = self.app._detail_parts["comments_row"]
-            texts = []
-            for child in row.winfo_children():
-                try:
-                    texts.append(child.cget("text"))
-                except Exception:  # noqa: BLE001 - most widgets have no text
-                    pass
-            self.assertTrue(any("Ctrl+Enter" in t for t in texts if t),
-                            "没有任何地方告诉用户怎么发布：%s" % texts)
-            self.assertIn("发布", texts, "没有发布按钮：%s" % texts)
-            # And the block is actually on screen, not just built.
-            self.assertIn("comments_row", self.app._detail_shown)
-            self.assertIn("comments_entry", self.app._detail_shown)
+            self.assertIn("comments_button", self.app._detail_parts)
+            self.assertNotIn("comments_entry", self.app._detail_parts)
+            self.app.open_comments()
+            self.app.update()
+            self.assertTrue(self.app._comment_entry.winfo_exists())
+            self.assertTrue(self._find("Ctrl+Enter 发布"), "评论页没显示发布快捷键")
         finally:
             self._finish()
 
@@ -2543,9 +2537,9 @@ class SidebarFit(unittest.TestCase):
             self.assertNotIn("·", text, text)
             self.assertNotIn("源码", text, text)
 
-    def test_the_sidebar_offers_feedback_without_promotion(self):
-        # Keep a usable feedback route without asking users to promote the app.
-        self._assert_has_height(slg_gui.CONTACT_EMAIL, "侧栏反馈邮箱")
+    def test_the_sidebar_offers_group_feedback_without_promotion(self):
+        # User feedback goes through the QQ group; personal email is not shown.
+        self._assert_has_height("问题反馈 · QQ 群 1124074040", "侧栏交流群反馈入口")
         self.assertEqual(self._find("求个 GitHub star"), [])
 
     def test_the_detail_footer_offers_feedback_without_promotion(self):
@@ -2553,7 +2547,7 @@ class SidebarFit(unittest.TestCase):
         try:
             self._select(self._panel_game(0))
             self.assertEqual(self._find("点个 star"), [])
-            self._assert_has_height("反馈 / 建议", "详情页反馈按钮")
+            self._assert_has_height("问题或功能建议", "详情页反馈说明")
         finally:
             self.app.selected = None
             self._finish()
@@ -2705,93 +2699,12 @@ class SidebarFit(unittest.TestCase):
             self.app.update()
 
 
-    # --- 数据统计面板 -------------------------------------------------------
-    #
-    # Every one of the four states used to render as the same empty panel, and
-    # three of them are not "no data yet" - they are "the server was never
-    # deployed", "your key is wrong" and "the network is down". These pin that
-    # the panel says which one it is, in the words that name the fix.
+    # --- Web admin console -------------------------------------------------
 
-    def _open_stats(self, result):
-        with mock.patch.object(slg_remote, "fetch_stats", return_value=result), \
-                mock.patch.object(slg_gui.threading, "Thread", _InlineThread):
-            self.app._show_stats_panel()
-        self.app._drain()
-        self.app.update()
-        self.addCleanup(self._close_window, self.app._stats_win)
-        return self.app._stats_body
-
-    @staticmethod
-    def _close_window(win):
-        try:
-            if win.winfo_exists():
-                win.destroy()
-        except tk.TclError:
-            pass
-
-    @staticmethod
-    def _texts(widget):
-        out = []
-
-        def walk(node):
-            for child in node.winfo_children():
-                try:
-                    text = child.cget("text")
-                except Exception:  # noqa: BLE001 - most widgets have no text
-                    text = None
-                if isinstance(text, str):
-                    out.append(text)
-                walk(child)
-
-        walk(widget)
-        return out
-
-    def test_the_stats_panel_translates_event_names(self):
-        body = self._open_stats(("ok", {
-            "events": {"launch": 5, "signin": 2}, "devices": 3,
-            "last_report": "2026-09-22T10:00:00"}))
-        texts = self._texts(body)
-        self.assertIn("启动", texts)
-        self.assertIn("签到", texts, "事件名没翻成中文，面板像给开发看的原始日志")
-
-    def test_the_stats_panel_shows_devices_and_a_short_timestamp(self):
-        body = self._open_stats(("ok", {
-            "events": {"launch": 5}, "devices": 7,
-            "last_report": "2026-09-22T10:00:00"}))
-        texts = self._texts(body)
-        self.assertIn("7", texts)
-        self.assertIn("09-22 10:00:00", texts)
-
-    def test_an_unknown_event_is_still_listed(self):
-        # A new event type ships before its label does; dropping it silently
-        # would make the panel look like the event never fired.
-        body = self._open_stats(("ok", {
-            "events": {"brand_new": 1}, "devices": 1, "last_report": None}))
-        self.assertIn("brand_new", self._texts(body))
-
-    def test_an_undeployed_server_names_the_command_that_fixes_it(self):
-        body = self._open_stats(("missing", None))
-        texts = self._texts(body)
-        self.assertTrue(any("deploy_server.py --user ubuntu" in t for t in texts),
-                        "面板没给出修复命令，用户只能看到一片空白")
-
-    def test_a_key_mismatch_points_at_the_local_key_file(self):
-        body = self._open_stats(("locked", None))
-        texts = self._texts(body)
-        self.assertTrue(any("stats_key.txt" in t for t in texts),
-                        "没告诉用户是哪个文件里的密钥对不上")
-
-    def test_the_panel_survives_an_empty_but_deployed_server(self):
-        body = self._open_stats(("ok", {"events": {}, "devices": 0,
-                                        "last_report": None}))
-        self.assertTrue(self._texts(body))
-
-    def test_old_stats_endpoint_is_not_reported_as_a_disk_failure(self):
-        body = self._open_stats(("ok", {"events": {}, "devices": 0,
-                                        "last_report": None}))
-        texts = self._texts(body)
-        self.assertTrue(any("服务器尚未提供空间统计" in t for t in texts))
-        self.assertFalse(any("服务器读取容量失败" in t for t in texts))
+    def test_admin_console_button_opens_the_web_admin_page(self):
+        with mock.patch.object(slg_gui.webbrowser, "open") as open_page:
+            self.app._open_admin_console()
+        open_page.assert_called_once_with(slg_gui.ADMIN_URL)
 
 
 if __name__ == "__main__":

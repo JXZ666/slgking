@@ -600,8 +600,8 @@ def scene_outro(p):
     a = ramp(p, 0.56, 0.24)
     link = text_img("github.com/JXZ666", font(34, True), ACCENT)
     paste(frame, link, (W / 2 - link.width / 2, 700), a)
-    mail = text_img("反馈：jxzsaikou666@qq.com · 遇收费请立即举报", font(25), MUTED)
-    paste(frame, mail, (W / 2 - mail.width / 2, 762), ramp(p, 0.66, 0.24))
+    group = text_img("QQ 交流群：1124074040", font(25), MUTED)
+    paste(frame, group, (W / 2 - group.width / 2, 762), ramp(p, 0.66, 0.24))
     star = ramp(p, 0.76, 0.20)
     if star > 0.004:
         bounce = 6 * (1 - ease(clamp01((p - 0.76) / 0.14)))

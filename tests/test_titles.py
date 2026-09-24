@@ -55,6 +55,33 @@ class Catalogue(unittest.TestCase):
         expired = slg_titles.available_shop_items("2026-10-31")
         self.assertNotIn("first_release", [i["id"] for i in expired])
 
+    def test_holiday_titles_are_available_through_october_eighth(self):
+        holiday_ids = {"mid_autumn_happy", "national_day_happy"}
+        items = {i["id"]: i for i in slg_titles.SHOP_ITEMS}
+        for item_id in holiday_ids:
+            with self.subTest(item_id=item_id):
+                title = slg_titles.title_by_id(item_id)
+                self.assertIsNotNone(title)
+                self.assertEqual(title["name"], items[item_id]["name"])
+                self.assertEqual(items[item_id]["limited_until"], "2026-10-08")
+                self.assertTrue(items[item_id]["cloud_only"])
+        on_sale = {i["id"] for i in slg_titles.available_shop_items("2026-10-08")}
+        after_sale = {i["id"] for i in slg_titles.available_shop_items("2026-10-09")}
+        self.assertTrue(holiday_ids <= on_sale)
+        self.assertTrue(holiday_ids.isdisjoint(after_sale))
+
+    def test_neon_comment_frame_is_a_fixed_cloud_decoration(self):
+        item = slg_titles.shop_item_by_id("neon_comment_frame")
+        self.assertIsNotNone(item)
+        self.assertEqual(item["kind"], "decoration")
+        self.assertEqual(item["category"], "物品类")
+        self.assertEqual(item["cost"], 120)
+        self.assertTrue(item["cloud_only"])
+        self.assertEqual(item["appearance"], "comment_frame")
+        self.assertEqual(item["asset"], "neon_comment_frame")
+        self.assertEqual(item["asset_source"], "builtin")
+        self.assertIn("不支持上传", item["description"])
+
     def test_lucky_star_is_epic_and_lottery_obtain(self):
         t = slg_titles.title_by_id("lucky_star")
         self.assertIsNotNone(t)
@@ -150,11 +177,12 @@ class MakeupCard(unittest.TestCase):
         self.conn = slg_db.connect(":memory:")
         self.addCleanup(self.conn.close)
 
-    def test_item_is_on_the_shelf(self):
+    def test_makeup_is_removed_from_shelf_but_direct_calendar_makeup_remains(self):
         item = slg_titles.shop_item_by_id("makeup_card")
-        self.assertIsNotNone(item)
-        self.assertEqual(item["kind"], "makeup")
-        self.assertEqual(item["cost"], slg_titles.MAKEUP_CARD_COST)
+        self.assertIsNone(item)
+        self.assertNotIn("makeup_card", {
+            i["id"] for i in slg_titles.available_shop_items("2026-09-22")})
+        self.assertEqual(slg_titles.MAKEUP_CARD_COST, 5)
 
     def test_backfills_most_recent_missed_day(self):
         for d in (1, 2, 3):
@@ -209,6 +237,13 @@ class Buying(unittest.TestCase):
         slg_db.add_points(self.conn, 1000, "签到")
         self.assertFalse(slg_titles.buy(self.conn, rename_card))
         self.assertEqual(slg_db.points_balance(self.conn), 1000)
+
+    def test_cloud_only_decoration_cannot_be_bought_into_local_inventory(self):
+        item = slg_titles.shop_item_by_id("neon_comment_frame")
+        slg_db.add_points(self.conn, item["cost"], "签到")
+        self.assertFalse(slg_titles.buy(self.conn, item))
+        self.assertEqual(slg_db.points_balance(self.conn), item["cost"])
+        self.assertNotIn(item["id"], slg_db.owned_title_ids(self.conn))
 
 
 class Redemption(unittest.TestCase):

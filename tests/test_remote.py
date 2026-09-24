@@ -9,7 +9,6 @@ Run with: `python -m unittest discover tests`
 
 import threading
 import unittest
-import urllib.error
 from datetime import date, timedelta
 from unittest import mock
 
@@ -45,48 +44,6 @@ class FetchConfig(unittest.TestCase):
         with mock.patch.object(slg_remote.slg_scrape, "http_get",
                                return_value=b'[1, 2, 3]'):
             self.assertEqual(slg_remote.fetch_config(), {})
-
-
-class FetchStats(unittest.TestCase):
-    """The panel shows one of four states, and each one has a different fix.
-
-    Flattening them to None is what made an undeployed server look exactly like
-    a server that simply had no users yet.
-    """
-
-    def _get(self, value=None, error=None):
-        patcher = mock.patch.object(slg_remote.slg_scrape, "http_get")
-        get = patcher.start()
-        self.addCleanup(patcher.stop)
-        if error is not None:
-            get.side_effect = error
-        else:
-            get.return_value = value
-        return slg_remote.fetch_stats()
-
-    def test_ok_carries_the_aggregate(self):
-        body = b'{"events": {"launch": 3}, "devices": 2, "last_report": "x"}'
-        status, stats = self._get(body)
-        self.assertEqual(status, "ok")
-        self.assertEqual(stats["devices"], 2)
-
-    def test_404_means_the_box_was_never_deployed(self):
-        err = urllib.error.HTTPError("u", 404, "not found", {}, None)
-        self.assertEqual(self._get(error=err), ("missing", None))
-
-    def test_locked_means_the_key_does_not_match(self):
-        self.assertEqual(self._get(b'{"locked": true}'), ("locked", None))
-
-    def test_network_failure_is_offline(self):
-        self.assertEqual(self._get(error=OSError("down")), ("offline", None))
-
-    def test_non_json_body_is_offline(self):
-        self.assertEqual(self._get(b"<html>404</html>"), ("offline", None))
-
-    def test_other_http_errors_are_not_missing(self):
-        """Only 404 means 'no such endpoint'; a 500 must not read as undeployed."""
-        err = urllib.error.HTTPError("u", 500, "boom", {}, None)
-        self.assertEqual(self._get(error=err), ("offline", None))
 
 
 class Report(unittest.TestCase):

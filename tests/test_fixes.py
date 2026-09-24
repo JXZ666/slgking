@@ -300,12 +300,12 @@ class PublicCommentLimits(unittest.TestCase):
         error = slg_comments.validate_public_comment(
             "game", "x" * (slg_comments.MAX_COMMENT_CONTENT_CHARS + 1),
             device="device-id")
-        self.assertIn("2000", error)
+        self.assertIn("500", error)
 
     def test_serialized_utf8_request_limit_is_enforced(self):
         error = slg_comments.validate_public_comment(
-            "game", "汉" * 1400, device="device-id")
-        self.assertIn("服务器大小限制", error)
+            "game", "汉" * 500, nickname="x" * 600, device="device-id")
+        self.assertIn("2048", error)
 
     def test_oversize_upload_never_reaches_network(self):
         with mock.patch.object(slg_scrape, "http_post") as post:

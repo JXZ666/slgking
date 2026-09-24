@@ -55,7 +55,13 @@ TITLES = [
      "desc": "攒得住的玩家才有。没有捷径，就是每天签到把积分攒够。"},
     {"id": "first_release", "name": "首发用户", "rarity": "史诗", "obtain": "shop",
      "cost": 30, "limited_until": "2026-10-30",
-     "desc": "限时纪念头衔。软件早期就在的那批人，凭证。"},
+     "desc": "首发纪念头衔，销售至 2026-10-30（含当日）；此后下架，绝版永不返场。购得后永久保留。"},
+    {"id": "mid_autumn_happy", "name": "中秋快乐", "rarity": "史诗", "obtain": "shop",
+     "cost": 50, "limited_until": "2026-10-08",
+     "desc": "中秋节限定头衔，限时销售至 2026-10-08。"},
+    {"id": "national_day_happy", "name": "国庆快乐", "rarity": "史诗", "obtain": "shop",
+     "cost": 50, "limited_until": "2026-10-08",
+     "desc": "国庆节限定头衔，限时销售至 2026-10-08。"},
     {"id": "collector", "name": "收藏家", "rarity": "稀有", "obtain": "collection",
      "desc": "收藏夹攒下足够多的游戏，证明你不是随便逛逛。"},
     {"id": "connoisseur", "name": "鉴赏家", "rarity": "史诗", "obtain": "public_comments",
@@ -94,7 +100,10 @@ def obtain_title_text(t):
     if kind == "shop":
         text = "积分商城用 %d 分兑换。" % t.get("cost", 0)
         if t.get("limited_until"):
-            text += "限时商品，%s 之后下架。" % t["limited_until"]
+            if t.get("id") == "first_release":
+                text += "销售至 %s（含当日），此后下架并绝版，永不返场；购得后永久保留。" % t["limited_until"]
+            else:
+                text += "限时销售至 %s（含当日），之后下架。" % t["limited_until"]
         return text
     return _OBTAIN_TEXT.get(kind, "")
 
@@ -147,15 +156,25 @@ SHOP_ITEMS = [
     {"id": "daily_lottery", "name": "每日抽奖", "kind": "lottery", "category": "物品类",
      "subcategory": "抽奖", "cost": 5, "note": "每日 3 次",
      "description": "花 5 积分抽一次，有机会赢取史诗头衔「幸运星」或若干积分。每日限 3 次。"},
-    {"id": "makeup_card",   "name": "补签卡",   "kind": "makeup",  "category": "物品类",
-     "subcategory": "消耗品", "cost": 5, "note": "补签一次",
-     "description": "补上本月最近一个漏签日，接续累计签到，不发放当日签到分。"},
     {"id": "senior_user",   "name": "资深用户", "kind": "title",   "category": "头衔类",
      "subcategory": "稀有", "cost": 300,
      "description": "稀有头衔，资深玩家的身份象征，评论上线后展示在昵称旁。"},
     {"id": "first_release", "name": "首发用户", "kind": "title",   "category": "头衔类",
      "subcategory": "史诗", "cost": 30, "limited_until": "2026-10-30",
-     "description": "史诗头衔，首发用户的限时纪念，到期后下架。"},
+     "description": "首发纪念头衔，销售至 2026-10-30（含当日）；此后下架，绝版永不返场。购得后永久保留。"},
+    {"id": "mid_autumn_happy", "name": "中秋快乐", "kind": "title", "category": "头衔类",
+     "subcategory": "史诗", "cost": 50, "limited_until": "2026-10-08",
+     "cloud_only": True,
+     "description": "云端限定中秋节史诗头衔，限时销售至 2026-10-08，当天仍可购买。"},
+    {"id": "national_day_happy", "name": "国庆快乐", "kind": "title", "category": "头衔类",
+     "subcategory": "史诗", "cost": 50, "limited_until": "2026-10-08",
+     "cloud_only": True,
+     "description": "云端限定国庆节史诗头衔，限时销售至 2026-10-08，当天仍可购买。"},
+    {"id": "neon_comment_frame", "name": "霓虹名片框", "kind": "decoration",
+     "category": "物品类", "subcategory": "外观装饰", "cost": 120,
+     "cloud_only": True, "appearance": "comment_frame",
+     "asset": "neon_comment_frame", "asset_source": "builtin",
+     "description": "固定内置霓虹边框，装备后展示在个人页和你的公开评论卡片上；不支持上传自定义图片。"},
 ]
 
 # 固定兑换码（暂无）。「群友」头衔改用每日轮换码（见 group_code），不再用固定字符串，
@@ -324,7 +343,7 @@ def buy_makeup_card(conn, day=None, target=None):
 
 def buy(conn, item):
     """用积分购买一件货架商品。locked 商品直接拒绝。返回是否成功。"""
-    if not item or item.get("locked"):
+    if not item or item.get("locked") or item.get("cloud_only"):
         return False
     return slg_db.buy_title(conn, item["id"], item["cost"])
 
@@ -605,6 +624,18 @@ def _valid_group_codes():
     today = date.today()
     return {group_code(today.isoformat()),
             group_code((today - timedelta(days=1)).isoformat())}
+
+
+def is_group_code(code):
+    """Whether a submitted code matches today's or yesterday's group code."""
+    return (code or "").strip().upper() in _valid_group_codes()
+
+
+def is_cloud_group_code_format(code):
+    """Recognize the server-issued code shape; only the server validates it."""
+    value = (code or "").strip().upper()
+    return (value.startswith("QUNYOU-") and len(value) == 17
+            and all(ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567" for ch in value[7:]))
 
 
 def redeem(conn, code):

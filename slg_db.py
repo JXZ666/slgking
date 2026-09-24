@@ -2072,9 +2072,62 @@ def last_signin_day(conn):
 
 
 def owned_title_ids(conn):
-    return {r["title_id"] for r in conn.execute(
+    owned = {r["title_id"] for r in conn.execute(
         "SELECT title_id FROM owned_titles WHERE %s"
         % _trusted(conn, "owned_titles"))}
+    try:
+        migrated = json.loads(get_pref(conn, "cloud.legacy_migrated_titles", "[]"))
+        if isinstance(migrated, list):
+            owned.difference_update(t for t in migrated if isinstance(t, str))
+    except (TypeError, ValueError):
+        pass
+    return owned
+
+
+def apply_cloud_legacy_migration(conn, source_id, points, titles):
+    """Debit a server-accepted legacy snapshot once, in one local transaction.
+
+    The title ledger is sealed and append-only, so migrated title ownership is
+    hidden through a local preference instead of deleting sealed history.
+    """
+    if not isinstance(source_id, str) or len(source_id) != 32:
+        raise ValueError("invalid migration source")
+    if not isinstance(points, int) or isinstance(points, bool) or points < 0:
+        raise ValueError("invalid migration points")
+    if not isinstance(titles, (list, tuple, set)) or len(titles) > 100:
+        raise ValueError("invalid migration titles")
+    clean_titles = sorted({str(title) for title in titles})
+    done_key = "cloud.legacy_migration_local_source"
+    already = get_pref(conn, done_key, "")
+    if already == source_id:
+        return False
+    if already:
+        raise ValueError("this local source was already migrated")
+    if tamper_report(conn) is not None:
+        raise ValueError("local save integrity check failed")
+    if points_balance(conn) < points:
+        raise ValueError("local balance changed during migration")
+    owned = owned_title_ids(conn)
+    if not set(clean_titles).issubset(owned):
+        raise ValueError("local titles changed during migration")
+
+    if points:
+        _insert_sealed(conn, "points_log", (-points, "旧积分迁移至云端", _now()))
+    try:
+        prior = json.loads(get_pref(conn, "cloud.legacy_migrated_titles", "[]"))
+    except (TypeError, ValueError):
+        prior = []
+    if not isinstance(prior, list):
+        prior = []
+    migrated_titles = sorted(set(t for t in prior if isinstance(t, str)) | set(clean_titles))
+    conn.execute("INSERT OR REPLACE INTO prefs(key,value) VALUES (?,?)",
+                 ("cloud.legacy_migrated_titles",
+                  json.dumps(migrated_titles, ensure_ascii=False)))
+    conn.execute("INSERT OR REPLACE INTO prefs(key,value) VALUES (?,?)",
+                 (done_key, source_id))
+    conn.commit()
+    invalidate_ledger(conn)
+    return True
 
 
 def own_title(conn, title_id, source):

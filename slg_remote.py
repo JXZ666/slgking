@@ -11,9 +11,7 @@ No nickname, no game name, no cover, no comment text is ever sent.
 """
 
 import json
-import os
 import threading
-import urllib.error
 import uuid
 import slg_db
 import slg_scrape
@@ -75,62 +73,3 @@ def report(conn, event_type, data=None):
             pass
 
     threading.Thread(target=_send, daemon=True).start()
-
-
-def stats_key_path():
-    """Where the stats key lives: %LOCALAPPDATA%/slgking/stats_key.txt.
-
-    Public because the panel names the file when the server rejects the key -
-    the fix is editing this path, so the message has to say which path.
-    """
-    return os.path.join(slg_db.app_dir(), "stats_key.txt")
-
-
-def stats_key():
-    """The developer's stats-viewing key, from a machine-local file, or None.
-
-    Kept separate from the developer secret on purpose: this read-only key is
-    sent in an HTTPS request header; the developer secret never leaves the machine.
-    """
-    try:
-        with open(stats_key_path(), "r", encoding="utf-8") as fh:
-            value = fh.read().strip()
-            return value if value else None
-    except OSError:
-        return None
-
-
-def fetch_stats(timeout=8):
-    """(status, stats) for the developer-only read panel. Never raises.
-
-    The status exists because every one of these failures used to look the same
-    on screen - an empty panel - while needing a completely different fix:
-
-      ok       the server answered, stats is the aggregate (possibly empty);
-      locked   deployed, but its SLGKING_STATS_KEY is not this machine's key;
-      missing  /stats.json 404s, which means the box still runs an old
-               serve_catalog and has never been deployed with /report at all;
-      offline  no answer, or an answer that is not JSON.
-    """
-    key = stats_key()
-    try:
-        raw = slg_scrape.http_get(
-            SERVER_BASE + "/stats.json", timeout=timeout, direct=True,
-            headers={"X-SLG-Admin-Key": key} if key else None)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return ("missing", None)
-        if exc.code == 401:
-            return ("locked", None)
-        return ("offline", None)
-    except Exception:  # noqa: BLE001 - the panel renders the status text
-        return ("offline", None)
-    try:
-        data = json.loads(raw.decode("utf-8", "replace"))
-    except ValueError:
-        return ("offline", None)
-    if not isinstance(data, dict):
-        return ("offline", None)
-    if data.get("locked"):
-        return ("locked", None)
-    return ("ok", data)

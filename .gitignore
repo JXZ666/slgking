@@ -42,8 +42,14 @@ PATH.ai.md
 # the above.
 deploy_server.py
 serve_catalog.py
+slg_cloud_store.py
+slg_moderation.py
+cloud_backup.py
+admin_page.html
 slg_remote_admin.py
 slgking_admin.spec
 build_admin.bat
 tests/test_serve_catalog.py
 tests/test_deploy.py
+tests/test_cloud_store.py
+tests/test_moderation.py

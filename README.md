@@ -24,13 +24,15 @@ want / downloaded / playing status that survives restarts.
 The point is the memory: every tap is written to the database. Rate a few games
 and the tag weights start reordering the list toward what you actually like.
 
-It has no account system. Your library records (ratings, status, notes,
-collections, and local folder paths) stay in the local database. The app does
-send anonymous usage events and aggregate counts to its server, identified by a
-random install ID. If you switch on public comments, the comment text, nickname,
-game ID, and that install ID are sent to the comment server. The comment and
-nickname are public; the install ID is used for ownership/rate limits and is
-not shown to other users. Private comments stay on this device.
+Your game library (ratings, status, notes, collections, and local folder paths)
+stays in the local database. Since v0.23, an optional cloud account carries your
+identity, nickname, points, titles, sign-in record, profile decoration, and
+public comments across devices. Keep the login key and recovery code somewhere
+safe; they cannot be recovered if lost. Private comments remain on this device.
+The app also sends anonymous usage events and aggregate counts to its server,
+identified by a random install ID. Public comments show your account nickname
+and equipped title and decoration; their text is reviewed automatically before
+it appears.
 
 It is a catalogue, not a storefront: it holds no game files and offers no
 downloads. Catalogue entries are for search and personal library management.
@@ -68,18 +70,24 @@ dikgames 是个大站（一千多款），但它没有「你」这个概念。�
 
 ### 数据与联网
 
-评分、状态、备注、收藏夹、头衔和本地游戏目录路径保存在本机数据库，不会作为个人游戏库上传。
+游戏库、评分、状态、备注、收藏夹和本地游戏目录路径保存在本机数据库，不会作为个人游戏库上传。
+0.23 云端账号用于跨设备保存身份、昵称、积分、头衔、签到、名片装饰和公开评论；登录密钥与恢复码由用户自行保管，丢失后无法找回。
 软件联网拉取目录和封面，也会发送匿名使用统计：随机安装 ID、软件版本、时间、操作事件和部分汇总数值。
 统计不包含本地游戏路径、私人评分、备注或游戏文件。
 
-评论默认只保存在本机。打开“公开发布”后，评论正文、昵称、游戏标识和匿名安装 ID 会发送到评论服务器。
-评论正文和昵称立即对其他用户可见；安装 ID 用于识别作者和限制滥用，不会在公开评论中展示。
-你可以在软件里删除自己发布的评论。软件没有账号系统。
+私人评论只保存在本机。公开评论需要云端账号，正文会先经过自动审核，审核通过后才展示并结算有效评论奖励。
+公开评论会显示账号昵称、头衔和已装备的内置名片框；你可以在软件里删除自己发布的评论。0.22.x 的匿名评论仍可公开浏览，但不会自动归到新账号名下，也不能通过新版账号界面删除。云端账号不会同步本机游戏库、评分、收藏夹或私人评论。
+
+### 0.23.0 稳定版与旧版兼容
+
+v0.23.0 稳定版现已在 GitHub 发布。v0.22.8 仍可基础浏览、同步游戏目录和封面；云端账号、云端评论和云端商城等 v0.23 功能需要使用 v0.23 客户端。目前服务器没有对旧版启用强制升级；之后旧版能否继续使用，仍取决于服务器的最低版本配置。
+
+v0.23.0 特别维护补偿为一次性云端 100 积分，登录后可在右上角「设置 → 公告」查看并手动领取；测试版不发放。领取入口由服务器活动配置控制，目前服务器尚未开启活动。它与本地版本更新补偿分开计算。
 
 **本软件完全免费**：没有收费版、没有付费激活、没有隐藏收费入口。如果你是花钱拿到它的，
 请立即举报。
 
-有 bug 或功能建议，可以发邮件到 `jxzsaikou666@qq.com`。
+有 bug 或功能建议，欢迎加入 QQ 交流群 `1124074040` 反馈。
 
 **本软件只是一个检索库**：里面没有游戏文件，也不提供下载。检索到的信息与游戏版权都归
 原站点和作者所有。
@@ -221,7 +229,7 @@ PowerShell 5.1 猜错 `.ps1` 的编码。
 
 **exe 里不带任何数据。** 打包只把 `assets/slgking.ico` 塞进去，`dist/` 只有一个
 exe；清单是每个用户第一次点同步时自己抓的，存在 `%LOCALAPPDATA%\slgking\`。
-换电脑带走那个目录，不是带走 exe。
+换电脑时带走那个目录可恢复本机数据；云端账号的身份、积分、头衔和公开评论则可在新设备登录后使用。
 
 同步早就不是翻页全量了，走的是 sitemap 增量：三个 sitemap 请求列出全站每个 slug
 和它的 `<lastmod>`，跟库里的逐条比对，**只有新增的、和 lastmod 变了的才去抓详情页**。
@@ -311,8 +319,7 @@ score(game) = 站内评分 + Σ(该游戏各标签的 weight)
    所以解析「最后一个括号是作者，前面第一个像版本号的才是版本」。
 6. **冻结的 exe 是个快照，不会读旁边的源码** —— 单文件模式下模块都解开在
    `sys._MEIPASS` 里，改完源码不重新打包，双击 exe 跑的还是旧的。
-   「设置 → 关于」里的 `v0.22.8 · 测试版 · 2026-09-24 02:23` 就是给这个用的：
-   时间没变，就是没重新打包。`--version` 打印同一行（侧栏只显示 `v0.22.8`）。
+   「设置 → 关于」里会显示版本号、构建类型和打包时间。若源码改了但这里的时间没变，说明运行的还是旧包；`--version` 也会打印这行信息（侧栏只显示版本号）。
 7. **别直接写 `ctk.CTkFont()`** —— customtkinter 默认字族是 Roboto，它**一个汉字
    字形都没有**，中文全靠 GDI 字体链接回退，粗体还会走合成加粗糊成一团。统一走
    `ui_font(size, weight)` 这个出口，它挑一个机器上真有的中文字族
