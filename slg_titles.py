@@ -36,6 +36,11 @@ SIGNIN_MILESTONES = {5: 15, 10: 30, 20: 50}
 # 补签卡价格（积分）。补签只补天数、不再给当日签到分。
 MAKEUP_CARD_COST = 5
 
+# 成就类头衔的解锁门槛。收藏家数的是收藏夹里的游戏数（本地）；鉴赏家数的是
+# 公开评论数（以服务器为准，防刷）。
+COLLECTOR_NEED = 20
+CONNOISSEUR_NEED = 10
+
 # obtain: default = 人人都有（未装备头衔时的兜底）；code = 兑换码；shop = 积分兑换；
 #         lottery = 每日抽奖大奖。
 # desc 是给「查看头衔」里那颗「获得方式」按钮用的一句话简介；获取路径由
@@ -51,6 +56,10 @@ TITLES = [
     {"id": "first_release", "name": "首发用户", "rarity": "史诗", "obtain": "shop",
      "cost": 30, "limited_until": "2026-10-30",
      "desc": "限时纪念头衔。软件早期就在的那批人，凭证。"},
+    {"id": "collector", "name": "收藏家", "rarity": "稀有", "obtain": "collection",
+     "desc": "收藏夹攒下足够多的游戏，证明你不是随便逛逛。"},
+    {"id": "connoisseur", "name": "鉴赏家", "rarity": "史诗", "obtain": "public_comments",
+     "desc": "认真写评论的人。公开评论攒到一定数量自动解锁。"},
     {"id": "lucky_star",    "name": "幸运星",   "rarity": "史诗", "obtain": "lottery",
      "desc": "每日抽奖的大奖。滚轮摇出三个 7 才出，一百抽之内必定到手。"},
     {"id": "king_of_luck",  "name": "幸运之王", "rarity": "传说", "obtain": "lottery",
@@ -65,6 +74,8 @@ _OBTAIN_TEXT = {
     "code": "加入交流群，用群公告里每天更新的当日兑换码兑换。",
     "lottery": "每日抽奖摇出「777」获得；累计 100 抽必定出一次。",
     "dev": "输入开发者密钥解锁。",
+    "collection": "收藏夹里攒满 %d 款游戏自动解锁。" % COLLECTOR_NEED,
+    "public_comments": "公开发表满 %d 条评论自动解锁。" % CONNOISSEUR_NEED,
 }
 
 # 幸运之王跟幸运星同为 lottery，但获取路径不同 —— 一句通用的「摇出 777」会把
@@ -113,6 +124,12 @@ def apply_update_compensation(conn, current_version):
     """版本变了就发一次维护补偿积分，返回本次实发数量（0 = 没发）。"""
     prev = slg_db.get_pref(conn, COMPENSATION_PREF, "") or ""
     if prev == current_version:
+        return 0
+    previous = slg_update.parse_version(prev)
+    current = slg_update.parse_version(current_version)
+    if previous is not None and current is not None and current < previous:
+        # A tester may install an older build after a newer test release.
+        # Keep the highest rewarded version so a later upgrade cannot pay twice.
         return 0
     amount = COMPENSATION_MAJOR if not prev else _compensation_amount(prev, current_version)
     if amount:
@@ -560,6 +577,26 @@ def unlock_all_titles(conn):
         if t["id"] not in slg_db.owned_title_ids(conn):
             slg_db.own_title(conn, t["id"], "dev")
             gained += 1
+    return gained
+
+
+def grant_achievements(conn, public_count=None):
+    """解锁「收藏家」「鉴赏家」两枚成就头衔。幂等，已拥有则跳过。
+
+    收藏家数的是本地收藏夹里的游戏数；鉴赏家数的是公开评论数——以服务器为准
+    防刷，`public_count` 给 None 表示还没拉到（或服务器不可达），该项跳过。
+    返回本次新解锁的头衔 id 列表。
+    """
+    gained = []
+    n_favs = conn.execute(
+        "SELECT COUNT(DISTINCT game_id) FROM collection_items").fetchone()[0]
+    if n_favs >= COLLECTOR_NEED and "collector" not in slg_db.owned_title_ids(conn):
+        slg_db.own_title(conn, "collector", "collection")
+        gained.append("collector")
+    if (public_count is not None and public_count >= CONNOISSEUR_NEED
+            and "connoisseur" not in slg_db.owned_title_ids(conn)):
+        slg_db.own_title(conn, "connoisseur", "public_comments")
+        gained.append("connoisseur")
     return gained
 
 

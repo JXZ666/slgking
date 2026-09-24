@@ -104,7 +104,7 @@ _STATUS_WORDS = {"final", "complete", "completed", "finished", "full release"}
 _DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def http_get(url, timeout=TIMEOUT, direct=False):
+def http_get(url, timeout=TIMEOUT, direct=False, headers=None):
     """One request, entity-decoded, raw bytes back. Raises on failure.
 
     Module level so the threaded cover pool can use it without going through
@@ -113,14 +113,16 @@ def http_get(url, timeout=TIMEOUT, direct=False):
     `direct=True` uses _DIRECT_OPENER (no proxy) - only for the author's own
     server, never for the scraped site.
     """
-    req = urllib.request.Request(url, headers={
+    request_headers = {
         "User-Agent": UA,
         "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
                    "image/avif,image/webp,*/*;q=0.8"),
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate",
         "Connection": "close",
-    })
+    }
+    request_headers.update(headers or {})
+    req = urllib.request.Request(url, headers=request_headers)
     opener = _DIRECT_OPENER if direct else None
     with (opener.open(req, timeout=timeout) if opener
           else urllib.request.urlopen(req, timeout=timeout)) as resp:

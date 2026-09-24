@@ -49,7 +49,10 @@ class UserGames(unittest.TestCase):
         slg_db.delete_game(self.conn, gid)
         self.assertIsNone(slg_db.get_game(self.conn, gid))
         self.assertEqual(slg_db.game_tags(self.conn, gid), [])
-        self.assertEqual(slg_db.aliases(self.conn, gid), [])
+        self.assertEqual(
+            [r["alias"] for r in self.conn.execute(
+                "SELECT alias FROM game_aliases WHERE game_id = ? ORDER BY alias",
+                (gid,))], [])
 
     def test_set_tags_clear(self):
         gid = slg_db.add_user_game(self.conn, "My Game", tags=["a", "b"])
@@ -84,7 +87,10 @@ class BackupRoundTrip(unittest.TestCase):
         self.assertEqual(g["developer"], "dev")
         self.assertEqual(g["promoted"], 1)
         self.assertEqual(slg_db.game_tags(conn2, g["id"]), ["custom"])
-        self.assertEqual(slg_db.aliases(conn2, g["id"]), ["My Game Alias"])
+        self.assertEqual(
+            [r["alias"] for r in conn2.execute(
+                "SELECT alias FROM game_aliases WHERE game_id = ? ORDER BY alias",
+                (g["id"],))], ["My Game Alias"])
         conn.close()
         conn2.close()
 
@@ -105,10 +111,8 @@ class BackupRoundTrip(unittest.TestCase):
         slg_db.import_user_data(conn2, data)
 
         g = slg_db.find_games(conn2, origin="user")[0]
-        st = slg_db.get_state(conn2, g["id"])
-        self.assertIsNotNone(st)
-        self.assertEqual(st["status"], "downloaded")
-        self.assertEqual(st["my_rating"], 5)
+        self.assertEqual(g["status"], "downloaded")
+        self.assertEqual(g["my_rating"], 5)
         conn.close()
         conn2.close()
 

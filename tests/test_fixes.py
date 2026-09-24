@@ -8,6 +8,7 @@ Run with:
 import inspect
 import os
 import sys
+import tempfile
 import unittest
 import urllib.request
 from unittest import mock
@@ -15,6 +16,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import slg_db  # noqa: E402
+import slg_comments  # noqa: E402
 import slg_scan  # noqa: E402
 import slg_scrape  # noqa: E402
 
@@ -187,6 +189,131 @@ class DirectHttpTests(unittest.TestCase):
         params = inspect.signature(slg_scrape.http_get).parameters
         self.assertIn("direct", params)
         self.assertFalse(params["direct"].default)
+
+
+class NoteMergeTests(unittest.TestCase):
+    """The retired 评价 note folds into the comment list exactly once.
+
+    The detail panel used to carry a private note and a comment list side by
+    side, and users read them as two competing comment boxes.
+    """
+
+    def setUp(self):
+        self.conn = slg_db.connect(":memory:")
+        self.addCleanup(self.conn.close)
+
+    def _game_with_note(self, slug, note):
+        gid, _ = slg_db.upsert_game(self.conn, slug=slug,
+                                    url="https://dikgames.com/%s/" % slug,
+                                    title=slug)
+        self.conn.execute("INSERT OR IGNORE INTO state (game_id) VALUES (?)", (gid,))
+        self.conn.execute("UPDATE state SET note = ?, updated_at = datetime('now')"
+                          " WHERE game_id = ?", (note, gid))
+        self.conn.commit()
+        return gid
+
+    def test_a_note_becomes_a_private_comment(self):
+        self._game_with_note("merge-a", "第一行\n第二行")
+        self.conn.execute("DELETE FROM prefs WHERE key = ?",
+                          (slg_db.NOTES_MERGED_PREF,))
+        self.conn.commit()
+        self.assertEqual(slg_db.migrate_notes_to_comments(self.conn), 1)
+        rows = slg_db.list_comments(self.conn, "merge-a")
+        self.assertEqual([r["content"] for r in rows], ["第一行\n第二行"])
+        self.assertEqual(rows[0]["visibility"], "private")
+        self.assertIsNone(rows[0]["cloud_id"])
+
+    def test_the_note_column_is_left_alone(self):
+        # Rollback insurance: an older build still reads state.note, and a
+        # migration that ate it would leave that build with nothing.
+        gid = self._game_with_note("merge-b", "留着")
+        self.conn.execute("DELETE FROM prefs WHERE key = ?",
+                          (slg_db.NOTES_MERGED_PREF,))
+        self.conn.commit()
+        slg_db.migrate_notes_to_comments(self.conn)
+        note = self.conn.execute("SELECT note FROM state WHERE game_id = ?",
+                                 (gid,)).fetchone()["note"]
+        self.assertEqual(note, "留着")
+
+    def test_an_empty_note_is_not_migrated(self):
+        self._game_with_note("merge-c", "   \n ")
+        self.conn.execute("DELETE FROM prefs WHERE key = ?",
+                          (slg_db.NOTES_MERGED_PREF,))
+        self.conn.commit()
+        self.assertEqual(slg_db.migrate_notes_to_comments(self.conn), 0)
+        self.assertEqual(slg_db.list_comments(self.conn, "merge-c"), [])
+
+    def test_a_deleted_comment_stays_deleted(self):
+        # Guarded by a pref, not by looking for the row: the user is free to
+        # throw the migrated comment away, and it must not come back.
+        self._game_with_note("merge-d", "不想要了")
+        self.conn.execute("DELETE FROM prefs WHERE key = ?",
+                          (slg_db.NOTES_MERGED_PREF,))
+        self.conn.commit()
+        slg_db.migrate_notes_to_comments(self.conn)
+        for row in slg_db.list_comments(self.conn, "merge-d"):
+            slg_db.delete_comment(self.conn, row["id"])
+        self.assertEqual(slg_db.migrate_notes_to_comments(self.conn), 0)
+        self.assertEqual(slg_db.list_comments(self.conn, "merge-d"), [])
+
+    def test_connect_runs_the_merge_on_an_old_db(self):
+        path = os.path.join(tempfile.mkdtemp(), "slgking.db")
+        conn = slg_db.connect(path)
+        gid, _ = slg_db.upsert_game(conn, slug="merge-e",
+                                    url="https://dikgames.com/merge-e/",
+                                    title="merge-e")
+        conn.execute("INSERT OR IGNORE INTO state (game_id) VALUES (?)", (gid,))
+        conn.execute("UPDATE state SET note = ?, updated_at = datetime('now')"
+                     " WHERE game_id = ?", ("升级前写的", gid))
+        # An old build's comments table: no visibility column at all.
+        conn.execute("DROP TABLE comments")
+        conn.execute("CREATE TABLE comments (id INTEGER PRIMARY KEY,"
+                     " game_slug TEXT NOT NULL, content TEXT NOT NULL,"
+                     " nickname TEXT, cloud_id TEXT, created_at TEXT NOT NULL)")
+        conn.execute("DELETE FROM prefs WHERE key = ?",
+                     (slg_db.NOTES_MERGED_PREF,))
+        conn.commit()
+        conn.close()
+
+        conn = slg_db.connect(path)
+        self.addCleanup(conn.close)
+        rows = slg_db.list_comments(conn, "merge-e")
+        self.assertEqual([r["content"] for r in rows], ["升级前写的"])
+        self.assertEqual(rows[0]["visibility"], "private")
+
+    def test_add_comment_defaults_to_private(self):
+        slg_db.add_comment(self.conn, "merge-f", "随手一条")
+        self.assertEqual(slg_db.list_comments(self.conn, "merge-f")[0]["visibility"],
+                         "private")
+
+    def test_a_public_comment_keeps_its_flag(self):
+        slg_db.add_comment(self.conn, "merge-g", "给别人看", visibility="public")
+        self.assertEqual(slg_db.list_comments(self.conn, "merge-g")[0]["visibility"],
+                         "public")
+
+
+class PublicCommentLimits(unittest.TestCase):
+    def test_server_character_limit_is_enforced_without_truncation(self):
+        self.assertIsNone(slg_comments.validate_public_comment(
+            "game", "x" * slg_comments.MAX_COMMENT_CONTENT_CHARS,
+            device="device-id"))
+        error = slg_comments.validate_public_comment(
+            "game", "x" * (slg_comments.MAX_COMMENT_CONTENT_CHARS + 1),
+            device="device-id")
+        self.assertIn("2000", error)
+
+    def test_serialized_utf8_request_limit_is_enforced(self):
+        error = slg_comments.validate_public_comment(
+            "game", "汉" * 1400, device="device-id")
+        self.assertIn("服务器大小限制", error)
+
+    def test_oversize_upload_never_reaches_network(self):
+        with mock.patch.object(slg_scrape, "http_post") as post:
+            result = slg_comments.upload_comment(
+                "game", "x" * (slg_comments.MAX_COMMENT_CONTENT_CHARS + 1),
+                device="device-id")
+        self.assertIsNone(result)
+        post.assert_not_called()
 
 
 if __name__ == "__main__":

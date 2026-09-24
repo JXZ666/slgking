@@ -206,11 +206,9 @@ def build_demo_library():
         slg_db.set_state(conn, game_id, status=game["status"], my_rating=index % 5 + 1)
         if game["status"] != "want":
             conn.execute(
-                "INSERT OR REPLACE INTO local (game_id, folder_path, folder_version,"
-                " has_translation, has_fontpatch, size_bytes, scanned_at)"
-                " VALUES (?,?,?,?,?,?,?)",
-                (game_id, "D:/Games/" + slug, game["version"], 0, 0, 1_900_000_000,
-                 "2026-09-19T00:00:00"))
+                "INSERT OR REPLACE INTO local (game_id, folder_path, folder_version)"
+                " VALUES (?,?,?)",
+                (game_id, "D:/Games/" + slug, game["version"]))
         # Both halves of the 中文 view are seeded, so the detail shot exercises
         # the cached path rather than reaching for an engine the demo has no key
         # for - see the early return in slg_gui._set_overview_lang.

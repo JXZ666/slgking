@@ -725,6 +725,15 @@ class Compensation(unittest.TestCase):
             slg_titles.apply_update_compensation(self.conn, "0.22.1"),
             slg_titles.COMPENSATION_MINOR)
 
+    def test_older_test_build_grants_nothing_and_keeps_rewarded_version(self):
+        slg_titles.apply_update_compensation(self.conn, "0.23.5")
+        before = slg_db.points_balance(self.conn)
+        self.assertEqual(
+            slg_titles.apply_update_compensation(self.conn, "0.22.6"), 0)
+        self.assertEqual(slg_db.points_balance(self.conn), before)
+        self.assertEqual(
+            slg_db.get_pref(self.conn, slg_titles.COMPENSATION_PREF), "0.23.5")
+
     def test_minor_bump_grants_major(self):
         slg_titles.apply_update_compensation(self.conn, "0.22.0")
         self.assertEqual(
@@ -736,6 +745,62 @@ class Compensation(unittest.TestCase):
         self.assertEqual(
             slg_titles.apply_update_compensation(self.conn, "1.0.0"),
             slg_titles.COMPENSATION_MAJOR)
+
+
+class Achievements(unittest.TestCase):
+    def setUp(self):
+        self.conn = slg_db.connect(":memory:")
+        self.addCleanup(self.conn.close)
+
+    def _seed_collection(self, n):
+        cid = slg_db.create_collection(self.conn, "test")
+        for i in range(n):
+            gid, _ = slg_db.upsert_game(self.conn, slug="g%d" % i,
+                                        url="https://x/g%d" % i, title="g%d" % i)
+            self.conn.execute(
+                "INSERT OR IGNORE INTO collection_items"
+                " (collection_id, game_id, added_at) VALUES (?,?,datetime('now'))",
+                (cid, gid))
+        self.conn.commit()
+
+    def test_collector_unlocks_at_threshold(self):
+        self._seed_collection(slg_titles.COLLECTOR_NEED)
+        self.assertEqual(slg_titles.grant_achievements(self.conn), ["collector"])
+        self.assertIn("collector", slg_db.owned_title_ids(self.conn))
+
+    def test_collector_not_before_threshold(self):
+        self._seed_collection(slg_titles.COLLECTOR_NEED - 1)
+        self.assertEqual(slg_titles.grant_achievements(self.conn), [])
+        self.assertNotIn("collector", slg_db.owned_title_ids(self.conn))
+
+    def test_collector_is_idempotent(self):
+        self._seed_collection(slg_titles.COLLECTOR_NEED)
+        slg_titles.grant_achievements(self.conn)
+        self.assertEqual(slg_titles.grant_achievements(self.conn), [])
+        self.assertIn("collector", slg_db.owned_title_ids(self.conn))
+
+    def test_connoisseur_unlocks_at_public_comment_threshold(self):
+        self.assertEqual(
+            slg_titles.grant_achievements(self.conn, slg_titles.CONNOISSEUR_NEED),
+            ["connoisseur"])
+        self.assertIn("connoisseur", slg_db.owned_title_ids(self.conn))
+
+    def test_connoisseur_not_below_threshold(self):
+        self.assertEqual(
+            slg_titles.grant_achievements(
+                self.conn, slg_titles.CONNOISSEUR_NEED - 1), [])
+        self.assertNotIn("connoisseur", slg_db.owned_title_ids(self.conn))
+
+    def test_connoisseur_skipped_when_count_unknown(self):
+        self.assertEqual(slg_titles.grant_achievements(self.conn, None), [])
+        self.assertNotIn("connoisseur", slg_db.owned_title_ids(self.conn))
+
+    def test_achievement_titles_listed_in_catalogue(self):
+        self.assertEqual(slg_titles.title_by_id("collector")["rarity"], "稀有")
+        self.assertEqual(slg_titles.title_by_id("connoisseur")["rarity"], "史诗")
+        names = {t["name"] for t in slg_titles.TITLES}
+        self.assertIn("收藏家", names)
+        self.assertIn("鉴赏家", names)
 
 
 if __name__ == "__main__":

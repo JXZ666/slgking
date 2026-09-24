@@ -13,8 +13,6 @@
 > 截图里的游戏是编的，封面是画的 —— `python tools/shot_cards.py --demo` 生成的演示库，
 > 不是任何真实条目。
 
-宣传视频：[B 站 BV13eeq65EAM](https://www.bilibili.com/video/BV13eeq65EAM)
-
 ## English
 
 `slgking` is a local catalogue for adult Western visual novels. It scrapes
@@ -26,12 +24,16 @@ want / downloaded / playing status that survives restarts.
 The point is the memory: every tap is written to the database. Rate a few games
 and the tag weights start reordering the list toward what you actually like.
 
-It is a personal tool and stays local. No account, no upload, no telemetry. It
-ships with an empty exclusion list on purpose — what you filter is your call,
-not mine.
+It has no account system. Your library records (ratings, status, notes,
+collections, and local folder paths) stay in the local database. The app does
+send anonymous usage events and aggregate counts to its server, identified by a
+random install ID. If you switch on public comments, the comment text, nickname,
+game ID, and that install ID are sent to the comment server. The comment and
+nickname are public; the install ID is used for ownership/rate limits and is
+not shown to other users. Private comments stay on this device.
 
 It is a catalogue, not a storefront: it holds no game files and offers no
-downloads. Go to the developers' own sites — or find the downloads yourself.
+downloads. Catalogue entries are for search and personal library management.
 
 ```
 slgking                       # the window
@@ -64,14 +66,23 @@ dikgames 是个大站（一千多款），但它没有「你」这个概念。�
 
 **所有操作都落库**，关掉重开不会白学。
 
+### 数据与联网
+
+评分、状态、备注、收藏夹、头衔和本地游戏目录路径保存在本机数据库，不会作为个人游戏库上传。
+软件联网拉取目录和封面，也会发送匿名使用统计：随机安装 ID、软件版本、时间、操作事件和部分汇总数值。
+统计不包含本地游戏路径、私人评分、备注或游戏文件。
+
+评论默认只保存在本机。打开“公开发布”后，评论正文、昵称、游戏标识和匿名安装 ID 会发送到评论服务器。
+评论正文和昵称立即对其他用户可见；安装 ID 用于识别作者和限制滥用，不会在公开评论中展示。
+你可以在软件里删除自己发布的评论。软件没有账号系统。
+
 **本软件完全免费**：没有收费版、没有付费激活、没有隐藏收费入口。如果你是花钱拿到它的，
 请立即举报。
 
-**用得还行的话，欢迎在 GitHub 点个 star**，也帮忙推荐给周围的朋友。有想法、有 bug、
-想要什么功能，发邮件到 `jxzsaikou666@qq.com`。
+有 bug 或功能建议，可以发邮件到 `jxzsaikou666@qq.com`。
 
-**本软件只是一个检索库**：里面没有任何游戏文件，也不提供任何下载。想下载游戏请前往游戏
-官网，或者自己去找下载地址。检索到的信息与游戏版权都归原站点和作者所有。
+**本软件只是一个检索库**：里面没有游戏文件，也不提供下载。检索到的信息与游戏版权都归
+原站点和作者所有。
 
 ## 快速开始
 
@@ -300,8 +311,8 @@ score(game) = 站内评分 + Σ(该游戏各标签的 weight)
    所以解析「最后一个括号是作者，前面第一个像版本号的才是版本」。
 6. **冻结的 exe 是个快照，不会读旁边的源码** —— 单文件模式下模块都解开在
    `sys._MEIPASS` 里，改完源码不重新打包，双击 exe 跑的还是旧的。
-   「设置 → 关于」里的 `v0.22.0 · exe · 2026-09-22 01:15` 就是给这个用的：
-   时间没变，就是没重新打包。`--version` 打印同一行（侧栏只显示 `v0.22.0`）。
+   「设置 → 关于」里的 `v0.22.8 · 测试版 · 2026-09-24 02:23` 就是给这个用的：
+   时间没变，就是没重新打包。`--version` 打印同一行（侧栏只显示 `v0.22.8`）。
 7. **别直接写 `ctk.CTkFont()`** —— customtkinter 默认字族是 Roboto，它**一个汉字
    字形都没有**，中文全靠 GDI 字体链接回退，粗体还会走合成加粗糊成一团。统一走
    `ui_font(size, weight)` 这个出口，它挑一个机器上真有的中文字族

@@ -15,8 +15,6 @@ import os
 import threading
 import urllib.error
 import uuid
-from urllib.parse import quote
-
 import slg_db
 import slg_scrape
 from slg_sync_server import SERVER_BASE
@@ -91,9 +89,8 @@ def stats_key_path():
 def stats_key():
     """The developer's stats-viewing key, from a machine-local file, or None.
 
-    Kept separate from the developer secret on purpose: the stats key is sent
-    to the server as a query param, and the developer secret must never leave
-    the machine.
+    Kept separate from the developer secret on purpose: this read-only key is
+    sent in an HTTPS request header; the developer secret never leaves the machine.
     """
     try:
         with open(stats_key_path(), "r", encoding="utf-8") as fh:
@@ -115,14 +112,17 @@ def fetch_stats(timeout=8):
                serve_catalog and has never been deployed with /report at all;
       offline  no answer, or an answer that is not JSON.
     """
-    url = SERVER_BASE + "/stats.json"
     key = stats_key()
-    if key:
-        url += "?key=" + quote(key)
     try:
-        raw = slg_scrape.http_get(url, timeout=timeout, direct=True)
+        raw = slg_scrape.http_get(
+            SERVER_BASE + "/stats.json", timeout=timeout, direct=True,
+            headers={"X-SLG-Admin-Key": key} if key else None)
     except urllib.error.HTTPError as exc:
-        return ("missing" if exc.code == 404 else "offline", None)
+        if exc.code == 404:
+            return ("missing", None)
+        if exc.code == 401:
+            return ("locked", None)
+        return ("offline", None)
     except Exception:  # noqa: BLE001 - the panel renders the status text
         return ("offline", None)
     try:

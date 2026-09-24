@@ -1,89 +1,126 @@
-"""User comments backed by LeanCloud.
+"""Cloud comments, self-hosted on the author's server.
 
-The app is otherwise a pure-local desktop tool; comments are the one feature
-that needs shared storage, and LeanCloud's free tier is the lightest way to get
-it without standing up a server. AppId/Key are baked in here - they are a
-master key, so this is only safe for low-stakes comment data; delete abuse from
-the LeanCloud console.
+Comments are the one feature that needs shared storage. They live as an
+append-only JSONL on slg-king.com (see serve_catalog.py's /comments routes),
+keyed by the same anonymous device id slg_remote uses for telemetry. There is
+no account system, so "your own comment" is a device-id match - honour-system
+strength, enough to stop casual misuse but not a determined editor.
+
+Every call is best-effort: an offline comment reads as [] / None and never
+raises into the GUI.
 """
 
 import json
 import urllib.parse
 import urllib.request
 
-# TODO(user): fill these in from your LeanCloud console. Use a dedicated app
-# created just for comments. While they are blank the feature degrades quietly
-# to local-only - comments still save and show on this machine, just never sync.
-LC_APP_ID = ""
-LC_APP_KEY = ""
-# The REST host from the console's 数据存储 -> 安全中心 -> API 地址, without the
-# trailing "/1.1". International apps use *.api.lncldglobal.com, China apps
-# (leancloud.cn) use *.api.lncld.net. "/1.1/classes" is appended below.
-LC_HOST = ""
+import slg_scrape
+from slg_sync_server import SERVER_BASE
 
-CLASS = "Comment"
+_COMMENTS = SERVER_BASE + "/comments"
+_TIMEOUT = 8
+MAX_COMMENT_CONTENT_CHARS = 2000
+MAX_COMMENT_REQUEST_BYTES = 4096
+
+# Same no-proxy opener as slg_scrape._DIRECT_OPENER, for the one DELETE route
+# http_get/http_post don't cover.
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def configured():
-    return bool(LC_APP_ID and LC_APP_KEY and LC_HOST)
+    """The self-hosted backend is always on - there is no 'not configured' state."""
+    return True
 
 
-def _http_json(url, data=None, headers=None, timeout=8):
-    headers = dict(headers or {})
-    headers.setdefault("Accept", "application/json")
-    body = None
-    if data is not None:
-        body = json.dumps(data).encode("utf-8")
-        headers.setdefault("Content-Type", "application/json")
-    req = urllib.request.Request(url, data=body, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read()
-    return json.loads(raw.decode("utf-8", "replace"))
+def _delete(url, headers=None):
+    req = urllib.request.Request(url, method="DELETE", headers=headers or {})
+    with _DIRECT_OPENER.open(req, timeout=_TIMEOUT) as resp:
+        resp.read()
+    return True
 
 
-def _headers():
-    return {"X-LC-Id": LC_APP_ID, "X-LC-Key": LC_APP_KEY}
+def validate_public_comment(game_slug, content, nickname=None, device=None):
+    """Return a user-facing validation error, or None when the server accepts it.
+
+    Keep both server limits here: it silently stores only 2000 content
+    characters, and rejects JSON request bodies larger than 4096 UTF-8 bytes.
+    Measuring the serialized body matters for CJK text, where a modest-looking
+    textbox can exceed the byte limit well before it reaches 2000 characters.
+    """
+    if len(content) > MAX_COMMENT_CONTENT_CHARS:
+        return "公开评论最多 2000 个字符，请缩短后再发布。"
+    payload = {"game": game_slug, "content": content, "device": device or ""}
+    if nickname:
+        payload["nickname"] = nickname
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    if len(body) > MAX_COMMENT_REQUEST_BYTES:
+        return "公开评论请求超过服务器大小限制，请缩短正文或昵称。"
+    return None
 
 
-def _endpoint():
-    return LC_HOST.rstrip("/") + "/1.1/classes/" + CLASS
-
-
-def upload_comment(game_slug, content, nickname=None):
-    """Create a comment object; returns its objectId, or None on failure."""
-    if not configured():
+def fetch_comments(game_slug, limit=30):
+    """Recent public comments, or None if the cloud could not be reached."""
+    url = _COMMENTS + "?game=%s&limit=%d" % (urllib.parse.quote(game_slug), limit)
+    try:
+        raw = slg_scrape.http_get(url, timeout=_TIMEOUT, direct=True)
+        data = json.loads(raw.decode("utf-8", "replace"))
+        if isinstance(data, dict):
+            return data.get("comments") or []
+        return data if isinstance(data, list) else []
+    except Exception:  # noqa: BLE001 - offline fetch must not raise
         return None
-    payload = {"gameSlug": game_slug, "content": content}
+
+
+def upload_comment(game_slug, content, nickname=None, device=None):
+    """Post a public comment; returns its id, or None on failure."""
+    if validate_public_comment(game_slug, content, nickname, device):
+        return None
+    payload = {"game": game_slug, "content": content, "device": device or ""}
     if nickname:
         payload["nickname"] = nickname
     try:
-        data = _http_json(_endpoint(), data=payload, headers=_headers())
-        return data.get("objectId")
+        raw = slg_scrape.http_post(_COMMENTS, payload, timeout=_TIMEOUT, direct=True)
+        data = json.loads(raw.decode("utf-8", "replace"))
+        return data.get("id") if isinstance(data, dict) else None
     except Exception:  # noqa: BLE001 - offline upload must not raise
         return None
 
 
-def fetch_comments(game_slug, limit=30):
-    """Recent comments for a game, newest first, as a list of dicts."""
-    if not configured():
-        return []
-    where = urllib.parse.quote(json.dumps({"gameSlug": game_slug}))
-    url = _endpoint() + "?where=%s&order=-createdAt&limit=%d" % (where, limit)
-    try:
-        data = _http_json(url, headers=_headers())
-        return data.get("results") or []
-    except Exception:  # noqa: BLE001 - offline fetch must not raise
-        return []
-
-
-def delete_comment(object_id):
-    """Best-effort removal of an uploaded comment. Returns True on success."""
-    if not configured() or not object_id:
+def delete_comment(object_id, device=None):
+    """Best-effort removal of a comment the caller owns. Returns True on success."""
+    if not object_id:
         return False
-    url = _endpoint() + "/" + urllib.parse.quote(str(object_id))
+    url = _COMMENTS + "/" + urllib.parse.quote(str(object_id))
     try:
-        req = urllib.request.Request(url, headers=_headers(), method="DELETE")
-        with urllib.request.urlopen(req, timeout=8):
-            return True
+        headers = {"X-SLG-Device": str(device)} if device else {}
+        return _delete(url, headers=headers)
     except Exception:  # noqa: BLE001 - offline delete must not raise
         return False
+
+
+def report_comment(object_id, device=None):
+    """Flag a comment for the admin. Returns True on success."""
+    if not object_id:
+        return False
+    url = _COMMENTS + "/" + urllib.parse.quote(str(object_id)) + "/report"
+    try:
+        slg_scrape.http_post(
+            url, {"device": device or ""}, timeout=_TIMEOUT, direct=True)
+        return True
+    except Exception:  # noqa: BLE001 - offline report must not raise
+        return False
+
+
+def my_public_count(device):
+    """How many public comments this device has posted. None when unreachable."""
+    if not device:
+        return None
+    url = _COMMENTS + "/count"
+    try:
+        raw = slg_scrape.http_get(
+            url, timeout=_TIMEOUT, direct=True,
+            headers={"X-SLG-Device": str(device)})
+        data = json.loads(raw.decode("utf-8", "replace"))
+        return data.get("count") if isinstance(data, dict) else None
+    except Exception:  # noqa: BLE001 - the achievement just won't fire
+        return None

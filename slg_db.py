@@ -95,10 +95,6 @@ CREATE TABLE IF NOT EXISTS local (
     game_id         INTEGER PRIMARY KEY REFERENCES games(id) ON DELETE CASCADE,
     folder_path     TEXT,
     folder_version  TEXT,
-    has_translation INTEGER NOT NULL DEFAULT 0,
-    has_fontpatch   INTEGER NOT NULL DEFAULT 0,
-    size_bytes      INTEGER,
-    scanned_at      TEXT,
     exe_path        TEXT
 );
 
@@ -108,6 +104,14 @@ CREATE TABLE IF NOT EXISTS state (
     note      TEXT,
     my_rating INTEGER,
     updated_at TEXT
+);
+
+-- Version baseline for games the user wants but has not installed. The local
+-- folder scanner has its own comparison for installed games; this table keeps
+-- only the last version the user has acknowledged for the wishlist view.
+CREATE TABLE IF NOT EXISTS wishlist_version_seen (
+    game_id      INTEGER PRIMARY KEY REFERENCES games(id) ON DELETE CASCADE,
+    seen_version TEXT
 );
 
 -- Named playlists the user curates. A game can sit in any number of them, and
@@ -197,14 +201,18 @@ CREATE TABLE IF NOT EXISTS manual_translations (
     PRIMARY KEY (kind, ref, lang)
 );
 
--- User-authored comments on a game. cloud_id is the LeanCloud objectId when the
--- comment has been uploaded, NULL for a comment the author kept to themselves.
+-- User-authored comments on a game. cloud_id is the id the server handed back
+-- when the comment was uploaded, NULL for a comment the author kept to
+-- themselves. visibility is what the comment is meant to be - 'private' stays
+-- on this machine, 'public' is meant for other users - and is independent of
+-- cloud_id so a failed upload can be retried without losing the intent.
 CREATE TABLE IF NOT EXISTS comments (
     id         INTEGER PRIMARY KEY,
     game_slug  TEXT NOT NULL,
     content    TEXT NOT NULL,
     nickname   TEXT,
     cloud_id   TEXT,
+    visibility TEXT NOT NULL DEFAULT 'private',
     created_at TEXT NOT NULL
 );
 
@@ -377,6 +385,13 @@ def _migrate(conn):
     if "exe_path" not in have:
         conn.execute("ALTER TABLE local ADD COLUMN exe_path TEXT")
         conn.commit()
+    have = {row["name"] for row in conn.execute("PRAGMA table_info(comments)")}
+    if "visibility" not in have:
+        # Everything written before the 评价 merge was the author's own private
+        # note, so 'private' is the honest default for the back catalogue.
+        conn.execute("ALTER TABLE comments ADD COLUMN visibility TEXT"
+                     " NOT NULL DEFAULT 'private'")
+        conn.commit()
     # Hand-written rows move out of the translation cache into their own table.
     # Deleting them from `translations` is what stops them from having already
     # destroyed the machine row underneath - but it also means anyone who edited
@@ -407,6 +422,8 @@ def _migrate(conn):
         conn.execute("UPDATE state SET status = 'downloaded'"
                      " WHERE status = 'playing'")
         conn.commit()
+    # 评价 merges into the comment list (see migrate_notes_to_comments).
+    migrate_notes_to_comments(conn)
 
 
 def _repair_site_suffixed_translations(conn):
@@ -572,8 +589,8 @@ def add_user_game(conn, title, developer=None, engine=None, version=None,
     game_id = cur.lastrowid
     if folder_path:
         conn.execute(
-            "INSERT INTO local (game_id, folder_path, scanned_at)"
-            " VALUES (?,?,datetime('now'))", (game_id, folder_path))
+            "INSERT INTO local (game_id, folder_path)"
+            " VALUES (?,?)", (game_id, folder_path))
     set_tags(conn, game_id, tags, clear=True)
     return game_id
 
@@ -618,22 +635,21 @@ def set_local_folder(conn, game_id, folder_path, folder_version=None):
     Ren'Py probe or size measurement - just the path and the version in its name.
     """
     conn.execute(
-        "INSERT INTO local (game_id, folder_path, folder_version, scanned_at)"
-        " VALUES (?,?,?,datetime('now'))"
+        "INSERT INTO local (game_id, folder_path, folder_version)"
+        " VALUES (?,?,?)"
         " ON CONFLICT(game_id) DO UPDATE SET"
         " folder_path=excluded.folder_path,"
-        " folder_version=excluded.folder_version,"
-        " scanned_at=excluded.scanned_at",
+        " folder_version=excluded.folder_version",
         (game_id, folder_path, folder_version))
 
 
 def set_local_exe(conn, game_id, exe_path):
     """Remember which exe launches this locally-installed game."""
     conn.execute(
-        "INSERT INTO local (game_id, exe_path, scanned_at)"
-        " VALUES (?,?,datetime('now'))"
+        "INSERT INTO local (game_id, exe_path)"
+        " VALUES (?,?)"
         " ON CONFLICT(game_id) DO UPDATE SET"
-        " exe_path=excluded.exe_path, scanned_at=excluded.scanned_at",
+        " exe_path=excluded.exe_path",
         (game_id, exe_path))
 
 
@@ -642,16 +658,6 @@ def add_alias(conn, game_id, alias, source="user"):
     conn.execute(
         "INSERT OR IGNORE INTO game_aliases (game_id, alias, source)"
         " VALUES (?,?,?)", (game_id, alias, source))
-
-
-def aliases(conn, game_id=None):
-    """All aliases, or the aliases for one game."""
-    if game_id is None:
-        return [row["alias"] for row in
-                conn.execute("SELECT alias FROM game_aliases ORDER BY alias")]
-    return [row["alias"] for row in conn.execute(
-        "SELECT alias FROM game_aliases WHERE game_id = ? ORDER BY alias",
-        (game_id,))]
 
 
 def promote_game(conn, game_id, on=True):
@@ -815,8 +821,8 @@ def find_games(conn, include=(), exclude=(), search=None, statuses=None,
         params.append(collection_id)
 
     sql = """
-        SELECT g.*, s.status, s.note, s.my_rating, l.folder_path, l.folder_version,
-               l.has_translation, l.has_fontpatch, l.exe_path,
+        SELECT g.*, s.status, s.my_rating, l.folder_path, l.folder_version,
+               l.exe_path,
                COALESCE((SELECT AVG(my_rating - 3.0) FROM state
                          WHERE my_rating IS NOT NULL), 0)
              + (COALESCE(g.rating, 0)
@@ -1268,11 +1274,11 @@ def translation_counts(conn, lang=TAG_LANG):
 
 # --- user state ----------------------------------------------------------------
 
-def set_state(conn, game_id, status=None, note=None, my_rating=None):
+def set_state(conn, game_id, status=None, my_rating=None):
     """Patch the user's own fields. None means 'leave alone'; '' clears."""
     conn.execute("INSERT OR IGNORE INTO state (game_id) VALUES (?)", (game_id,))
     sets, params = [], []
-    for column, value in (("status", status), ("note", note), ("my_rating", my_rating)):
+    for column, value in (("status", status), ("my_rating", my_rating)):
         if value is not None:
             sets.append("%s = ?" % column)
             params.append(value or None)
@@ -1283,18 +1289,137 @@ def set_state(conn, game_id, status=None, note=None, my_rating=None):
     conn.commit()
 
 
-def get_state(conn, game_id):
-    return conn.execute("SELECT * FROM state WHERE game_id = ?", (game_id,)).fetchone()
+def _wishlist_write_scope(conn, savepoint):
+    """A small transaction boundary that also works inside caller transactions."""
+    if conn.in_transaction:
+        conn.execute("SAVEPOINT " + savepoint)
+        return False
+    conn.execute("BEGIN IMMEDIATE")
+    return True
+
+
+def _finish_wishlist_write(conn, savepoint, owns_transaction, error=False):
+    if error:
+        if owns_transaction:
+            conn.rollback()
+        else:
+            conn.execute("ROLLBACK TO SAVEPOINT " + savepoint)
+            conn.execute("RELEASE SAVEPOINT " + savepoint)
+    elif owns_transaction:
+        conn.commit()
+    else:
+        conn.execute("RELEASE SAVEPOINT " + savepoint)
+
+
+def wishlist_version_changes(conn):
+    """Return newer site versions for wanted games that are not installed.
+
+    The first observed version is only a baseline, not a notification. A missing
+    version remains an empty baseline until the catalogue first provides one.
+    Pending changes are derived from the saved seen version, so repeated calls
+    keep returning them until mark_wishlist_version_seen() advances that value.
+    """
+    savepoint = "wishlist_version_changes"
+    owns_transaction = _wishlist_write_scope(conn, savepoint)
+    changes = []
+    try:
+        rows = conn.execute(
+            "SELECT g.id, g.slug, g.title, g.version, g.last_updated,"
+            "       v.game_id AS seen_game_id, v.seen_version"
+            " FROM games g"
+            " JOIN state s ON s.game_id = g.id AND s.status = 'want'"
+            " LEFT JOIN local l ON l.game_id = g.id"
+            " LEFT JOIN wishlist_version_seen v ON v.game_id = g.id"
+            " WHERE l.game_id IS NULL"
+            " ORDER BY g.title COLLATE NOCASE").fetchall()
+        for row in rows:
+            current = str(row["version"] or "").strip() or None
+            seen = str(row["seen_version"] or "").strip() or None
+            if row["seen_game_id"] is None:
+                # First observation establishes the baseline silently.
+                conn.execute(
+                    "INSERT INTO wishlist_version_seen (game_id, seen_version)"
+                    " VALUES (?, ?)", (row["id"], current))
+                continue
+            if seen is None:
+                # No comparable version was available on the first pass. Treat
+                # the first usable catalogue version as a baseline as well.
+                if current is not None:
+                    conn.execute(
+                        "UPDATE wishlist_version_seen SET seen_version = ?"
+                        " WHERE game_id = ?", (current, row["id"]))
+                continue
+            if (current is not None
+                    and not re.search(r"\d+", seen)
+                    and re.search(r"\d+", current)):
+                # A previously stored label with no version digits cannot be
+                # compared by _version_gt. Rebaseline silently on the first
+                # comparable value instead of leaving this game stuck forever.
+                conn.execute(
+                    "UPDATE wishlist_version_seen SET seen_version = ?"
+                    " WHERE game_id = ?", (current, row["id"]))
+                continue
+            if current is not None and _version_gt(current, seen):
+                changes.append({
+                    "id": row["id"],
+                    "slug": row["slug"],
+                    "title": row["title"],
+                    "seen_version": seen,
+                    "version": current,
+                    "last_updated": row["last_updated"],
+                })
+        _finish_wishlist_write(conn, savepoint, owns_transaction)
+    except Exception:
+        _finish_wishlist_write(conn, savepoint, owns_transaction, error=True)
+        raise
+    return changes
+
+
+def mark_wishlist_version_seen(conn, game_id, version=None):
+    """Acknowledge a wanted game's version, defaulting to its current version.
+
+    Passing the version shown to the user acknowledges only that snapshot; if
+    the catalogue advanced again meanwhile, the newer version remains pending.
+    The saved version is local and cascades away if the game row is deleted.
+    """
+    savepoint = "mark_wishlist_version_seen"
+    owns_transaction = _wishlist_write_scope(conn, savepoint)
+    try:
+        game = conn.execute(
+            "SELECT version FROM games WHERE id = ?", (game_id,)).fetchone()
+        if game is None:
+            _finish_wishlist_write(conn, savepoint, owns_transaction)
+            return False
+        target = version if version is not None else game["version"]
+        target = str(target or "").strip() or None
+        if target is None:
+            # A missing current version must not erase a previously comparable
+            # baseline. Insert a NULL row only when this game had no baseline.
+            conn.execute(
+                "INSERT OR IGNORE INTO wishlist_version_seen"
+                " (game_id, seen_version) VALUES (?, NULL)", (game_id,))
+        else:
+            conn.execute(
+                "INSERT INTO wishlist_version_seen (game_id, seen_version)"
+                " VALUES (?, ?) ON CONFLICT(game_id) DO UPDATE SET"
+                " seen_version = excluded.seen_version", (game_id, target))
+        _finish_wishlist_write(conn, savepoint, owns_transaction)
+    except Exception:
+        _finish_wishlist_write(conn, savepoint, owns_transaction, error=True)
+        raise
+    return True
 
 
 # --- comments ------------------------------------------------------------------
 
-def add_comment(conn, game_slug, content, nickname=None, cloud_id=None):
+def add_comment(conn, game_slug, content, nickname=None, cloud_id=None,
+                visibility="private", created_at=None):
     """Insert a locally-authored comment, returning its local row id."""
     cur = conn.execute(
-        "INSERT INTO comments (game_slug, content, nickname, cloud_id, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (game_slug, content, nickname, cloud_id, _now()))
+        "INSERT INTO comments (game_slug, content, nickname, cloud_id,"
+        " visibility, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (game_slug, content, nickname, cloud_id, visibility,
+         created_at or _now()))
     conn.commit()
     return cur.lastrowid
 
@@ -1308,13 +1433,60 @@ def mark_comment_uploaded(conn, comment_id, cloud_id):
 def list_comments(conn, game_slug):
     """The author's own local comments for a game, oldest first."""
     return [dict(row) for row in conn.execute(
-        "SELECT id, content, nickname, cloud_id, created_at "
+        "SELECT id, content, nickname, cloud_id, visibility, created_at "
         "FROM comments WHERE game_slug = ? ORDER BY id", (game_slug,))]
 
 
 def delete_comment(conn, comment_id):
     conn.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
     conn.commit()
+
+
+NOTES_MERGED_PREF = "comments.notes_merged"
+
+
+def migrate_notes_to_comments(conn):
+    """Fold the retired per-game 评价 note into the comment list, once.
+
+    The panel used to carry two separate ways to write about a game - a private
+    note in state.note and a comment list - and users read them as two competing
+    comment boxes. The note earns a row in `comments` flagged private, and the
+    state column is left alone so an older build can still read it.
+
+    Guarded by a pref rather than by looking for matching rows: a user is free
+    to delete the migrated comment, and it must not come back on the next start.
+    connect() runs this from _migrate on every connection, so the write lock is
+    taken up front - otherwise two connections opened at once on a fresh db both
+    read the pref before either sets it, and the note lands twice.
+    """
+    if get_pref(conn, NOTES_MERGED_PREF):
+        return 0
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if get_pref(conn, NOTES_MERGED_PREF):
+            conn.execute("COMMIT")
+            return 0
+        # TRIM() only strips spaces by default, so a note that is nothing but
+        # newlines would sail through as content. Name the characters.
+        rows = conn.execute(
+            "SELECT g.slug, s.note, s.updated_at FROM state s"
+            " JOIN games g ON g.id = s.game_id"
+            " WHERE s.note IS NOT NULL"
+            " AND TRIM(s.note, ' ' || CHAR(9) || CHAR(10) || CHAR(13)) <> ''"
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                "INSERT INTO comments (game_slug, content, nickname, cloud_id,"
+                " visibility, created_at) VALUES (?, ?, NULL, NULL, ?, ?)",
+                (row["slug"], row["note"].strip(), "private",
+                 row["updated_at"]))
+        conn.execute("INSERT OR REPLACE INTO prefs (key, value) VALUES (?, ?)",
+                     (NOTES_MERGED_PREF, "1"))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return len(rows)
 
 
 # --- collections ---------------------------------------------------------------
@@ -1430,8 +1602,7 @@ def export_user_data(conn):
         " JOIN tags t ON t.id = gt.tag_id"
         " WHERE g.origin = 'user' ORDER BY g.slug, t.name")]
     out["user_local"] = [dict(r) for r in conn.execute(
-        "SELECT g.slug, l.folder_path, l.folder_version, l.has_translation,"
-        " l.has_fontpatch, l.size_bytes, l.scanned_at, l.exe_path"
+        "SELECT g.slug, l.folder_path, l.folder_version, l.exe_path"
         " FROM local l JOIN games g ON g.id = l.game_id"
         " WHERE g.origin = 'user'")]
     out["user_game_aliases"] = [dict(r) for r in conn.execute(
@@ -1537,11 +1708,10 @@ def _import_user_games(conn, data):
             continue
         conn.execute(
             "INSERT OR REPLACE INTO local (game_id, folder_path, folder_version,"
-            " has_translation, has_fontpatch, size_bytes, scanned_at, exe_path)"
-            " VALUES (?,?,?,?,?,?,?,?)",
+            " exe_path)"
+            " VALUES (?,?,?,?)",
             (game_id, rec.get("folder_path"), rec.get("folder_version"),
-             rec.get("has_translation") or 0, rec.get("has_fontpatch") or 0,
-             rec.get("size_bytes"), rec.get("scanned_at"), rec.get("exe_path")))
+             rec.get("exe_path")))
 
     for rec in data.get("user_game_aliases", []):
         game_id = _game_id_by_slug(conn, rec.get("slug"))
@@ -1649,12 +1819,6 @@ def weight_table(conn, limit=40):
         FROM weights w JOIN tags t ON t.id = w.tag_id
         ORDER BY ABS(w.weight) DESC, t.name LIMIT ?
     """, (limit,)).fetchall()
-
-
-# --- exclusions ----------------------------------------------------------------
-
-def exclusions(conn):
-    return [r["tag"] for r in conn.execute("SELECT tag FROM exclusions ORDER BY tag")]
 
 
 # --- prefs ---------------------------------------------------------------------

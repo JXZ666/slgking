@@ -1876,76 +1876,109 @@ class SidebarFit(unittest.TestCase):
             self.app.selected = None
             self._finish()
 
-    def test_a_multi_line_note_round_trips(self):
-        # The 评价 field is a Textbox now. It was a CTkEntry, which wraps
-        # tkinter.Entry and so could not wrap at all - a review longer than
-        # the panel just scrolled sideways out of view.
+    def _composer(self):
+        """The composer, emptied. One App is shared by this whole class, so a
+        draft left by an earlier test would otherwise show up in this one.
+
+        Setup only - it wipes the box, so reading through it proves nothing.
+        Use _composer_text() for assertions.
+        """
+        box = self.app._detail_parts["comments_entry"]
+        box.delete("1.0", "end")
+        return box
+
+    def _composer_text(self):
+        return self.app._detail_parts["comments_entry"].get("1.0", "end-1c")
+
+    def _drop_comments(self, slug):
+        self.app.conn.execute("DELETE FROM comments WHERE game_slug = ?", (slug,))
+        self.app.conn.commit()
+
+    def test_a_multi_line_comment_round_trips(self):
+        # The composer is a Textbox, not a CTkEntry: CTkEntry wraps
+        # tkinter.Entry, which cannot wrap at all, so a long comment used to
+        # scroll sideways out of the panel. Same widget the 评价 box used.
         self._pool_reset()
-        gid = None
         try:
-            # _set_note writes through slg_db.set_state, and state.game_id is a
-            # foreign key to games(id) - the made-up 9000 the other panel tests
-            # use is refused outright. The suite points LOCALAPPDATA at a temp
-            # directory, so this row is not the user's catalogue, and it is
-            # deleted below so a later test counting the list does not see it.
-            gid, _ = slg_db.upsert_game(self.app.conn, "note-roundtrip",
-                                        "https://x/note-roundtrip", "Note Roundtrip")
-            self.app.conn.commit()
-            game = self._panel_game(0, note="第一行\n第二行")
-            game["id"] = gid
-            self._select(game)
-            box = self.app._detail_parts["note_entry"]
-            self.assertEqual(box.get("1.0", "end-1c"), "第一行\n第二行")
-            box.delete("1.0", "end")
-            box.insert("1.0", "改过的\n两行\n三行")
-            self.app._set_note()
-            # On self.selected, not `game`: select() keeps a dict() copy so the
-            # status and rating buttons can write back into a mutable object.
-            self.assertEqual(self.app.selected["note"], "改过的\n两行\n三行")
-            stored = slg_db.get_state(self.app.conn, gid)["note"]
-            self.assertEqual(stored, "改过的\n两行\n三行")
+            self._select(self._panel_game(0))
+            box = self._composer()
+            box.insert("1.0", "第一行\n第二行\n第三行")
+            self.app._post_comment()
+            rows = slg_db.list_comments(self.app.conn, "pool-0")
+            self.assertEqual([r["content"] for r in rows],
+                             ["第一行\n第二行\n第三行"])
             # No trailing newline: a Textbox's get() ends with one it made
-            # itself, and storing it puts a blank last line in every review.
-            self.assertFalse(stored.endswith("\n"))
+            # itself, and storing that puts a blank last line in every comment.
+            self.assertFalse(rows[0]["content"].endswith("\n"))
+            # Private until the cloud board lands and the user says otherwise.
+            self.assertEqual(rows[0]["visibility"], "private")
+            # And the box is handed back empty, ready for the next one.
+            self.assertEqual(box.get("1.0", "end-1c"), "")
         finally:
-            if gid is not None:
-                self.app.conn.execute("DELETE FROM games WHERE id = ?", (gid,))
-                self.app.conn.commit()
+            self._drop_comments("pool-0")
             self._finish()
 
-    def test_escape_puts_the_stored_note_back(self):
+    def test_whitespace_is_not_a_comment(self):
         self._pool_reset()
         try:
-            game = self._panel_game(0, note="原来的")
-            self._select(game)
-            box = self.app._detail_parts["note_entry"]
-            box.delete("1.0", "end")
+            self._select(self._panel_game(0))
+            self._composer().insert("1.0", "   \n  ")
+            self.app._post_comment()
+            self.assertEqual(slg_db.list_comments(self.app.conn, "pool-0"), [])
+        finally:
+            self._drop_comments("pool-0")
+            self._finish()
+
+    def test_escape_clears_the_composer(self):
+        self._pool_reset()
+        try:
+            self._select(self._panel_game(0))
+            box = self._composer()
             box.insert("1.0", "打了一半又反悔")
-            self.app._cancel_note_edit()
-            self.assertEqual(box.get("1.0", "end-1c"), "原来的")
+            # Binding and behaviour asserted separately on purpose: Tk only
+            # delivers a generated key event to the focused widget, so firing
+            # <Escape> here would test focus, not this box.
+            self.assertTrue(box._textbox.bind("<Escape>"), "Esc 没绑上清空")
+            self.app._clear_composer()
+            self.assertEqual(box.get("1.0", "end-1c"), "")
         finally:
             self._finish()
 
-    def test_the_note_field_wraps(self):
+    def test_half_typed_text_survives_a_refresh_but_not_a_game_change(self):
+        # A refresh comes through the panel on every sync tick and every cover
+        # that lands. It must not wipe what is being typed - but switching games
+        # must, or the box would carry the last game's draft onto the next one.
+        self._pool_reset()
+        try:
+            game = self._panel_game(0)
+            self._select(game)
+            self._composer().insert("1.0", "还没写完")
+            self.app._fill_detail_comments(self.app.selected)
+            self.assertEqual(self._composer_text(), "还没写完")
+            self.app.select(self._panel_game(1))
+            self.assertEqual(self._composer_text(), "")
+        finally:
+            self.app.selected = None
+            self._finish()
+
+    def test_the_comment_composer_wraps(self):
         # What the bug report was actually about. CTkEntry has no wrap
         # setting to give; the Textbox has one, and word wrapping is it.
         self._pool_reset()
         try:
             self._select(self._panel_game(0))
-            box = self.app._detail_parts["note_entry"]
-            self.assertEqual(str(box.cget("wrap")), "word")
+            self.assertEqual(str(self._composer().cget("wrap")), "word")
         finally:
             self._finish()
 
-    def test_the_note_block_says_how_to_save_it(self):
-        # Asked for by name: tell the user that this is how it saves. The key
-        # is not guessable - Enter inserts a newline in a Textbox where it used
-        # to submit an Entry - so without the hint a written review looks
-        # unsavable and the box reads as broken.
+    def test_the_comment_block_says_how_to_post_it(self):
+        # The key is not guessable - Enter inserts a newline in a Textbox where
+        # it used to submit an Entry - so without the hint a written comment
+        # looks unsavable and the box reads as broken.
         self._pool_reset()
         try:
             self._select(self._panel_game(0))
-            row = self.app._detail_parts["note_row"]
+            row = self.app._detail_parts["comments_row"]
             texts = []
             for child in row.winfo_children():
                 try:
@@ -1953,10 +1986,23 @@ class SidebarFit(unittest.TestCase):
                 except Exception:  # noqa: BLE001 - most widgets have no text
                     pass
             self.assertTrue(any("Ctrl+Enter" in t for t in texts if t),
-                            "没有任何地方告诉用户怎么保存：%s" % texts)
-            self.assertIn("保存", texts, "没有保存按钮：%s" % texts)
+                            "没有任何地方告诉用户怎么发布：%s" % texts)
+            self.assertIn("发布", texts, "没有发布按钮：%s" % texts)
             # And the block is actually on screen, not just built.
-            self.assertIn("note_row", self.app._detail_shown)
+            self.assertIn("comments_row", self.app._detail_shown)
+            self.assertIn("comments_entry", self.app._detail_shown)
+        finally:
+            self._finish()
+
+    def test_the_panel_offers_one_comment_box_and_no_evaluation_block(self):
+        # The report: 评价 and 评论 sat one above the other and users read them
+        # as two competing comment boxes. There is one composer now, and the
+        # old note widgets are gone rather than merely hidden.
+        self._pool_reset()
+        try:
+            self._select(self._panel_game(0))
+            for stale in ("note_head", "note_entry", "note_row"):
+                self.assertNotIn(stale, self.app._detail_parts)
         finally:
             self._finish()
 
@@ -2247,10 +2293,14 @@ class SidebarFit(unittest.TestCase):
 
     def test_opening_a_game_spends_no_request(self):
         # _fill_detail runs on every click in the list and opens on 原文, so
-        # browsing must never fire a translation request.
+        # browsing must never fire a translation request. The cloud-comment
+        # fetch is a separate, deliberate thread and is disabled here so this
+        # guard stays about the translation path.
         self._pool_reset()
         try:
-            with mock.patch.object(slg_gui.threading, "Thread") as thread:
+            with mock.patch.object(slg_gui.threading, "Thread") as thread, \
+                    mock.patch.object(slg_gui.slg_comments, "configured",
+                                      return_value=False):
                 self._select(self._panel_game(0, overview="Nothing cached."))
             self.assertFalse(thread.called, "被动填充发出了翻译请求")
         finally:
@@ -2420,7 +2470,7 @@ class SidebarFit(unittest.TestCase):
         finally:
             self._close("帮助文档")
         no_download = next(i for i, t in enumerate(lines)
-                           if "不提供任何下载" in t)
+                           if "也不提供下载" in t)
         free = next(i for i, t in enumerate(lines) if "完全免费" in t)
         self.assertLess(no_download, free, "免费声明应该在最后")
         self.assertTrue(any("GitHub" in t for t in lines), lines)
@@ -2493,20 +2543,16 @@ class SidebarFit(unittest.TestCase):
             self.assertNotIn("·", text, text)
             self.assertNotIn("源码", text, text)
 
-    def test_the_sidebar_asks_for_feedback_and_a_star(self):
-        # Two lines under the version, and the header is packed side="top" in a
-        # column that is already tight at 940x600 - so they have to be checked
-        # for height, not just for being constructed.
+    def test_the_sidebar_offers_feedback_without_promotion(self):
+        # Keep a usable feedback route without asking users to promote the app.
         self._assert_has_height(slg_gui.CONTACT_EMAIL, "侧栏反馈邮箱")
-        self._assert_has_height("求个 GitHub star", "侧栏求 star 文案")
+        self.assertEqual(self._find("求个 GitHub star"), [])
 
-    def test_the_detail_footer_carries_the_same_ask(self):
-        # Same two sentences, at the foot of the panel where someone who just
-        # finished a game is actually looking.
+    def test_the_detail_footer_offers_feedback_without_promotion(self):
         self._pool_reset()
         try:
             self._select(self._panel_game(0))
-            self._assert_has_height("点个 star", "详情页求 star 文案")
+            self.assertEqual(self._find("点个 star"), [])
             self._assert_has_height("反馈 / 建议", "详情页反馈按钮")
         finally:
             self.app.selected = None
@@ -2739,6 +2785,13 @@ class SidebarFit(unittest.TestCase):
         body = self._open_stats(("ok", {"events": {}, "devices": 0,
                                         "last_report": None}))
         self.assertTrue(self._texts(body))
+
+    def test_old_stats_endpoint_is_not_reported_as_a_disk_failure(self):
+        body = self._open_stats(("ok", {"events": {}, "devices": 0,
+                                        "last_report": None}))
+        texts = self._texts(body)
+        self.assertTrue(any("服务器尚未提供空间统计" in t for t in texts))
+        self.assertFalse(any("服务器读取容量失败" in t for t in texts))
 
 
 if __name__ == "__main__":

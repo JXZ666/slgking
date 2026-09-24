@@ -194,27 +194,6 @@ def _closest(key, index, threshold=0.86):
     return best_id
 
 
-def inspect(folder):
-    """What the folder itself says about the game."""
-    info = {"has_translation": 0, "has_fontpatch": 0, "is_renpy": False}
-    game_dir = os.path.join(folder, "game")
-    if os.path.isdir(game_dir) and os.path.isdir(os.path.join(folder, "renpy")):
-        info["is_renpy"] = True
-    tl_dir = os.path.join(game_dir, "tl")
-    if os.path.isdir(tl_dir):
-        for entry in _listdir(tl_dir):
-            if "chin" in entry.lower():
-                info["has_translation"] = 1
-                break
-    # rpykit-luna drops this shim; its presence means the font has been fixed.
-    if info["is_renpy"]:
-        for name in _listdir(game_dir):
-            if "rpykit" in name.lower() or name.lower().startswith("zz_fontgroup"):
-                info["has_fontpatch"] = 1
-                break
-    return info
-
-
 # --- add-game autofill ----------------------------------------------------------
 
 # 方括号里的内容经常是开发组/社团名（[NTRMAN]），但也可能是翻译/画质标注，这些不算开发商。
@@ -264,7 +243,7 @@ def autofill_folder(folder):
     }
 
 
-def scan(conn, roots=None, with_size=False, on_progress=None, log=print,
+def scan(conn, roots=None, on_progress=None, log=print,
          should_stop=None):
     """Walk the roots and reconcile every game folder against the catalogue."""
     roots = roots or DEFAULT_ROOTS
@@ -291,31 +270,13 @@ def scan(conn, roots=None, with_size=False, on_progress=None, log=print,
             if game_id is None:
                 unmatched.append(name)
                 continue
-            info = inspect(folder)
-            size = None
-            if with_size:
-                try:
-                    size = sum(
-                        os.path.getsize(os.path.join(dirpath, f))
-                        for dirpath, _, files in os.walk(folder) for f in files
-                        if os.path.exists(os.path.join(dirpath, f)))
-                except OSError:
-                    size = None
-            # COALESCE on size_bytes: a re-scan without --size (or one that hit
-            # a vanished file) must not blank a size the last run measured.
             conn.execute(
-                "INSERT INTO local (game_id, folder_path, folder_version,"
-                " has_translation, has_fontpatch, size_bytes, scanned_at)"
-                " VALUES (?,?,?,?,?,?,datetime('now'))"
+                "INSERT INTO local (game_id, folder_path, folder_version)"
+                " VALUES (?,?,?)"
                 " ON CONFLICT(game_id) DO UPDATE SET"
                 " folder_path=excluded.folder_path,"
-                " folder_version=excluded.folder_version,"
-                " has_translation=excluded.has_translation,"
-                " has_fontpatch=excluded.has_fontpatch,"
-                " size_bytes=COALESCE(excluded.size_bytes, local.size_bytes),"
-                " scanned_at=excluded.scanned_at",
-                (game_id, folder, parse_folder_version(name),
-                 info["has_translation"], info["has_fontpatch"], size))
+                " folder_version=excluded.folder_version",
+                (game_id, folder, parse_folder_version(name)))
             # Downloaded is a fact about the disk, so it should not need saying.
             conn.execute(
                 "INSERT INTO state (game_id, status, updated_at)"
@@ -387,7 +348,6 @@ def _main(argv=None):
     default_roots = " 或 ".join(DEFAULT_ROOTS) or "（无默认目录）"
     parser.add_argument("--root", action="append", default=[],
                         help="要扫描的根目录（可重复，默认 %s）" % default_roots)
-    parser.add_argument("--size", action="store_true", help="顺便统计文件夹体积（较慢）")
     parser.add_argument("--updates", action="store_true", help="只列出有更新的游戏")
     args = parser.parse_args(argv)
 
@@ -403,7 +363,7 @@ def _main(argv=None):
             print("\n已最新：%d 款 · 无法比较：%d 款"
                   % (len(report["same"]), len(report["unknown"])))
         else:
-            scan(conn, args.root or None, with_size=args.size)
+            scan(conn, args.root or None)
     finally:
         conn.close()
     return 0
