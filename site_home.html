@@ -4,12 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#140d18">
-<meta name="description" content="SLGking 是面向成年用户的桌面平台：按口味检索成人向游戏、查看和撰写玩家评论、管理本地游戏库。游戏文件由用户自行管理，本站不托管或提供游戏下载。">
+<meta name="description" content="SLGking 是面向成年用户的桌面平台：按性癖检索成人向游戏、查看和撰写玩家评论、管理本地游戏库。游戏文件由用户自行管理，本站不托管或提供游戏下载。">
 <meta property="og:type" content="website">
-<meta property="og:title" content="SLGking｜按口味找游戏、看评论、管理本地游戏库">
+<meta property="og:title" content="SLGking｜按性癖找游戏、看评论、管理本地游戏库">
 <meta property="og:description" content="面向成年用户的桌面平台，整合游戏检索、社区评论与本地游戏管理。本站不托管或提供游戏文件下载。">
+<meta property="og:image" content="https://raw.githubusercontent.com/JXZ666/slgking/main/assets/screenshots/v023-overview.png">
 <meta property="og:url" content="https://slg-king.com/">
-<title>SLGking｜按口味找游戏、看评论、管理本地游戏库</title>
+<title>SLGking｜按性癖找游戏、看评论、管理本地游戏库</title>
 <style>
 :root{color-scheme:dark;--bg:#140d18;--surface:#211725;--surface2:#1a121e;--line:#49344a;--text:#f7edf5;--muted:#c0afbf;--rose:#f07aa7;--gold:#f0cc83;--green:#9cdec1;--max:1080px}
 *{box-sizing:border-box}
@@ -37,13 +38,19 @@ section{padding:30px 0 42px}
 .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px}
 .card{border:1px solid var(--line);border-radius:15px;background:linear-gradient(145deg,#241a28,#1b141f);padding:20px;min-width:0}
 .card .icon{color:var(--gold);font-size:20px;font-weight:800}.card h3{font-size:16px;margin:8px 0 5px}.card p{color:var(--muted);font-size:13px;margin:0}
+.screenshots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.screenshot{margin:0;min-width:0;border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#201722}
+.screenshot a{display:block;padding:12px;background:linear-gradient(145deg,#38243a,#1a121e)}
+.screenshot img{display:block;width:100%;height:auto;max-height:340px;object-fit:contain;border-radius:8px;background:#160f1a}
+.screenshot figcaption{padding:14px 17px 17px;color:var(--muted);font-size:13px}
+.screenshot figcaption strong{display:block;color:var(--text);font-size:15px;margin-bottom:3px}
 .privacy{display:grid;grid-template-columns:1fr 1fr;gap:14px}.privacy .card{padding:22px}.privacy ul{padding-left:19px;margin:12px 0 0;color:var(--muted);font-size:13px}.privacy li+li{margin-top:7px}
 .community{display:flex;align-items:center;justify-content:space-between;gap:22px;background:linear-gradient(115deg,#302039,#211724);border:1px solid #62415f;border-radius:17px;padding:23px 25px}
 .community h2{margin:0 0 4px;font-size:21px}.community p{margin:0;color:var(--muted);font-size:13px}
 .group{flex:none;border:1px solid #74583f;border-radius:12px;background:#1c151e;padding:10px 14px;color:var(--gold);font:700 19px ui-monospace,Consolas,monospace;letter-spacing:.06em}
 .links{display:flex;flex-wrap:wrap;gap:12px 22px;margin-top:18px}.links a{color:#edb3cf;font-size:13px;text-decoration:none}.links a:hover{text-decoration:underline}
 footer{margin-top:20px;border-top:1px solid #ffffff12;padding:21px 0 30px;color:#9d8d9e;font-size:12px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
-@media(max-width:760px){.hero{grid-template-columns:1fr;padding:48px 0 35px;gap:23px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.privacy{grid-template-columns:1fr}.community{align-items:flex-start;flex-direction:column}}
+@media(max-width:760px){.hero{grid-template-columns:1fr;padding:48px 0 35px;gap:23px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.screenshots{grid-template-columns:1fr}.privacy{grid-template-columns:1fr}.community{align-items:flex-start;flex-direction:column}}
 @media(max-width:540px){.wrap{width:min(100% - 28px,var(--max))}header{height:auto;min-height:68px}.brand{font-size:14px}.mark{width:35px;height:35px}nav{gap:12px}nav a{font-size:12px}nav a:nth-child(2){display:none}.nav-download{display:none}.hero{padding:38px 0 28px}h1{font-size:37px}.lead{font-size:16px}.notice{padding:18px}.grid{grid-template-columns:1fr}.card{padding:17px}.community{padding:19px}.group{font-size:17px}section{padding:24px 0 32px}}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 </style>
@@ -60,7 +67,7 @@ footer{margin-top:20px;border-top:1px solid #ffffff12;padding:21px 0 30px;color:
   <section class="hero" aria-labelledby="hero-title">
     <div>
       <div class="eyebrow">成人向游戏检索 · 玩家评论 · 本地游戏管理</div>
-      <h1 id="hero-title">按口味找游戏，<br>看玩家评论，<br>管理本地游戏库。</h1>
+      <h1 id="hero-title">按性癖找游戏，<br>看玩家评论，<br>管理本地游戏库。</h1>
       <p class="lead">SLGking 是面向成年用户的桌面平台：用个人偏好发现游戏，和玩家交流，再把自己的游戏库与进度整理清楚。检索、评论和管理功能都在桌面客户端中使用；官网提供介绍、下载和更新信息。</p>
       <div class="actions">
         <a class="button" href="https://github.com/JXZ666/slgking/releases/latest" target="_blank" rel="noopener noreferrer">前往 GitHub 获取稳定版</a>
@@ -74,10 +81,28 @@ footer{margin-top:20px;border-top:1px solid #ffffff12;padding:21px 0 30px;color:
     </aside>
   </section>
 
+  <section id="screenshots" aria-labelledby="screenshots-title">
+    <div class="section-head"><h2 id="screenshots-title">先看看软件长什么样</h2><p>下面是桌面客户端的实际界面。点击图片可以查看大图。</p></div>
+    <div class="screenshots">
+      <figure class="screenshot">
+        <a href="https://raw.githubusercontent.com/JXZ666/slgking/main/assets/screenshots/v023-overview.png" target="_blank" rel="noopener noreferrer" aria-label="查看 SLGking 游戏检索界面大图">
+          <img src="https://raw.githubusercontent.com/JXZ666/slgking/main/assets/screenshots/v023-overview.png" alt="SLGking 桌面客户端的游戏检索与条目浏览界面" loading="lazy" decoding="async">
+        </a>
+        <figcaption><strong>发现感兴趣的游戏</strong>按标签筛选、浏览条目，再用自己的评分积累偏好。</figcaption>
+      </figure>
+      <figure class="screenshot">
+        <a href="https://raw.githubusercontent.com/JXZ666/slgking/main/assets/screenshots/v023-comments.png" target="_blank" rel="noopener noreferrer" aria-label="查看 SLGking 游戏评论区界面大图">
+          <img src="https://raw.githubusercontent.com/JXZ666/slgking/main/assets/screenshots/v023-comments.png" alt="SLGking 桌面客户端的游戏评论区与公开评论界面" loading="lazy" decoding="async">
+        </a>
+        <figcaption><strong>看看玩家怎么说</strong>进入游戏评论区，阅读公开评论，登录后也能发表自己的看法。</figcaption>
+      </figure>
+    </div>
+  </section>
+
   <section id="features" aria-labelledby="features-title">
     <div class="section-head"><h2 id="features-title">检索、评论、管理，一个桌面平台</h2><p>下面三项核心体验都在 SLGking 桌面客户端内完成；网站本身不提供在线游戏目录或评论浏览。</p></div>
     <div class="grid">
-      <article class="card"><div class="icon" aria-hidden="true">01</div><h3>按口味找游戏</h3><p>按标签和条目资料筛选，也可以给游戏评分。评分会逐步形成你对标签、开发者和引擎的偏好，用来调整后续条目的排序。评分与偏好保存在本机。</p></article>
+      <article class="card"><div class="icon" aria-hidden="true">01</div><h3>按性癖找游戏</h3><p>按标签和条目资料筛选，也可以给游戏评分。评分会逐步形成你对标签、开发者和引擎的偏好，用来调整后续条目的排序。评分与偏好保存在本机。</p></article>
       <article class="card"><div class="icon" aria-hidden="true">02</div><h3>查看和撰写玩家评论</h3><p>在客户端的游戏评论区查看其他玩家的公开评论；登录账号后可以发表公开评论。个人评分和私人备注仍保存在本机。</p></article>
       <article class="card"><div class="icon" aria-hidden="true">03</div><h3>管理本地游戏库</h3><p>扫描你选择的本地文件夹，整理游戏状态、版本与游玩进度。游戏路径和本地资料留在自己的电脑；软件不托管或提供游戏文件下载。</p></article>
     </div>
