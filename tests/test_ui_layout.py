@@ -487,6 +487,20 @@ class SidebarFit(unittest.TestCase):
             cls.app = slg_gui.App(notify=False)
         except Exception as exc:  # noqa: BLE001 - a headless box has no Tk
             raise unittest.SkipTest("需要图形界面：%s" % exc)
+        # Layout and editing regressions run as an authenticated user so gated
+        # controls do not open interactive account prompts inside the suite.
+        cls._personal_access = mock.patch.object(
+            cls.app, "_require_personal_access", return_value=True)
+        cls._personal_access.start()
+        cls._usable_session = mock.patch.object(
+            cls.app, "_has_usable_cloud_session", return_value=True)
+        cls._usable_session.start()
+        cls._offline_comments = mock.patch.object(
+            slg_gui.slg_comments, "fetch_comments_page",
+            return_value={"comments": [], "page": 1, "page_size": 20,
+                          "total_count": 0, "total_pages": 0,
+                          "has_previous": False, "has_next": False})
+        cls._offline_comments.start()
         cls._offline = [
             mock.patch.object(slg_translate, "translate_title",
                               side_effect=slg_translate.TranslateError("测试不联网")),
@@ -508,6 +522,9 @@ class SidebarFit(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        cls._offline_comments.stop()
+        cls._usable_session.stop()
+        cls._personal_access.stop()
         cls.app.destroy()
         for patch in cls._offline:
             patch.stop()
@@ -2293,7 +2310,7 @@ class SidebarFit(unittest.TestCase):
         self._pool_reset()
         try:
             with mock.patch.object(slg_gui.threading, "Thread") as thread, \
-                    mock.patch.object(slg_gui.slg_comments, "configured",
+                    mock.patch.object(slg_gui.slg_comments, "fetch_comments_page",
                                       return_value=False):
                 self._select(self._panel_game(0, overview="Nothing cached."))
             self.assertFalse(thread.called, "被动填充发出了翻译请求")

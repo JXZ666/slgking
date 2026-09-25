@@ -45,6 +45,54 @@ class SessionStorageTests(unittest.TestCase):
             "login_key": "login-key", "recovery_code": "recovery-code"})
 
 
+class DeveloperIdentityClientTests(unittest.TestCase):
+    def tearDown(self):
+        slg_account.set_developer_mode(False)
+
+    def test_developer_login_is_blocked_outside_developer_mode(self):
+        slg_account.set_developer_mode(False)
+        with mock.patch.object(slg_account, "request") as send:
+            with self.assertRaises(slg_account.AccountError):
+                slg_account.developer_login("owner-key")
+        send.assert_not_called()
+
+    def test_developer_login_uses_owner_header_and_fixed_identity(self):
+        slg_account.set_developer_mode(True)
+        reply = {"account_id": "developer", "device_token": "owner-session"}
+        with mock.patch.object(slg_account, "session", return_value=None), \
+                mock.patch.object(slg_account, "request", return_value=reply) as send, \
+                mock.patch.object(slg_account, "save_session"), \
+                mock.patch.object(slg_account, "_attach_legacy_migration"):
+            result = slg_account.developer_login(" owner-key ")
+        self.assertEqual(result["account_id"], "developer")
+        self.assertEqual(send.call_args.args[0], "/account/admin-login")
+        self.assertEqual(send.call_args.kwargs["extra_headers"], {
+            "X-SLG-Developer-Key": "owner-key"})
+
+    def test_grant_all_titles_requires_developer_mode_and_uses_developer_route(self):
+        slg_account.set_developer_mode(False)
+        with mock.patch.object(slg_account, "request") as send:
+            with self.assertRaises(slg_account.AccountError):
+                slg_account.developer_grant_all_titles("owner-key")
+        send.assert_not_called()
+
+        slg_account.set_developer_mode(True)
+        reply = {"ok": True, "account_id": "developer",
+                 "granted": ["title_a"], "titles": ["title_a"],
+                 "equipped_title": "title_a"}
+        with mock.patch.object(slg_account, "request", return_value=reply) as send:
+            self.assertEqual(slg_account.developer_grant_all_titles(" owner-key "),
+                             reply)
+        self.assertEqual(send.call_args.args[0],
+                         "/account/developer/titles/grant-all")
+        self.assertEqual(send.call_args.kwargs["method"], "POST")
+        self.assertEqual(send.call_args.kwargs["extra_headers"], {
+            "X-SLG-Developer-Key": "owner-key"})
+        with mock.patch.object(slg_account, "request", return_value=[]):
+            with self.assertRaises(slg_account.AccountError):
+                slg_account.developer_grant_all_titles("owner-key")
+
+
 class CommentValidationTests(unittest.TestCase):
     def test_character_and_utf8_limits(self):
         self.assertIsNotNone(slg_comments.validate_public_comment("g", "短评"))

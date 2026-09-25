@@ -2,7 +2,7 @@
 
 把游戏检索、按性癖偏好排序、玩家评论和本地游戏管理放在一起的 Windows 桌面工具，面向 18 周岁以上用户。
 
-[访问官网](https://slg-king.com/)　·　[下载稳定版 v0.23.0](https://github.com/JXZ666/slgking/releases/latest)　·　[更新日志](CHANGELOG.md)　·　[GitHub 仓库](https://github.com/JXZ666/slgking)
+[访问官网](https://slg-king.com/)　·　[下载稳定版 v0.23.3](https://github.com/JXZ666/slgking/releases/latest)　·　[更新日志](CHANGELOG.md)　·　[GitHub 仓库](https://github.com/JXZ666/slgking)
 
 > 本项目只整理游戏资料并帮助管理本地游戏库，不托管游戏文件，也不提供游戏下载。游戏文件请通过其作者或发行方提供的渠道获取。
 
@@ -24,7 +24,7 @@
 
 ## 快速开始
 
-1. 从[稳定版发布页](https://github.com/JXZ666/slgking/releases/latest)下载 `slgking.exe` 并运行。当前公开稳定版为 v0.23.0。
+1. 从[稳定版发布页](https://github.com/JXZ666/slgking/releases/latest)下载 `slgking.exe` 并运行。当前公开稳定版为 v0.23.3。
 2. 首次打开后，点击「更新游戏数据」获取目录和封面。更新完成后，搜索、标签筛选和本机游戏资料浏览可以离线使用。
 3. 未登录也可以搜索、筛选游戏目录和查看公开评论。要留下评分、使用收藏夹、签到、积分商城或发表评论，先到「个人」页面创建或登录云端账号。
 4. 登录后给熟悉的游戏评分，再在顶栏选择「按xp推荐」；评分越多，排序越能体现你的口味。打开游戏详情中的「写评论&查看评论区」可翻页查看评论或发表自己的评论。

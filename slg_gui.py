@@ -45,12 +45,23 @@ import slg_translate
 import slg_update
 import slg_util
 
-APP_VERSION = "0.23.0"
+APP_VERSION = "0.23.3"
+TEST_APP_VERSION = "0.23.3"
+
+
+def display_app_version():
+    """Keep the experimental exe distinguishable without changing stable behavior."""
+    if (getattr(sys, "frozen", False)
+            and "_test" in os.path.basename(sys.executable).lower()):
+        return TEST_APP_VERSION
+    return APP_VERSION
+
+
 # The sidebar shows the number and nothing else. build_stamp() still carries
 # the channel and the build time, but it belongs on the 关于 page now: a
 # timestamp in the corner of every screen was answering a question the user
 # asks once.
-APP_VERSION_LABEL = "v" + APP_VERSION
+APP_VERSION_LABEL = "v" + display_app_version()
 APP_TITLE = "SLG黄游之王"
 AUTHOR = "菊千代赛高"
 GITHUB_URL = "https://github.com/JXZ666"
@@ -570,7 +581,7 @@ def build_stamp():
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(path)))
     except OSError:
         when = "?"
-    return "v%s · %s · %s" % (APP_VERSION, channel, when)
+    return "v%s · %s · %s" % (display_app_version(), channel, when)
 
 
 def is_test_build():
@@ -1123,6 +1134,7 @@ class App(ctk.CTk):
             if os.path.exists(seed_db):
                 slg_db.install_seed_db(seed_db, asset_path("seed/covers"))
         self.conn = slg_db.connect()
+        slg_account.set_developer_mode(slg_titles.dev_unlocked(self.conn))
         # notify is off for the packaging smoke test and the test harness, which
         # both expect an empty library; a real session imports the shipped tag
         # seed once so users without a translation API still see Chinese tags.
@@ -1259,6 +1271,8 @@ class App(ctk.CTk):
         self._cloud_login_button = None
         self._cloud_login_key_entry = None
         self._cloud_recovery_entry = None
+        self._developer_cloud_login_pending = False
+        self._developer_title_unlock_pending = False
 
         if notify:
             self._splash.step("正在构建界面…", 0.55)
@@ -1288,7 +1302,9 @@ class App(ctk.CTk):
             # so do that only after the user explicitly publishes a comment.
             self.after(3150, self._apply_achievements)
             self.after(3200, self._start_remote_check)
-            if self._has_usable_cloud_session():
+            if slg_titles.dev_unlocked(self.conn):
+                self.after(3250, self._ensure_developer_cloud_identity)
+            elif self._has_usable_cloud_session():
                 self.after(3250, self._fetch_maintenance_reward_status)
 
         if notify:
@@ -1309,43 +1325,96 @@ class App(ctk.CTk):
         once per session: a callback that keeps failing would otherwise bury the
         window under identical popups.
         """
-        path = os.path.join(slg_db.app_dir(), "crash.log")
-        slg_util.log_crash(exc, val, tb, path)
         if getattr(self, "_crash_reported", False):
             return
         self._crash_reported = True
+
+        # Prefer the persistent app-data directory. If that folder is not
+        # writable (or resolving it itself fails), keep a second copy in the
+        # operating system's temp directory and tell the user which path worked.
+        path = None
         try:
+            candidate = os.path.join(slg_db.app_dir(), "crash.log")
+            if slg_util.log_crash(exc, val, tb, candidate):
+                path = candidate
+        except Exception:  # noqa: BLE001 - a reporter must not mask the callback error
+            pass
+        if path is None:
+            try:
+                fallback_dir = os.path.join(tempfile.gettempdir(), "slgking")
+                candidate = os.path.join(fallback_dir, "crash.log")
+                if slg_util.log_crash(exc, val, tb, candidate):
+                    path = candidate
+            except Exception:  # noqa: BLE001 - keep the original Tk error visible
+                pass
+
+        try:
+            if path:
+                detail = "详细信息已记录到：\n%s\n\n程序还能继续用，但这一步没完成。" % path
+            else:
+                detail = ("错误详情无法写入日志文件，请联系作者并附上错误时间。\n\n"
+                          "程序还能继续用，但这一步没完成。")
             messagebox.showwarning(
-                "程序内部出错了", "刚才的操作出了点问题，详细信息已记录到：\n%s\n\n"
-                "程序还能继续用，但这一步没完成。" % path, parent=self)
+                "程序内部出错了", "刚才的操作出了点问题。\n" + detail,
+                parent=self)
         except Exception:  # noqa: BLE001 - the reporter must never explode too
             pass
 
     def _finish_splash(self):
         """Cross-fade the splash out and the window in, then drop the splash."""
-        if self._splash is None:
+        splash = self._splash
+        if splash is None:
+            self._show_main_window()
             return
-        self.attributes("-alpha", 0.0)
-        self.deiconify()
-        self._fade_splash(1)
+        try:
+            self.attributes("-alpha", 0.0)
+            self.deiconify()
+            self._fade_splash(1)
+        except tk.TclError:
+            # Some window managers do not implement per-window transparency.
+            # In that case, do a plain handoff instead of leaving the app at
+            # alpha 0 with the 100% splash covering it forever.
+            self._show_main_window(splash)
+
+    def _show_main_window(self, splash=None):
+        """Reveal the app and remove the splash without relying on alpha support."""
+        if splash is None:
+            splash = self._splash
+        self._splash = None
+        try:
+            self.attributes("-alpha", 1.0)
+        except tk.TclError:
+            pass
+        try:
+            self.deiconify()
+            self.lift()
+        except tk.TclError:
+            pass
+        if splash is not None:
+            try:
+                splash.destroy()
+            except tk.TclError:
+                pass
 
     def _fade_splash(self, step, total=10):
         splash = self._splash
         if splash is None:
-            self.attributes("-alpha", 1.0)
+            self._show_main_window()
             return
         frac = step / total
         try:
             self.attributes("-alpha", frac)
             splash.attributes("-alpha", 1.0 - frac)
         except tk.TclError:
+            self._show_main_window(splash)
             return
         if step >= total:
-            self._splash = None
-            splash.destroy()
-            self.attributes("-alpha", 1.0)
+            self._show_main_window(splash)
             return
-        self.after(24, self._fade_splash, step + 1, total)
+        try:
+            self.after(24, self._fade_splash, step + 1, total)
+        except tk.TclError:
+            self._show_main_window(splash)
 
     # --- theme ----------------------------------------------------------------
 
@@ -1899,15 +1968,60 @@ class App(ctk.CTk):
         self.after(1, lambda: self._apply_theme(mode))
 
     def _build_filterbar(self):
-        # Lives inside the toolbar's column 0 (the search box column), not on
-        # `main`: that way `_centred_row` centres the 筛选 row on the same axis
-        # as the search box and the notice strip, which sit in that same column
-        # while the sort controls take the column to their right.
+        # Lives inside the toolbar's search column. Keep it full width so tag
+        # chips can wrap when the list column gets narrow instead of running
+        # underneath the sort controls or being clipped at the window edge.
         self.filterbar = ctk.CTkFrame(self.toolbar, fg_color="transparent")
         self.filterbar.grid(row=2, column=0, columnspan=1, sticky="ew",
                             pady=(12, 10))
-        self.filterbar_inner = _centred_row(self.filterbar, row=0, column=0,
-                                           sticky="ew")
+        self.filterbar.grid_columnconfigure(0, weight=1)
+        self.filterbar_inner = ctk.CTkFrame(self.filterbar, fg_color="transparent")
+        self.filterbar_inner.grid(row=0, column=0, sticky="ew")
+        self.filterbar_inner.bind("<Configure>", self._queue_filterbar_layout)
+        self._filterbar_widgets = []
+        self._filterbar_layout_pending = False
+
+    def _queue_filterbar_layout(self, _event=None):
+        """Debounce responsive chip layout until Tk has settled widget sizes."""
+        if self._filterbar_layout_pending:
+            return
+        self._filterbar_layout_pending = True
+        try:
+            self.after_idle(self._layout_filterbar)
+        except tk.TclError:
+            self._filterbar_layout_pending = False
+
+    def _layout_filterbar(self):
+        """Wrap filter controls onto another row when the list column is narrow."""
+        self._filterbar_layout_pending = False
+        bar = self.filterbar_inner
+        try:
+            if not bar.winfo_exists():
+                return
+            available = bar.winfo_width() - 8
+        except tk.TclError:
+            return
+        if available < 80:
+            return  # the first Configure event can arrive before geometry settles
+
+        row = column = used = 0
+        gap = 6
+        for widget in self._filterbar_widgets:
+            try:
+                if not widget.winfo_exists():
+                    continue
+                width = widget.winfo_reqwidth()
+                if used and used + width > available:
+                    row += 1
+                    column = used = 0
+                widget.grid(row=row, column=column, sticky="w",
+                            padx=(0, gap), pady=(0, 4))
+                used += width + gap
+                column += 1
+            except tk.TclError:
+                # A filter change can destroy an old chip while a resize layout
+                # is queued. The next render lays out the replacement controls.
+                continue
 
     def _render_filterbar(self):
         # The chips are a function of the filters and nothing else, so a refresh
@@ -1920,37 +2034,49 @@ class App(ctk.CTk):
         bar = self.filterbar_inner
         for child in bar.winfo_children():
             child.destroy()
-        ctk.CTkLabel(bar, text="筛选", text_color=MUTED,
-                     font=ui_font(size=13)).pack(side="left", padx=(0, 6))
+        self._filterbar_widgets = []
+
+        def add(widget):
+            self._filterbar_widgets.append(widget)
+            return widget
+
+        add(ctk.CTkLabel(bar, text="筛选", text_color=MUTED,
+                         font=ui_font(size=13)))
         if not self.include and not self.exclude:
             # A button, not a label: it was telling the user about 标签库 while
             # being the one thing in the row that could not open it.
-            ctk.CTkButton(bar, text="未设置 — 点这里挑标签",
-                          height=24, corner_radius=12, fg_color="transparent",
-                          text_color=ACCENT, hover_color=CHIP,
-                          font=ui_font(size=12),
-                          command=self.open_tag_picker).pack(side="left")
+            add(ctk.CTkButton(bar, text="未设置 — 点这里挑标签",
+                              height=24, corner_radius=12, fg_color="transparent",
+                              text_color=ACCENT, hover_color=CHIP,
+                              font=ui_font(size=12),
+                              command=self.open_tag_picker))
 
         def chip(slug, excluded):
             label = ("× " if excluded else "") + display_tag(slug)
-            btn = ctk.CTkButton(
+            return add(ctk.CTkButton(
                 bar, text=label, height=26, corner_radius=13,
                 fg_color=CHIP_OFF if excluded else CHIP,
                 text_color=DANGER_TEXT if excluded else TEXT,
                 hover_color=CARD_HOVER,
                 font=ui_font(size=12),
-                command=lambda s=slug, e=excluded: self._drop_chip(s, e))
-            btn.pack(side="left", padx=3)
+                command=lambda s=slug, e=excluded: self._drop_chip(s, e)))
 
         for slug in self.include:
             chip(slug, False)
         for slug in self.exclude:
             chip(slug, True)
         if self.include or self.exclude:
-            ctk.CTkButton(bar, text="清空", width=54, height=26,
-                          corner_radius=13, fg_color="transparent", text_color=ACCENT,
-                          hover_color=CHIP, font=ui_font(size=12),
-                          command=self.clear_filters).pack(side="left", padx=(10, 0))
+            add(ctk.CTkButton(bar, text="＋ 添加标签", height=26,
+                              corner_radius=13, fg_color="transparent",
+                              text_color=ACCENT, hover_color=CHIP,
+                              font=ui_font(size=12),
+                              command=self.open_tag_picker))
+            add(ctk.CTkButton(bar, text="清空", width=54, height=26,
+                              corner_radius=13, fg_color="transparent",
+                              text_color=ACCENT, hover_color=CHIP,
+                              font=ui_font(size=12),
+                              command=self.clear_filters))
+        self._queue_filterbar_layout()
 
     # --- state changes --------------------------------------------------------
 
@@ -4652,10 +4778,24 @@ class App(ctk.CTk):
         webbrowser.open(ADMIN_URL)
 
     def _unlock_all_titles(self):
-        gained = slg_titles.unlock_all_titles(self.conn)
-        messagebox.showinfo("开发者特权", "已解锁全部头衔（新增 %d 个）" % gained,
-                            parent=self)
-        self.open_profile()
+        if not slg_titles.dev_unlocked(self.conn):
+            self._set_progress("只有启用开发者身份后才能解锁全部头衔")
+            return
+        slg_account.set_developer_mode(True)
+        if not self._has_usable_cloud_session():
+            self._ensure_developer_cloud_identity()
+            self._set_progress("正在关联开发者云端身份，连接成功后请再点击一次")
+            return
+        if self._developer_title_unlock_pending:
+            return
+        developer_key = slg_titles.dev_secret()
+        if not developer_key:
+            self._set_progress("本机未找到开发者密钥，无法解锁云端头衔")
+            return
+        self._developer_title_unlock_pending = True
+        self._run_cloud_action(
+            "developer_unlock_titles",
+            lambda: slg_account.developer_grant_all_titles(developer_key))
 
     def _on_signin_click(self):
         if not self._require_personal_access("每日签到"):
@@ -4803,6 +4943,8 @@ class App(ctk.CTk):
         # 修改昵称/查看头衔/兑换码 - still open dialogs. The content is grouped
         # into labelled sections so the flat pile of numbers reads as a dashboard.
         self._panel_mode = "profile"
+        if slg_titles.dev_unlocked(self.conn):
+            self._ensure_developer_cloud_identity()
         self._set_shop_wide_layout(False)
         self._destroy_detail()
         d = self.detail
@@ -5034,16 +5176,30 @@ class App(ctk.CTk):
             anchor="w", padx=12, pady=(10, 2))
         try:
             current = slg_account.session()
+            if (slg_titles.dev_unlocked(self.conn) and current
+                    and current.get("account_id") != "developer"):
+                current = None
             cache = getattr(self, "_cloud_me", {})
             if current and cache.get("account_id") == current["account_id"]:
-                status = ("账号 %s · 云端积分 %s\n本月云端签到 %s 天 · 连续 %s 天 · %s\n"
-                          "旧积分和头衔会在首次云端登录后自动迁移" % (
-                              current["account_id"], cache.get("balance", 0),
-                              cache.get("signin_month_count", 0),
-                              cache.get("signin_streak", 0),
-                              "今天已签" if cache.get("signed_today") else "今天未签"))
+                is_developer = current["account_id"] == "developer"
+                if is_developer:
+                    status = ("开发者身份 · 云端积分 %s\n本月云端签到 %s 天 · 连续 %s 天 · %s\n"
+                              "旧积分和头衔会在首次关联后自动迁移" % (
+                                  cache.get("balance", 0),
+                                  cache.get("signin_month_count", 0),
+                                  cache.get("signin_streak", 0),
+                                  "今天已签" if cache.get("signed_today") else "今天未签"))
+                else:
+                    status = ("账号 %s · 云端积分 %s\n本月云端签到 %s 天 · 连续 %s 天 · %s\n"
+                              "旧积分和头衔会在首次云端登录后自动迁移" % (
+                                  current["account_id"], cache.get("balance", 0),
+                                  cache.get("signin_month_count", 0),
+                                  cache.get("signin_streak", 0),
+                                  "今天已签" if cache.get("signed_today") else "今天未签"))
             else:
-                status = "账号 %s · 正在读取云端积分…" % current["account_id"] if current else "尚未创建云端账号"
+                status = ("正在关联开发者云端身份…" if slg_titles.dev_unlocked(self.conn)
+                          else "账号 %s · 正在读取云端积分…" % current["account_id"]
+                          if current else "尚未创建云端账号")
         except slg_account.AccountError as exc:
             current, status = None, str(exc)
         self._cloud_account_label = ctk.CTkLabel(
@@ -5052,9 +5208,10 @@ class App(ctk.CTk):
         self._cloud_account_label.pack(anchor="w", padx=12, pady=(0, 8))
         actions = ctk.CTkFrame(box, fg_color="transparent")
         actions.pack(fill="x", padx=12, pady=(0, 10))
-        for name, callback in (("创建/登录", self.open_cloud_account),
-                               ("设备管理", self.open_cloud_devices),
-                               ):
+        account_action = ("开发者身份" if slg_titles.dev_unlocked(self.conn)
+                          else "创建/登录", self.open_cloud_account)
+        for name, callback in (account_action,
+                               ("设备管理", self.open_cloud_devices)):
             ctk.CTkButton(actions, text=name, width=1, height=28, corner_radius=7,
                           fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
                           font=ui_font(size=10), command=callback).pack(
@@ -5064,9 +5221,35 @@ class App(ctk.CTk):
         elif current:
             self._run_cloud_action("me", slg_account.me)
 
+    def _ensure_developer_cloud_identity(self, force=False):
+        if not slg_titles.dev_unlocked(self.conn):
+            return False
+        slg_account.set_developer_mode(True)
+        try:
+            current = slg_account.session()
+        except slg_account.AccountError:
+            current = None
+        if (not force and current
+                and current.get("account_id") == "developer"):
+            return True
+        if self._developer_cloud_login_pending:
+            return False
+        developer_key = slg_titles.dev_secret()
+        if not developer_key:
+            self._set_progress("管理员权限已启用，但本机未找到开发者密钥，无法关联云端身份")
+            return False
+        self._developer_cloud_login_pending = True
+        self._run_cloud_action(
+            "admin_login", lambda: slg_account.developer_login(developer_key))
+        return False
+
     def _has_cloud_account(self):
         try:
-            return bool(slg_account.session())
+            current = slg_account.session()
+            if (slg_titles.dev_unlocked(self.conn) and current
+                    and current.get("account_id") != "developer"):
+                return False
+            return bool(current)
         except slg_account.AccountError as exc:
             self._set_progress(str(exc))
             # A damaged session file must never trigger a local balance debit.
@@ -5074,7 +5257,11 @@ class App(ctk.CTk):
 
     def _has_usable_cloud_session(self):
         try:
-            return bool(slg_account.session())
+            current = slg_account.session()
+            if (slg_titles.dev_unlocked(self.conn) and current
+                    and current.get("account_id") != "developer"):
+                return False
+            return bool(current)
         except slg_account.AccountError:
             return False
 
@@ -5082,7 +5269,11 @@ class App(ctk.CTk):
         """Gate personal writes for guests while keeping catalogue reads open."""
         if self._has_usable_cloud_session():
             return True
-        if not cloud_only and slg_titles.dev_unlocked(self.conn):
+        if slg_titles.dev_unlocked(self.conn):
+            self._ensure_developer_cloud_identity()
+            if cloud_only:
+                self._set_progress("正在使用开发者密钥关联云端身份，请稍后重试")
+                return False
             return True
         prompt = ("%s需要登录云端账号。访客仍可浏览游戏资料和同步目录。\n\n现在打开账号窗口吗？"
                   % feature)
@@ -5100,6 +5291,70 @@ class App(ctk.CTk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _cloud_action_result(self, kind, result, error):
+        if kind == "admin_login":
+            self._developer_cloud_login_pending = False
+            if error:
+                label = getattr(self, "_developer_cloud_status_label", None)
+                if label is not None and label.winfo_exists():
+                    label.configure(text="云端连接失败：" + error,
+                                    text_color=DANGER_TEXT)
+                reward_label = getattr(self, "_announcement_reward_label", None)
+                claim_button = getattr(self, "_announcement_claim_button", None)
+                if reward_label is not None and reward_label.winfo_exists():
+                    reward_label.configure(text="开发者云端身份连接失败，请重试后再领取活动积分。")
+                if claim_button is not None and claim_button.winfo_exists():
+                    claim_button.configure(
+                        text="重试连接", state="normal",
+                        command=lambda: self._ensure_developer_cloud_identity(force=True))
+                self._set_progress("开发者云端身份连接失败：" + error)
+                return
+            self._cloud_me = {}
+            self._maintenance_reward_status = None
+            self._cloud_titles = set()
+            self._cloud_equipped = slg_titles.DEFAULT_TITLE_ID
+            self._cloud_equipped_cosmetic = ""
+            self._set_progress("开发者密钥已关联固定云端身份，无需普通登录或恢复码")
+            account_window = getattr(self, "_cloud_account_window", None)
+            if account_window is not None and account_window.winfo_exists():
+                account_window.destroy()
+            if getattr(self, "_panel_mode", None) == "profile":
+                self._skip_profile_cloud_fetch_once = True
+                self.open_profile()
+            # The login response establishes identity and a session only. Pull
+            # the authoritative account state before rendering cloud titles.
+            self._run_cloud_action("me", slg_account.me)
+            self._fetch_maintenance_reward_status()
+            return
+        if kind == "developer_unlock_titles":
+            self._developer_title_unlock_pending = False
+            if error:
+                self._set_progress("云端解锁头衔失败：" + error)
+                messagebox.showwarning("开发者头衔", error, parent=self)
+                return
+            if not slg_titles.dev_unlocked(self.conn):
+                self._set_progress("开发者身份已关闭，未应用云端头衔状态")
+                return
+            # Keep the legacy local collection aligned for offline display;
+            # cloud data remains authoritative for the developer account.
+            slg_titles.unlock_all_titles(self.conn)
+            self._cloud_titles = set(result.get("titles") or [])
+            self._cloud_titles.add(slg_titles.DEFAULT_TITLE_ID)
+            self._cloud_equipped = (result.get("equipped_title")
+                                    or slg_titles.DEFAULT_TITLE_ID)
+            if isinstance(getattr(self, "_cloud_me", None), dict):
+                self._cloud_me["titles"] = list(self._cloud_titles)
+                self._cloud_me["owned_titles"] = list(self._cloud_titles)
+                self._cloud_me["equipped_title"] = self._cloud_equipped
+            granted = result.get("granted")
+            gained = len(granted) if isinstance(granted, list) else 0
+            self._set_progress("开发者云端头衔已全部解锁（本次新增 %d 个）" % gained)
+            messagebox.showinfo(
+                "开发者特权", "已解锁全部云端头衔（本次新增 %d 个）" % gained,
+                parent=self)
+            if getattr(self, "_panel_mode", None) == "profile":
+                self._skip_profile_cloud_fetch_once = True
+                self.open_profile()
+            return
         if kind == "me":
             if not error:
                 self._cloud_balance = result.get("balance", 0)
@@ -5128,13 +5383,23 @@ class App(ctk.CTk):
                 if error:
                     label.configure(text=error)
                 else:
-                    label.configure(text=(
-                        "账号 %s · 云端积分 %s\n本月云端签到 %s 天 · 连续 %s 天 · %s\n"
-                        "旧积分和头衔会在首次云端登录后自动迁移" % (
-                            result.get("account_id", ""), result.get("balance", 0),
-                            result.get("signin_month_count", 0),
-                            result.get("signin_streak", 0),
-                            "今天已签" if result.get("signed_today") else "今天未签")))
+                    if result.get("account_id") == "developer":
+                        label_text = (
+                            "开发者身份 · 云端积分 %s\n本月云端签到 %s 天 · 连续 %s 天 · %s\n"
+                            "旧积分和头衔会在首次关联后自动迁移" % (
+                                result.get("balance", 0),
+                                result.get("signin_month_count", 0),
+                                result.get("signin_streak", 0),
+                                "今天已签" if result.get("signed_today") else "今天未签"))
+                    else:
+                        label_text = (
+                            "账号 %s · 云端积分 %s\n本月云端签到 %s 天 · 连续 %s 天 · %s\n"
+                            "旧积分和头衔会在首次云端登录后自动迁移" % (
+                                result.get("account_id", ""), result.get("balance", 0),
+                                result.get("signin_month_count", 0),
+                                result.get("signin_streak", 0),
+                                "今天已签" if result.get("signed_today") else "今天未签"))
+                    label.configure(text=label_text)
             shop_label = getattr(self, "_shop_balance_label", None)
             if (not error and shop_label is not None and shop_label.winfo_exists()
                     and getattr(self, "_panel_mode", None) == "shop"):
@@ -5200,7 +5465,7 @@ class App(ctk.CTk):
                 self._maintenance_reward_status = status
                 self._cloud_balance = result.get(
                     "balance", getattr(self, "_cloud_balance", 0))
-                self._set_progress("维护补偿已领取，云端积分 +%d" %
+                self._set_progress("全服活动奖励已领取，云端积分 +%d" %
                                    int(result.get("gained") or 0))
             elif error:
                 self._set_progress(error)
@@ -5286,6 +5551,35 @@ class App(ctk.CTk):
         messagebox.showwarning("云端账号", error or "云端操作未完成", parent=self)
 
     def open_cloud_account(self):
+        if slg_titles.dev_unlocked(self.conn):
+            win = self._new_dialog("开发者云端身份", "390x230")
+            self._cloud_account_window = win
+            ctk.CTkLabel(
+                win,
+                text="开发者密钥就是这份云端身份的唯一凭据。此身份会自动关联到固定账号，不需要创建普通账号、登录密钥或恢复码。",
+                text_color=TEXT, font=ui_font(size=12), wraplength=345,
+                justify="left").pack(anchor="w", padx=18, pady=(18, 10))
+            try:
+                current = slg_account.session()
+            except slg_account.AccountError:
+                current = None
+            connected = bool(current and current.get("account_id") == "developer")
+            self._developer_cloud_status_label = ctk.CTkLabel(
+                win, text=("开发者云端身份已连接。" if connected else
+                           "正在用本机开发者密钥关联云端身份。"),
+                text_color=ACCENT if connected else MUTED,
+                font=ui_font(size=11))
+            self._developer_cloud_status_label.pack(
+                anchor="w", padx=18, pady=(0, 12))
+            ctk.CTkButton(
+                win, text="重新连接", height=32,
+                command=lambda: self._ensure_developer_cloud_identity(force=True)
+            ).pack(fill="x", padx=18)
+            ctk.CTkButton(
+                win, text="关闭", height=28, fg_color=CHIP, text_color=TEXT,
+                command=win.destroy).pack(fill="x", padx=18, pady=(8, 14))
+            self._ensure_developer_cloud_identity()
+            return
         win = self._new_dialog("云端账号", "430x420")
         self._cloud_account_window = win
         active = self._has_cloud_account()
@@ -6988,6 +7282,10 @@ class App(ctk.CTk):
             ok, msg = slg_titles.redeem(self.conn, code)
             if ok:
                 slg_remote.report(self.conn, "redeem", {"success": True})
+                if slg_titles.dev_unlocked(self.conn):
+                    slg_account.set_developer_mode(True)
+                    self._ensure_developer_cloud_identity()
+                    msg += "；正在关联开发者云端身份"
             feedback.configure(text=msg, text_color=ACCENT if ok else DANGER_TEXT)
             if slg_titles.is_group_code(code):
                 feedback.configure(text="旧版群码仅处理本机头衔；每日 +10 积分请使用新版群码",
@@ -7436,6 +7734,12 @@ class App(ctk.CTk):
         if self._maintenance_reward_fetching:
             return
         if not self._has_usable_cloud_session():
+            if slg_titles.dev_unlocked(self.conn):
+                self._ensure_developer_cloud_identity()
+                self._maintenance_reward_status = None
+                self._refresh_announcement_badge()
+                self._render_announcement_reward()
+                return
             self._maintenance_reward_status = None
             self._refresh_announcement_badge()
             self._render_announcement_reward()
@@ -7451,6 +7755,11 @@ class App(ctk.CTk):
             return
         status = getattr(self, "_maintenance_reward_status", None)
         if not self._has_usable_cloud_session():
+            if slg_titles.dev_unlocked(self.conn):
+                label.configure(text="正在关联开发者云端身份…")
+                button.configure(text="连接中…", state="disabled")
+                self._ensure_developer_cloud_identity()
+                return
             label.configure(text="登录云端账号后，才能查看和领取账号维护补偿。")
             button.configure(text="登录后查看", state="disabled")
             return
@@ -7460,39 +7769,40 @@ class App(ctk.CTk):
             self._fetch_maintenance_reward_status()
             return
         if status.get("error"):
-            label.configure(text="当前服务器暂未开放维护补偿查询；正式活动开放后可在这里领取。")
+            label.configure(text="暂时无法读取全服积分活动；请稍后重试。")
             button.configure(text="暂不可领取", state="disabled")
             return
         campaign = status.get("campaign")
         if not isinstance(campaign, dict) or not campaign.get("active"):
-            label.configure(text="0.23.0 稳定版已发布；服务器开启维护补偿活动后，可在这里手动领取一次 100 云端积分。")
-            button.configure(text="等待服务器开启", state="disabled")
+            label.configure(text="当前没有开放中的全服积分活动。")
+            button.configure(text="暂无活动", state="disabled")
             return
         if status.get("claimed"):
-            label.configure(text="这份账号已领取过本次维护补偿。")
+            label.configure(text="这份账号已领取过本次活动奖励。")
             button.configure(text="已领取", state="disabled")
             return
         if is_test_build():
-            label.configure(text="测试包不会发放维护补偿。0.23.0 稳定版已发布；服务器开启活动后，可登录领取一次 %d 云端积分。"
+            label.configure(text="测试包不会领取正式活动奖励。稳定版用户可领取一次 %d 云端积分。"
                             % max(0, int(campaign.get("amount") or 100)))
             button.configure(text="请使用稳定版", state="disabled")
             return
         amount = max(0, int(campaign.get("amount") or 100))
         label.configure(text=(campaign.get("body") or campaign.get("title")
-                              or "0.23.0 特殊大版本维护补偿") +
+                              or "全服积分活动") +
                         "\n领取后将获得 %d 云端积分。" % amount)
-        button.configure(text="手动领取 %d 积分" % amount, state="normal")
+        button.configure(text="手动领取 %d 积分" % amount, state="normal",
+                         command=self._claim_maintenance_reward)
 
     def _claim_maintenance_reward(self):
         if is_test_build():
-            self._set_progress("测试版不会发放维护补偿，请使用 0.23.0 稳定版")
+            self._set_progress("测试版不会领取正式活动积分，请使用稳定版")
             return
         if not self._require_personal_access("领取维护补偿", cloud_only=True):
             return
         status = getattr(self, "_maintenance_reward_status", None) or {}
         campaign = status.get("campaign")
         if (not isinstance(campaign, dict) or not campaign.get("active")
-                or campaign.get("id") != "launch-0.23.0"):
+                or not campaign.get("id")):
             self._render_announcement_reward()
             return
         button = getattr(self, "_announcement_claim_button", None)
@@ -7500,7 +7810,7 @@ class App(ctk.CTk):
             button.configure(state="disabled", text="正在领取…")
         self._run_cloud_action(
             "maintenance_reward_claim",
-            lambda: slg_account.claim_maintenance_reward("launch-0.23.0"))
+            lambda: slg_account.claim_maintenance_reward(campaign["id"]))
 
     def open_announcement(self):
         win = self._new_dialog("公告", "480x560")
@@ -7521,8 +7831,7 @@ class App(ctk.CTk):
             "本机旧积分与头衔会在首次登录时自动迁移。游客仍可浏览资料与同步目录，个人数据操作和互动功能需要账号。\n\n"
             "v0.22.8 仍可用于基础浏览和目录同步；云端评论、账号和新商城功能需要 0.23 客户端，"
             "是否强制更新以服务器当前配置为准。\n\n"
-            "本次特别维护补偿为一次性 100 云端积分，登录后可在本公告手动领取；测试版不发放。"
-            "领取入口由服务器活动配置控制，活动开放状态以服务器为准。"
+            "如有全服积分活动，登录后可在这里按活动规则手动领取；奖励金额和开放状态以服务器为准。测试版不发放正式活动积分。"
         )
         remote_body = (remote.get("title") or "")
         if remote_body:
@@ -8800,7 +9109,7 @@ class App(ctk.CTk):
             with slg_db.session() as conn:
                 slg_remote.report(conn, "launch",
                                   {"platform": sys.platform,
-                                   "client_version": APP_VERSION,
+                                   "client_version": display_app_version(),
                                    "games": slg_db.stats(conn)["games"]})
                 slg_remote.report(conn, "snapshot", {
                     "points": slg_db.points_balance(conn),

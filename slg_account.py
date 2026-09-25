@@ -37,8 +37,15 @@ class SessionExpired(AccountError):
 
 _BASE = SERVER_BASE.rstrip("/")
 _TIMEOUT = 10
-_USER_AGENT = "SLGKing/0.23.0 (+https://slg-king.com; desktop client)"
+_USER_AGENT = "SLGKing/0.23.3 (+https://slg-king.com; desktop client)"
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_DEVELOPER_MODE = False
+
+
+def set_developer_mode(enabled):
+    """Select the owner identity for this running client process."""
+    global _DEVELOPER_MODE
+    _DEVELOPER_MODE = bool(enabled)
 
 
 def _blob(data):
@@ -98,6 +105,12 @@ def session():
     try:
         with open(_session_path(), encoding="utf-8") as inp:
             data = json.load(inp)
+        account_id = str(data["account_id"])
+        if _DEVELOPER_MODE and account_id != "developer":
+            # An enabled developer identity supersedes the ordinary account on
+            # this installation; never let a stale user session silently act
+            # as the developer while the owner-key session is being connected.
+            return None
         return {"account_id": data["account_id"],
                 "device_token": _dpapi(base64.b64decode(data["token"]), False).decode("utf-8")}
     except FileNotFoundError:
@@ -113,10 +126,12 @@ def forget_session():
         pass
 
 
-def request(path, method="GET", payload=None, token=None):
+def request(path, method="GET", payload=None, token=None, extra_headers=None):
     # Cloudflare blocks urllib's default Python-urllib signature at the edge.
     # Identify the actual desktop client instead of relying on that default.
     headers = {"Accept": "application/json", "User-Agent": _USER_AGENT}
+    if extra_headers:
+        headers.update(extra_headers)
     body = None
     if payload is not None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -189,6 +204,47 @@ def login(login_key, recovery_code=None, account_id=None):
     result = request("/account/login", method="POST", payload=payload)
     save_session(result.get("account_id"), result.get("device_token"))
     _attach_legacy_migration(result)
+    return result
+
+
+def developer_login(developer_key):
+    """Use the owner key as the account identity; no ordinary recovery code."""
+    if not _DEVELOPER_MODE:
+        raise AccountError("开发者身份未在本机启用")
+    if not isinstance(developer_key, str) or not developer_key.strip():
+        raise AccountError("未找到本机开发者密钥")
+    try:
+        old = session()
+    except AccountError:
+        old = None
+    payload = {"device_label": "SLGking 管理员设备"}
+    if old:
+        payload["device_token"] = old["device_token"]
+    result = request(
+        "/account/admin-login", method="POST", payload=payload,
+        extra_headers={"X-SLG-Developer-Key": developer_key.strip()})
+    if (not isinstance(result, dict)
+            or result.get("account_id") != "developer"
+            or not result.get("device_token")):
+        raise AccountError("服务器未返回开发者云端身份")
+    save_session(result["account_id"], result["device_token"])
+    _attach_legacy_migration(result)
+    return result
+
+
+def developer_grant_all_titles(developer_key):
+    """Grant all titles to the fixed owner account using its owner key."""
+    if not _DEVELOPER_MODE:
+        raise AccountError("仅开发者身份可以解锁全部头衔")
+    if not isinstance(developer_key, str) or not developer_key.strip():
+        raise AccountError("未找到本机开发者密钥")
+    result = request(
+        "/account/developer/titles/grant-all", method="POST", payload={},
+        extra_headers={"X-SLG-Developer-Key": developer_key.strip()})
+    if (not isinstance(result, dict)
+            or result.get("account_id") != "developer"
+            or not isinstance(result.get("titles"), list)):
+        raise AccountError("服务器未返回完整的开发者头衔状态")
     return result
 
 

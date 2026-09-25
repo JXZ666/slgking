@@ -203,7 +203,7 @@ DB 只要 11ms，瓶颈全在控件。
 | C3 | 标签用 AI 批量翻译，121 个一次翻完，全库共用 | `slg_translate.py` | ✅ |
 | C4 | 详情面板「原文 / 中文」分段切换，点了才翻；侧栏「翻译设置…」对话框 | `slg_gui.py` | ✅ |
 | C5 | 设置项：API Key（掩码输入，存 prefs）、模型名 | `slg_db.py` `slg_gui.py` | ✅ |
-| C6 | 侧栏署名：作者 菊千代赛高 + 邮箱（点击复制） | `slg_gui.py` | ✅ |
+| C6 | 侧栏署名：作者菊千代赛高；问题反馈走交流群 | `slg_gui.py` | ✅ |
 | C7 | `_drain()` 加固：畸形队列消息不再打死轮询链 | `slg_gui.py` | ✅ |
 | C8 | `slg_main.py translate` 子命令；四个子命令的 `--help` 修好 | `slg_main.py` | ✅ |
 
