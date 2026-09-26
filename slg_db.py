@@ -804,8 +804,14 @@ def find_games(conn, include=(), exclude=(), search=None, statuses=None,
         params.extend(exclude)
 
     if search:
-        where.append("g.title LIKE ?")
-        params.append("%" + search + "%")
+        # External/local alternate names are searchable too. This also makes
+        # curator-approved Chinese aliases useful without replacing the
+        # canonical title used by sync, comments, and local user state.
+        where.append(
+            "(g.title LIKE ? OR EXISTS (SELECT 1 FROM game_aliases a"
+            " WHERE a.game_id = g.id AND a.alias LIKE ?))")
+        pattern = "%" + search + "%"
+        params.extend((pattern, pattern))
 
     if statuses:
         qmarks = ",".join("?" * len(statuses))

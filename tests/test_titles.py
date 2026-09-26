@@ -74,7 +74,7 @@ class Catalogue(unittest.TestCase):
         item = slg_titles.shop_item_by_id("neon_comment_frame")
         self.assertIsNotNone(item)
         self.assertEqual(item["kind"], "decoration")
-        self.assertEqual(item["category"], "物品类")
+        self.assertEqual(item["category"], "名片框")
         self.assertEqual(item["cost"], 120)
         self.assertTrue(item["cloud_only"])
         self.assertEqual(item["appearance"], "comment_frame")
@@ -90,7 +90,8 @@ class Catalogue(unittest.TestCase):
 
     def test_shop_items_have_category_and_subcategory(self):
         for item in slg_titles.SHOP_ITEMS:
-            self.assertIn(item.get("category"), ("头衔类", "物品类"), item["id"])
+            self.assertIn(item.get("category"),
+                          ("头衔", "头像框", "名片框", "功能道具"), item["id"])
             self.assertTrue(item.get("subcategory"), item["id"])
 
 

@@ -671,20 +671,20 @@ class SidebarFit(unittest.TestCase):
         self.assertIsNotNone(self.app.sort_dir_btn)
 
     def test_the_profile_buttons_fill_the_reserved_row_below_sort(self):
-        # 个人/每日签到/积分商城 sit side by side in the toolbar's reserved
+        # 个人/排行榜/积分商城 sit side by side in the toolbar's reserved
         # row=1 column=1, right-aligned below the sort cluster (not in `right`).
         self.assertIsNotNone(self.app.profile_btn)
-        self.assertIsNotNone(self.app.signin_btn)
+        self.assertIsNotNone(self.app.leaderboard_btn)
         self.assertIsNotNone(self.app.shop_btn)
         row_frame = self.app.profile_btn.master
-        self.assertIs(self.app.signin_btn.master, row_frame)
+        self.assertIs(self.app.leaderboard_btn.master, row_frame)
         self.assertIs(self.app.shop_btn.master, row_frame)
         self.assertIs(row_frame.master, self.app.toolbar)
         info = row_frame.grid_info()
         self.assertEqual(info.get("row"), 1)
         self.assertEqual(info.get("column"), 1)
         self._assert_has_height("个人", "个人按钮")
-        self._assert_has_height("每日签到", "签到按钮")
+        self._assert_has_height("排行榜", "排行榜按钮")
         self._assert_has_height("积分商城", "商城按钮")
 
     def _panel_texts(self):
@@ -833,25 +833,26 @@ class SidebarFit(unittest.TestCase):
         try:
             self.app.update()
             chips = self._panel_texts()
-            for want in ("全部", "头衔类", "物品类", "稀有", "史诗", "消耗品"):
+            for want in ("全部", "头衔", "头像框", "名片框", "功能道具",
+                         "稀有", "史诗", "消耗品"):
                 self.assertIn(want, chips, "筛选条上少了「%s」" % want)
             total = len(self._shop_tiles())
 
-            self.app._pick_shop_filter("cat", "头衔类")
+            self.app._pick_shop_filter("cat", "头衔")
             self.app.update()
             titles = self._shop_tiles()
-            self.assertTrue(titles, "头衔类筛完空了")
-            self.assertLess(len(titles), total, "切到「头衔类」商品数没变")
+            self.assertTrue(titles, "头衔分类筛完空了")
+            self.assertLess(len(titles), total, "切到「头衔」分类后商品数没变")
 
-            self.app._pick_shop_filter("cat", "物品类")
+            self.app._pick_shop_filter("cat", "头像框")
             self.app.update()
-            self.assertTrue(self._shop_tiles(), "物品类筛完空了")
+            self.assertTrue(self._shop_tiles(), "头像框分类筛完空了")
 
             # A subcategory only means something under the category it belongs
             # to; switching category has to drop back to 全部 rather than keep a
             # filter that shows nothing.
             self.app._pick_shop_filter("sub", "消耗品")
-            self.app._pick_shop_filter("cat", "头衔类")
+            self.app._pick_shop_filter("cat", "头衔")
             self.app.update()
             self.assertEqual(self.app._shop_sub, "全部")
             self.assertTrue(self._shop_tiles(), "换了分类之后筛选残留，网格空了")
@@ -902,7 +903,7 @@ class SidebarFit(unittest.TestCase):
         self.app.open_titles()
         try:
             self.app.update()
-            win = self._dialog("我的头衔")
+            win = self._dialog("个性装扮")
             self.assertIsNotNone(win, "头衔弹窗没打开")
             how_to = [b for b in self._buttons_in(win)
                       if b.cget("text") == "获得方式"]

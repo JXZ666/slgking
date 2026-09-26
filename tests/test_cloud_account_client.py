@@ -69,11 +69,11 @@ class DeveloperIdentityClientTests(unittest.TestCase):
         self.assertEqual(send.call_args.kwargs["extra_headers"], {
             "X-SLG-Developer-Key": "owner-key"})
 
-    def test_grant_all_titles_requires_developer_mode_and_uses_developer_route(self):
+    def test_grant_all_appearances_requires_developer_mode_and_uses_current_route(self):
         slg_account.set_developer_mode(False)
         with mock.patch.object(slg_account, "request") as send:
             with self.assertRaises(slg_account.AccountError):
-                slg_account.developer_grant_all_titles("owner-key")
+                slg_account.developer_grant_all_appearances("owner-key")
         send.assert_not_called()
 
         slg_account.set_developer_mode(True)
@@ -81,16 +81,16 @@ class DeveloperIdentityClientTests(unittest.TestCase):
                  "granted": ["title_a"], "titles": ["title_a"],
                  "equipped_title": "title_a"}
         with mock.patch.object(slg_account, "request", return_value=reply) as send:
-            self.assertEqual(slg_account.developer_grant_all_titles(" owner-key "),
+            self.assertEqual(slg_account.developer_grant_all_appearances(" owner-key "),
                              reply)
         self.assertEqual(send.call_args.args[0],
-                         "/account/developer/titles/grant-all")
+                         "/account/developer/appearances/grant-all")
         self.assertEqual(send.call_args.kwargs["method"], "POST")
         self.assertEqual(send.call_args.kwargs["extra_headers"], {
             "X-SLG-Developer-Key": "owner-key"})
         with mock.patch.object(slg_account, "request", return_value=[]):
             with self.assertRaises(slg_account.AccountError):
-                slg_account.developer_grant_all_titles("owner-key")
+                slg_account.developer_grant_all_appearances("owner-key")
 
 
 class CommentValidationTests(unittest.TestCase):

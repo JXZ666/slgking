@@ -11,6 +11,7 @@ that was the one thing about the previous tools the user actively disliked.
 
 import calendar
 import json
+import math
 import os
 import queue
 import random
@@ -23,7 +24,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 import traceback
 import webbrowser
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
@@ -45,8 +46,8 @@ import slg_translate
 import slg_update
 import slg_util
 
-APP_VERSION = "0.23.3"
-TEST_APP_VERSION = "0.23.3"
+APP_VERSION = "0.23.8"
+TEST_APP_VERSION = "0.23.8"
 
 
 def display_app_version():
@@ -1512,7 +1513,8 @@ class App(ctk.CTk):
         self.sync_btn = self.maintenance_btn = None
         self.update_label = None
         self.qq_btn = None
-        self.profile_btn = self.signin_btn = self.shop_btn = None
+        self.profile_btn = self.leaderboard_btn = self.shop_btn = None
+        self.signin_btn = self._shop_signin_button = None
 
     def _poll_system(self):
         """"system" has no callback to hang off, so sample the OS setting.
@@ -1524,6 +1526,14 @@ class App(ctk.CTk):
             now = resolved_theme("system")
             if now != self._sys_theme:
                 self._apply_theme("system")
+        cloud_day = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+        previous_day = getattr(self, "_shop_signin_day", cloud_day)
+        if previous_day != cloud_day:
+            self._update_shop_signin_button()
+            if (getattr(self, "_panel_mode", None) == "shop"
+                    and self._has_cloud_account()):
+                self._run_cloud_action("me", slg_account.me)
+        self._shop_signin_day = cloud_day
         self.after(5000, self._poll_system)
 
     def _show_free_notice(self):
@@ -1895,12 +1905,10 @@ class App(ctk.CTk):
             hover_color=CARD_HOVER, font=ui_font(size=15),
             command=self._toggle_sort_dir)
         self.sort_dir_btn.pack(side="left", padx=(6, 0))
-        # 个人 / 每日签到 / 积分商城 sit side by side in the reserved empty cell
+        # 个人 / 排行榜 / 积分商城 sit side by side in the reserved empty cell
         # directly below the sort cluster (bar row 1, col 1), vertically centred
         # with the VPN notice band on the left and filling the row's right edge.
-        # Kept out of `right` so the sort/gear row stays one clean line.
-        signed = slg_db.last_signin_day(self.conn) == slg_titles.today_str()
-        dev = slg_titles.dev_unlocked(self.conn)
+        # Daily sign-in lives in the shop, next to the wallet and lottery.
         prof_row = ctk.CTkFrame(bar, fg_color="transparent")
         prof_row.grid(row=1, column=1, sticky="e", padx=(20, 0), pady=(9, 0))
         self.profile_btn = ctk.CTkButton(
@@ -1908,14 +1916,11 @@ class App(ctk.CTk):
             fg_color=CARD, text_color=TEXT, hover_color=CARD_HOVER,
             font=ui_font(size=13), command=self.open_profile)
         self.profile_btn.pack(side="left")
-        signin_text = "无限签到" if dev else ("今日已签到" if signed else "每日签到")
-        signin_state = "normal" if dev else ("disabled" if signed else "normal")
-        self.signin_btn = ctk.CTkButton(
-            prof_row, text=signin_text, width=88, height=38,
+        self.leaderboard_btn = ctk.CTkButton(
+            prof_row, text="排行榜", width=78, height=38,
             corner_radius=8, fg_color=CARD, text_color=TEXT, hover_color=CARD_HOVER,
-            font=ui_font(size=13), state=signin_state,
-            command=self._on_signin_click)
-        self.signin_btn.pack(side="left", padx=(6, 0))
+            font=ui_font(size=13), command=self.open_leaderboard)
+        self.leaderboard_btn.pack(side="left", padx=(6, 0))
         self.shop_btn = ctk.CTkButton(
             prof_row, text="积分商城", width=88, height=38, corner_radius=8,
             fg_color=CARD, text_color=TEXT, hover_color=CARD_HOVER,
@@ -2004,24 +2009,62 @@ class App(ctk.CTk):
         if available < 80:
             return  # the first Configure event can arrive before geometry settles
 
-        row = column = used = 0
+        rows = []
+        current = []
+        current_width = 0
         gap = 6
         for widget in self._filterbar_widgets:
             try:
                 if not widget.winfo_exists():
                     continue
                 width = widget.winfo_reqwidth()
-                if used and used + width > available:
-                    row += 1
-                    column = used = 0
-                widget.grid(row=row, column=column, sticky="w",
-                            padx=(0, gap), pady=(0, 4))
-                used += width + gap
-                column += 1
+                next_width = current_width + (gap if current else 0) + width
+                if current and next_width > available:
+                    rows.append(current)
+                    current = []
+                    current_width = 0
+                current.append((widget, width))
+                current_width += (gap if len(current) > 1 else 0) + width
             except tk.TclError:
                 # A filter change can destroy an old chip while a resize layout
                 # is queued. The next render lays out the replacement controls.
                 continue
+
+        if current:
+            rows.append(current)
+
+        # Each wrapped row is centered independently. The toolbar's notice is
+        # centered too; leaving a short filter row against the left edge made
+        # the controls look detached from that band on wide windows.
+        column_widths = []
+        for row_items in rows:
+            for index, (_widget, width) in enumerate(row_items):
+                if index == len(column_widths):
+                    column_widths.append(width)
+                else:
+                    column_widths[index] = max(column_widths[index], width)
+        try:
+            scale = float(ctk.ScalingTracker.get_window_scaling(
+                self.winfo_toplevel()))
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            scale = 1.0
+        for row_index, row_items in enumerate(rows):
+            grid_width = (sum(column_widths[:len(row_items)])
+                          + gap * scale * max(0, len(row_items) - 1))
+            # CustomTkinter scales geometry-manager padding, while winfo widths
+            # are already physical pixels. Convert the centering offset back
+            # before passing it to grid().
+            centered_width = bar.winfo_width()
+            left_pad = max(0, int((centered_width - grid_width) / (2 * scale)))
+            for column, (widget, _width) in enumerate(row_items):
+                try:
+                    widget.grid(
+                        row=row_index, column=column, sticky="w",
+                        padx=(left_pad if column == 0 else 0,
+                              gap if column < len(row_items) - 1 else 0),
+                        pady=(0, 4))
+                except tk.TclError:
+                    continue
 
     def _render_filterbar(self):
         # The chips are a function of the filters and nothing else, so a refresh
@@ -3733,7 +3776,9 @@ class App(ctk.CTk):
                              "votes_up": c.get("votes_up", c.get("likes", 0)),
                              "votes_down": c.get("votes_down", c.get("dislikes", 0)),
                              "author_cosmetic": c.get("author_cosmetic") or c.get("cosmetic_id"),
-                             "author_title_id": c.get("author_title_id") or c.get("title_id")})
+                             "author_appearances": c.get("author_appearances") or {},
+                             "author_title_id": c.get("author_title_id") or c.get("title_id"),
+                             "profile_message": c.get("profile_message") or ""})
         else:
             for c in local:
                 rows.append({"author": c["nickname"] or "匿名", "content": c["content"],
@@ -3747,7 +3792,11 @@ class App(ctk.CTk):
                 rows.append({"author": c.get("nickname") or "我", "content": c.get("content") or "",
                              "time": c.get("ts") or "", "own": True,
                              "local_id": None, "cloud_id": c.get("id"),
-                             "visibility": "public", "status": c.get("status")})
+                             "visibility": "public", "status": c.get("status"),
+                             "author_cosmetic": c.get("author_cosmetic") or c.get("cosmetic_id"),
+                             "author_appearances": c.get("author_appearances") or {},
+                             "author_title_id": c.get("author_title_id") or c.get("title_id"),
+                             "profile_message": c.get("profile_message") or ""})
         for r in rows:
             self._comment_row(box, r)
         if cloud_error and not rows:
@@ -3862,28 +3911,59 @@ class App(ctk.CTk):
         top = ctk.CTkFrame(frame, fg_color="transparent")
         identity = ctk.CTkFrame(top, fg_color="transparent")
         identity.pack(side="left", fill="x", expand=True)
-        cosmetic = r.get("author_cosmetic") or r.get("cosmetic_id") or r.get("decoration_id")
-        if cosmetic == "neon_comment_frame":
-            badge = ctk.CTkFrame(identity, fg_color="#101722", corner_radius=6,
-                                 border_width=1, border_color="#39e6f3")
-            ctk.CTkLabel(badge, text=r["author"], text_color="#82f5ff",
-                         font=ui_font(size=12, weight="bold")).pack(
-                padx=7, pady=2)
-            badge.pack(side="left", padx=(0, 4))
-        else:
-            ctk.CTkLabel(identity, text=r["author"], text_color=TEXT,
-                         font=ui_font(size=12, weight="bold")).pack(side="left")
-        title_id = r.get("author_title_id") or r.get("title_id")
+        appearances = r.get("author_appearances")
+        appearances = dict(appearances) if isinstance(appearances, dict) else {}
+        legacy_cosmetic = (r.get("author_cosmetic") or r.get("cosmetic_id")
+                           or r.get("decoration_id"))
+        if legacy_cosmetic and not appearances.get("comment_frame"):
+            appearances["comment_frame"] = legacy_cosmetic
+        avatar_frame = appearances.get("avatar_frame", "")
+        comment_frame = appearances.get("comment_frame", "")
+        public_cloud = (r.get("visibility") == "public" and bool(r.get("cloud_id"))
+                        and r.get("status", "approved") in ("approved", "public"))
+        author_details = {
+            "nickname": r.get("author", "匿名"),
+            "profile_message": r.get("profile_message", "") if public_cloud else "",
+            "title_id": r.get("author_title_id") or r.get("title_id") or "",
+            "appearances": appearances,
+        }
+        identity_line = ctk.CTkFrame(identity, fg_color="transparent")
+        identity_line.pack(fill="x")
+        avatar_widget = None
+        if avatar_frame:
+            avatar_widget = self._avatar_frame_canvas(
+                identity_line, avatar_frame, r.get("author", ""),
+                size=40, actual_avatar=False)
+            avatar_widget.pack(side="left", padx=(0, 5))
+        name_widget = self._comment_nameplate(
+            identity_line, r.get("author", "匿名"), comment_frame)
+        title_id = author_details["title_id"]
+        title_widget = None
         title = slg_titles.title_by_id(title_id) if title_id else None
         if title and title_id != slg_titles.DEFAULT_TITLE_ID:
-            ctk.CTkLabel(identity, text=" · " + title["name"],
-                         text_color=self._title_color(title_id),
-                         font=ui_font(size=10, weight="bold")).pack(side="left")
+            title_widget = ctk.CTkLabel(
+                identity_line, text=" · " + title["name"],
+                text_color=self._title_color(title_id),
+                font=ui_font(size=10, weight="bold"))
+            title_widget.pack(side="left")
+        message_widget = None
+        if public_cloud and author_details["profile_message"]:
+            message_widget = ctk.CTkLabel(
+                identity, text=author_details["profile_message"][:20],
+                text_color=MUTED, font=ui_font(size=10),
+                justify="left", anchor="w")
+            message_widget.pack(anchor="w", padx=(5 if avatar_frame else 0, 0),
+                               pady=(1, 0))
         t = (r["time"] or "").replace("T", " ")[:16]
         if t:
             ctk.CTkLabel(top, text=t, text_color=MUTED,
                          font=ui_font(size=10)).pack(side="right")
         top.pack(fill="x", padx=10, pady=(8, 3))
+        if public_cloud:
+            for widget in (identity, identity_line, avatar_widget, name_widget,
+                           title_widget, message_widget):
+                if widget is not None:
+                    self._bind_public_author_info(widget, author_details)
 
         width = max(220, min(900, self.detail.winfo_width() - 90))
         ctk.CTkLabel(frame, text=r["content"], text_color=TEXT,
@@ -3929,6 +4009,225 @@ class App(ctk.CTk):
                               command=lambda cid=r["cloud_id"], v=value:
                                   self._vote_comment(cid, v)).pack(side="right", padx=(3, 0))
         frame.pack(fill="x", padx=7, pady=(7, 0))
+
+    def _bind_public_author_info(self, widget, details):
+        try:
+            widget.configure(cursor="hand2")
+            widget.bind("<Button-1>",
+                        lambda _event, data=dict(details):
+                            self._show_public_author_card(data), add="+")
+        except (tk.TclError, AttributeError):
+            return
+
+    def _show_public_author_card(self, details):
+        """Show public-facing profile fields only; never expose account IDs or keys."""
+        win = self._new_dialog("公开名片", "360x320")
+        body = ctk.CTkFrame(win, fg_color=CARD, corner_radius=10)
+        body.pack(fill="both", expand=True, padx=14, pady=14)
+        nickname = str(details.get("nickname") or "匿名用户")[:40]
+        appearances = details.get("appearances")
+        appearances = dict(appearances) if isinstance(appearances, dict) else {}
+        avatar_frame = appearances.get("avatar_frame", "")
+        header = ctk.CTkFrame(body, fg_color="transparent")
+        header.pack(fill="x", padx=12, pady=(12, 7))
+        if avatar_frame:
+            self._avatar_frame_canvas(header, avatar_frame, nickname,
+                                      size=68, actual_avatar=False).pack(side="left", padx=(0, 10))
+        name_area = ctk.CTkFrame(header, fg_color="transparent")
+        name_area.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(name_area, text=nickname, text_color=TEXT,
+                     font=ui_font(size=15, weight="bold")).pack(anchor="w")
+        title_id = details.get("title_id")
+        title = slg_titles.title_by_id(title_id) if title_id else None
+        if title:
+            self._title_badge(name_area, title_id, max_width=220).pack(
+                anchor="w", pady=(5, 0))
+        message = str(details.get("profile_message") or "")[:20]
+        if message:
+            ctk.CTkLabel(body, text=message, text_color=MUTED,
+                         font=ui_font(size=11), wraplength=290,
+                         justify="left", anchor="w").pack(
+                fill="x", padx=12, pady=(3, 8))
+        comment_frame = appearances.get("comment_frame", "")
+        if comment_frame:
+            plate = ctk.CTkFrame(body, fg_color="transparent")
+            plate.pack(anchor="w", padx=12, pady=(0, 6))
+            self._comment_nameplate(plate, nickname, comment_frame)
+        adornments = []
+        for slot, label in (("avatar_frame", "头像框"), ("comment_frame", "名片框")):
+            item_id = appearances.get(slot)
+            item = self._appearance_item(item_id) if item_id else {}
+            if item:
+                adornments.append("%s：%s · %s" % (
+                    label, item.get("name", label), item.get("rarity", "普通")))
+        if adornments:
+            ctk.CTkLabel(body, text="\n".join(adornments), text_color=MUTED,
+                         font=ui_font(size=10), justify="left").pack(
+                anchor="w", padx=12, pady=(2, 10))
+        ctk.CTkButton(body, text="关闭", height=30, fg_color=CHIP,
+                      text_color=TEXT, hover_color=CARD_HOVER,
+                      command=win.destroy).pack(fill="x", padx=12, pady=(0, 12))
+
+    @staticmethod
+    def _appearance_item(item_id):
+        """Return the built-in appearance definition for a stored item ID."""
+        for item in slg_titles.SHOP_ITEMS:
+            if item.get("id") == item_id and item.get("kind") == "decoration":
+                return item
+        if item_id == "neon_comment_frame":
+            return {"id": item_id, "appearance": "comment_frame",
+                    "rarity": "稀有", "effect_style": "neon"}
+        return {}
+
+    @classmethod
+    def _appearance_rarity(cls, item_id):
+        item = cls._appearance_item(item_id)
+        return item.get("rarity") or "普通"
+
+    @classmethod
+    def _appearance_color(cls, item_id):
+        rarity = cls._appearance_rarity(item_id)
+        return slg_titles.RARITY_COLORS.get(rarity, MUTED)
+
+    def _avatar_frame_canvas(self, parent, item_id, nickname="", size=68,
+                             actual_avatar=False):
+        """Draw a fixed built-in avatar frame; user pictures never leave this PC."""
+        if not item_id:
+            return None
+        item = self._appearance_item(item_id)
+        rarity = item.get("rarity") or "普通"
+        style = item.get("effect_style") or ""
+        bg = CARD
+        canvas = tk.Canvas(parent, width=size, height=size, bg=bg,
+                           highlightthickness=0, bd=0)
+        cx = cy = size / 2
+        rank = {name: index for index, name in enumerate(slg_titles.RARITY_ORDER)}
+        tier = rank.get(rarity, 0)
+        accent = self._appearance_color(item_id)
+
+        # The user image stays local. Other people's comment cards get a
+        # neutral initial, while the same server-side item ID draws the frame.
+        diameter = max(16, int(size * 0.57))
+        avatar = None
+        if actual_avatar:
+            # ``avatar_source(own=True)`` deliberately falls back to the
+            # bundled author portrait when this user has no custom picture.
+            # On a user's profile that would show the author's face under the
+            # user's frame, so only load the local profile image here; the
+            # initial below is the correct fallback.
+            path = slg_db.avatar_path()
+            if os.path.isfile(path):
+                try:
+                    with Image.open(path) as source:
+                        avatar = ImageTk.PhotoImage(
+                            circle_avatar(source.convert("RGBA"), diameter))
+                except (OSError, ValueError, tk.TclError):
+                    avatar = None
+        if avatar is not None:
+            canvas.create_image(cx, cy, image=avatar)
+            canvas._appearance_photo = avatar
+        else:
+            r = diameter / 2
+            canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
+                               fill=_mix(BG, accent, 0.12), outline="")
+            canvas.create_text(cx, cy, text=(nickname[:1] or "?").upper(),
+                               fill=TEXT, font=ui_tkfont(
+                                   size=max(9, int(diameter * 0.43)), weight="bold"))
+
+        # Five rarity tiers affect the number and weight of visible metal rims.
+        # Most pixels remain static; only the preview gets a rare, short pulse.
+        base = {"普通": "#777480", "稀有": "#52b9e8", "史诗": "#b77afa",
+                "传说": "#efb963", "至臻": "#f27daf"}.get(rarity, accent)
+        outer = cx - diameter * 0.62
+        rim_width = 1 if tier <= 1 else 2 if tier <= 3 else 3
+        outer_ring = canvas.create_oval(
+            cx - outer, cy - outer, cx + outer, cy + outer,
+            outline=_mix(base, "#ffffff", 0.10 if tier < 3 else 0.32),
+            width=rim_width)
+        inner = cx - diameter * 0.53
+        canvas.create_oval(cx - inner, cy - inner, cx + inner, cy + inner,
+                           outline=_mix(base, BG, 0.28), width=1)
+
+        if style in ("cyber_neon", "neon") or item_id == "neon_comment_frame":
+            cyan, magenta = "#49edf3", "#ff4fb8"
+            canvas.create_arc(cx - outer, cy - outer, cx + outer, cy + outer,
+                              start=18, extent=118, style="arc", outline=cyan,
+                              width=2 if tier < 4 else 3)
+            canvas.create_arc(cx - outer, cy - outer, cx + outer, cy + outer,
+                              start=202, extent=104, style="arc", outline=magenta,
+                              width=2)
+            for angle in (38, 132, 218, 310):
+                rad = math.radians(angle)
+                x, y = cx + outer * math.cos(rad), cy + outer * math.sin(rad)
+                canvas.create_oval(x - 2.2, y - 2.2, x + 2.2, y + 2.2,
+                                   fill=cyan if angle % 2 else magenta, outline="")
+            # A fine scan line gives the product its electronic identity.
+            scan_y = cy - diameter * 0.12
+            canvas.create_line(cx - diameter * 0.28, scan_y,
+                               cx + diameter * 0.28, scan_y,
+                               fill=_mix(cyan, BG, 0.35), width=1)
+        elif style == "dark_rose":
+            # Six dark petals form a small rose motif around the avatar; the
+            # wine-red highlight reads clearly without a bright neon halo.
+            petal_r = diameter * 0.075
+            for angle in range(0, 360, 60):
+                rad = math.radians(angle)
+                px = cx + (outer - petal_r * 0.25) * math.cos(rad)
+                py = cy + (outer - petal_r * 0.25) * math.sin(rad)
+                canvas.create_oval(px - petal_r, py - petal_r,
+                                   px + petal_r, py + petal_r,
+                                   fill="#35121f", outline="#9b294c", width=1)
+                canvas.create_oval(px - petal_r * 0.35, py - petal_r * 0.6,
+                                   px + petal_r * 0.25, py - petal_r * 0.05,
+                                   fill="#d64b70", outline="")
+            canvas.create_arc(cx - outer, cy - outer, cx + outer, cy + outer,
+                              start=18, extent=100, style="arc",
+                              outline="#d34c70", width=2)
+            canvas.create_arc(cx - outer, cy - outer, cx + outer, cy + outer,
+                              start=198, extent=110, style="arc",
+                              outline="#631b35", width=3)
+
+        if actual_avatar and tier >= 2:
+            pulse_item = outer_ring
+            base_color = canvas.itemcget(pulse_item, "outline")
+
+            def draw_frame(index):
+                p = 1 - abs(2 * index / 10.0 - 1)
+                color = _mix(base_color, "#ffffff", 0.12 + p * 0.38)
+                canvas.itemconfigure(pulse_item, outline=color,
+                                     width=rim_width + (1 if p > 0.55 else 0))
+
+            def reset():
+                canvas.itemconfigure(pulse_item, outline=base_color, width=rim_width)
+
+            self._sparse_widget_animation(
+                canvas, frame_count=11, frame_ms=100,
+                rest_ms=7200 if tier >= 4 else 9200,
+                draw_frame=draw_frame, reset=reset, start_ms=900)
+        return canvas
+
+    def _comment_nameplate(self, parent, nickname, item_id):
+        if not item_id:
+            label = ctk.CTkLabel(parent, text=nickname, text_color=TEXT,
+                                 font=ui_font(size=12, weight="bold"))
+            label.pack(side="left")
+            return label
+        item = self._appearance_item(item_id)
+        rarity = item.get("rarity") or "普通"
+        style = item.get("effect_style") or ""
+        tint = ("#111a24" if style in ("cyber_neon", "neon") else
+                "#1c1119" if style == "dark_rose" else CARD)
+        edge = ("#4de8ef" if style in ("cyber_neon", "neon") else
+                "#9b294c" if style == "dark_rose" else
+                self._appearance_color(item_id))
+        width = 2 if rarity in ("史诗", "传说", "至臻") else 1
+        badge = ctk.CTkFrame(parent, fg_color=tint, corner_radius=6,
+                             border_width=width, border_color=edge)
+        ctk.CTkLabel(badge, text=nickname, text_color=("#9ffaff" if style in
+                     ("cyber_neon", "neon") else TEXT),
+                     font=ui_font(size=12, weight="bold")).pack(padx=7, pady=2)
+        badge.pack(side="left", padx=(0, 4))
+        return badge
 
     def _fetch_comments_worker(self, slug, page=1, sort="latest", request_id=None):
         remote = slg_comments.fetch_comments_page(slug, page=page, limit=20,
@@ -4746,12 +5045,13 @@ class App(ctk.CTk):
         return c
 
     def _equip_title(self, win, title_id):
-        if not self._require_personal_access("设置个人头衔"):
+        if not self._require_personal_access("设置个人装扮"):
             return
         if self._has_cloud_account():
             desired = (slg_titles.DEFAULT_TITLE_ID
                        if title_id == getattr(self, "_cloud_equipped", "")
                        else title_id)
+            self._wardrobe_reopen_after_equip = True
             self._run_cloud_action("equip", lambda: slg_account.equip_title(desired))
             win.destroy()
             return
@@ -4762,12 +5062,23 @@ class App(ctk.CTk):
         win.destroy()
         self.open_titles()
 
-    def _equip_cosmetic(self, cosmetic_id):
+    def _equip_cosmetic(self, cosmetic_id, return_to_wardrobe=False):
+        return self._equip_appearance("comment_frame", cosmetic_id,
+                                      return_to_wardrobe=return_to_wardrobe)
+
+    def _equip_appearance(self, slot, item_id, return_to_wardrobe=False):
         if not self._has_cloud_account():
             self.open_profile()
             return
+        if slot not in ("avatar_frame", "comment_frame"):
+            self._set_progress("未知的装扮部位")
+            return
+        self._wardrobe_pending_slot = slot
+        self._wardrobe_pending_item = item_id or ""
+        self._wardrobe_reopen_after_equip = bool(return_to_wardrobe)
         self._run_cloud_action(
-            "equip_cosmetic", lambda: slg_account.equip_cosmetic(cosmetic_id))
+            "equip_appearance",
+            lambda s=slot, i=item_id or "": slg_account.equip_appearance(s, i))
 
     # Report event names to the words the panel shows. The wire names stay
     # stable so the aggregate keeps working across client versions; only the
@@ -4777,9 +5088,9 @@ class App(ctk.CTk):
         """Open the web console where server analytics now live."""
         webbrowser.open(ADMIN_URL)
 
-    def _unlock_all_titles(self):
+    def _unlock_all_appearances(self):
         if not slg_titles.dev_unlocked(self.conn):
-            self._set_progress("只有启用开发者身份后才能解锁全部头衔")
+            self._set_progress("只有启用开发者身份后才能解锁全部装扮")
             return
         slg_account.set_developer_mode(True)
         if not self._has_usable_cloud_session():
@@ -4790,12 +5101,16 @@ class App(ctk.CTk):
             return
         developer_key = slg_titles.dev_secret()
         if not developer_key:
-            self._set_progress("本机未找到开发者密钥，无法解锁云端头衔")
+            self._set_progress("本机未找到开发者密钥，无法解锁云端装扮")
             return
         self._developer_title_unlock_pending = True
         self._run_cloud_action(
-            "developer_unlock_titles",
-            lambda: slg_account.developer_grant_all_titles(developer_key))
+            "developer_unlock_appearances",
+            lambda: slg_account.developer_grant_all_appearances(developer_key))
+
+    def _unlock_all_titles(self):
+        """Compatibility alias for older callbacks; now grants all appearances."""
+        self._unlock_all_appearances()
 
     def _on_signin_click(self):
         if not self._require_personal_access("每日签到"):
@@ -4804,6 +5119,10 @@ class App(ctk.CTk):
             messagebox.showinfo("签到", "签到功能维护中，稍后再试", parent=self)
             return
         if self._has_cloud_account():
+            button = getattr(self, "_shop_signin_button", None)
+            if button is not None and button.winfo_exists():
+                button.configure(text="正在签到…", state="disabled",
+                                 fg_color=CHIP, text_color=MUTED)
             self._run_cloud_action("signin", slg_account.signin)
             self._set_progress("正在提交云端签到…")
             return
@@ -4815,6 +5134,7 @@ class App(ctk.CTk):
         slg_remote.report(self.conn, "signin", {"dev": dev})
         if not dev and self.signin_btn is not None and self.signin_btn.winfo_exists():
             self.signin_btn.configure(text="今日已签到", state="disabled")
+        self._update_shop_signin_button()
         self._show_signin_result(gained=gained, bonus=bonus, already=False, dev=dev)
         if self._panel_mode == "profile":
             self.open_profile()
@@ -4940,7 +5260,7 @@ class App(ctk.CTk):
     def open_profile(self):
         # 个人中心 shares the detail panel: the first click swaps the panel over
         # (temporarily covering any game shown), and the actions inside it -
-        # 修改昵称/查看头衔/兑换码 - still open dialogs. The content is grouped
+        # 修改昵称/个性装扮/兑换码 - still open dialogs. The content is grouped
         # into labelled sections so the flat pile of numbers reads as a dashboard.
         self._panel_mode = "profile"
         if slg_titles.dev_unlocked(self.conn):
@@ -4961,14 +5281,20 @@ class App(ctk.CTk):
 
         # 身份卡：头像 + 昵称 + 头衔，右侧积分。换过头像的人显示那张图，没换过的
         # 仍是昵称首字 —— 默认头像属于作者，挂到别人名下会认错人。
-        cosmetic = (getattr(self, "_cloud_equipped_cosmetic", "")
-                    if self._has_cloud_account() else "")
+        appearances = (self._equipped_appearance_map()
+                       if self._has_cloud_account() else {})
+        avatar_frame = appearances.get("avatar_frame", "")
+        cosmetic = appearances.get("comment_frame", "")
         head = ctk.CTkFrame(
             d, fg_color=CARD, corner_radius=10,
-            border_width=2 if cosmetic == "neon_comment_frame" else 0,
-            border_color="#39e6f3")
+            border_width=1 if avatar_frame or cosmetic else 0,
+            border_color=(self._appearance_color(avatar_frame or cosmetic)
+                          if avatar_frame or cosmetic else CARD))
         head.pack(fill="x", padx=16, pady=(10, 0))
-        if os.path.exists(slg_db.avatar_path()):
+        if avatar_frame:
+            avatar = self._avatar_frame_canvas(
+                head, avatar_frame, nickname, size=64, actual_avatar=True)
+        elif os.path.exists(slg_db.avatar_path()):
             avatar = ctk.CTkLabel(head, text="", image=load_avatar(48))
         else:
             avatar = ctk.CTkLabel(head, text=(nickname[:1] or "游"), width=48,
@@ -4984,10 +5310,11 @@ class App(ctk.CTk):
         ctk.CTkLabel(info, text=nickname or "未设置昵称", text_color=TEXT,
                      font=ui_font(size=16, weight="bold")).pack(anchor="w")
         self._title_badge(info, equipped).pack(anchor="w", pady=(6, 0))
-        ctk.CTkLabel(head, text="本机旧积分 %d" % slg_db.points_balance(self.conn),
-                     text_color=ACCENT, font=ui_font(size=16, weight="bold")).pack(
-            side="right", padx=16)
-
+        balance_text, balance_color = self._profile_balance_display()
+        self._profile_balance_label = ctk.CTkLabel(
+            head, text=balance_text, text_color=balance_color,
+            font=ui_font(size=15, weight="bold"), justify="right")
+        self._profile_balance_label.pack(side="right", padx=(8, 14), pady=8)
         self._profile_cloud_account(d)
 
         # 改档警告：账本封印对不上才出现。上面那个余额已经是「只算到断链为止」
@@ -5019,7 +5346,7 @@ class App(ctk.CTk):
         acts = ctk.CTkFrame(d, fg_color="transparent")
         acts.pack(fill="x", padx=16)
         for i, (text, fn) in enumerate((("修改昵称", self._edit_nickname),
-                                        ("查看头衔", self.open_titles),
+                                        ("个性装扮", self.open_wardrobe),
                                         ("兑换码", self.open_redeem))):
             # width=1 matters: with expand=True the packer satisfies every
             # button's request first and splits what is left. Without it each
@@ -5123,13 +5450,13 @@ class App(ctk.CTk):
             ctk.CTkLabel(devbox, text="开发者", text_color=ACCENT,
                          font=ui_font(size=12, weight="bold")).pack(
                 anchor="w", padx=12, pady=(10, 2))
-            ctk.CTkLabel(devbox, text="开发者特权已开启 · 无限签到与抽奖",
+            ctk.CTkLabel(devbox, text="开发者特权已开启 · 无限签到、抽奖与装扮解锁",
                          text_color=MUTED, font=ui_font(size=11)).pack(
                 anchor="w", padx=12, pady=(0, 8))
-            ctk.CTkButton(devbox, text="一键解锁所有头衔", height=32, corner_radius=8,
+            ctk.CTkButton(devbox, text="解锁全部装扮", height=32, corner_radius=8,
                           fg_color=ACCENT, text_color=ON_ACCENT,
                           hover_color=CARD_HOVER, font=ui_font(size=12),
-                          command=self._unlock_all_titles).pack(
+                          command=self._unlock_all_appearances).pack(
                 fill="x", padx=12, pady=(0, 6))
             ctk.CTkButton(devbox, text="更换头像", height=32, corner_radius=8,
                           fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
@@ -5166,6 +5493,230 @@ class App(ctk.CTk):
             fg_color=ACCENT, text_color=ON_ACCENT, hover_color=CARD_HOVER,
             font=ui_font(size=13), command=self.open_cloud_account).pack(
             fill="x", padx=18, pady=(0, 18))
+    def open_leaderboard(self):
+        """Open the two public, privacy-limited cloud leaderboards."""
+        existing = getattr(self, "_leaderboard_window", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except tk.TclError:
+                pass
+        win = self._new_dialog("社区排行榜", "440x590")
+        self._leaderboard_window = win
+        ctk.CTkLabel(
+            win, text="每榜仅显示前 30 名（不含管理员）；只展示昵称和榜单数值。",
+            text_color=MUTED, font=ui_font(size=11), wraplength=390,
+            justify="left").pack(anchor="w", padx=16, pady=(12, 7))
+        tabs = ctk.CTkTabview(win)
+        tabs.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self._leaderboard_tabs = tabs
+        self._leaderboard_states = {
+            "points": {"loading": True, "error": "", "entries": []},
+            "wardrobe": {"loading": True, "error": "", "entries": []},
+        }
+        self._leaderboard_lists = {}
+        for board, title in (("points", "云端积分榜"), ("wardrobe", "装扮榜")):
+            tab = tabs.add(title)
+            header = ctk.CTkFrame(tab, fg_color="transparent")
+            header.pack(fill="x", padx=4, pady=(4, 2))
+            ctk.CTkLabel(
+                header,
+                text=("按当前云端积分排序" if board == "points"
+                      else "按已拥有装扮总数排序（头衔、头像框、名片框）"),
+                text_color=MUTED, font=ui_font(size=10)).pack(side="left")
+            ctk.CTkButton(
+                header, text="刷新", width=62, height=25, corner_radius=7,
+                fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+                font=ui_font(size=10),
+                command=lambda b=board: self._load_leaderboard(b)
+            ).pack(side="right")
+            listing = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+            listing.pack(fill="both", expand=True, padx=2, pady=(0, 4))
+            self._leaderboard_lists[board] = listing
+            self._render_leaderboard_board(board)
+        self._load_leaderboard("points")
+        self._load_leaderboard("wardrobe")
+
+    def _load_leaderboard(self, board):
+        if board not in ("points", "wardrobe"):
+            return
+        states = getattr(self, "_leaderboard_states", {})
+        if board not in states:
+            return
+        states[board].update(loading=True, error="")
+        self._render_leaderboard_board(board)
+        self._run_cloud_action(
+            "leaderboard_" + board,
+            lambda b=board: slg_account.leaderboard(b, limit=30))
+
+    def _render_leaderboard_board(self, board):
+        listing = getattr(self, "_leaderboard_lists", {}).get(board)
+        state = getattr(self, "_leaderboard_states", {}).get(board)
+        if listing is None or state is None:
+            return
+        try:
+            if not listing.winfo_exists():
+                return
+            for child in listing.winfo_children():
+                child.destroy()
+        except tk.TclError:
+            return
+        if state.get("loading") and not state.get("entries"):
+            ctk.CTkLabel(listing, text="正在读取排行榜…", text_color=MUTED,
+                         font=ui_font(size=12)).pack(anchor="w", padx=8, pady=12)
+            return
+        if state.get("error") and not state.get("entries"):
+            ctk.CTkLabel(listing, text="排行榜暂时无法加载\n" + state["error"],
+                         text_color=DANGER_TEXT, font=ui_font(size=11),
+                         wraplength=330, justify="left").pack(
+                anchor="w", padx=8, pady=(14, 6))
+            ctk.CTkButton(
+                listing, text="重试", height=28, fg_color=CHIP,
+                text_color=TEXT, hover_color=CARD_HOVER,
+                command=lambda b=board: self._load_leaderboard(b)).pack(
+                fill="x", padx=8, pady=(0, 8))
+            return
+        entries = state.get("entries") or []
+        if not entries:
+            ctk.CTkLabel(listing, text="暂时还没有上榜数据。",
+                         text_color=MUTED, font=ui_font(size=11)).pack(
+                anchor="w", padx=8, pady=12)
+            return
+        for entry in entries:
+            row = ctk.CTkFrame(listing, fg_color=CARD, corner_radius=8)
+            row.pack(fill="x", padx=4, pady=3)
+            rank = int(entry.get("rank") or 0)
+            rank_color = {1: "#f0c56a", 2: "#c3cbd5", 3: "#c98663"}.get(rank, MUTED)
+            ctk.CTkLabel(row, text=("%02d" % rank if rank > 0 else "—"),
+                         width=34, text_color=rank_color,
+                         font=ui_font(size=13, weight="bold")).pack(
+                side="left", padx=(9, 4), pady=8)
+            nickname = str(entry.get("nickname") or "未设置昵称")[:32]
+            ctk.CTkLabel(row, text=nickname, text_color=TEXT,
+                         font=ui_font(size=12), anchor="w").pack(
+                side="left", fill="x", expand=True, padx=4, pady=8)
+            score = int(entry.get("score") or 0)
+            score_text = ("%s 积分" % score if board == "points"
+                          else "%s 件装扮" % score)
+            ctk.CTkLabel(row, text=score_text, text_color=ACCENT,
+                         font=ui_font(size=11, weight="bold")).pack(
+                side="right", padx=(4, 10), pady=8)
+        if state.get("error"):
+            ctk.CTkLabel(listing, text="刷新失败，显示上次已加载的数据。",
+                         text_color=MUTED, font=ui_font(size=10)).pack(
+                anchor="w", padx=8, pady=5)
+
+    def _leaderboard_action_result(self, board, result, error):
+        states = getattr(self, "_leaderboard_states", {})
+        state = states.get(board)
+        if state is None:
+            return
+        state["loading"] = False
+        if error:
+            state["error"] = str(error)
+        elif isinstance(result, dict):
+            entries = result.get("entries")
+            if result.get("board") != board or not isinstance(entries, list):
+                state["error"] = "服务器返回的排行榜格式不正确"
+            else:
+                cleaned = []
+                for entry in entries[:30]:
+                    if not isinstance(entry, dict):
+                        continue
+                    try:
+                        cleaned.append({
+                            "rank": int(entry.get("rank") or len(cleaned) + 1),
+                            "nickname": str(entry.get("nickname") or "未设置昵称"),
+                            "score": max(0, int(entry.get("score") or 0)),
+                        })
+                    except (TypeError, ValueError):
+                        continue
+                state["entries"] = cleaned
+                state["error"] = ""
+        else:
+            state["error"] = "服务器未返回排行榜数据"
+        self._render_leaderboard_board(board)
+
+    @staticmethod
+    def _legacy_migration_status(cache):
+        """Describe the old local balance without displaying it as spendable."""
+        cache = cache if isinstance(cache, dict) else {}
+        if cache.get("legacy_migration_error"):
+            return "旧资产迁移暂未完成，请保留本机存档"
+        migration = cache.get("legacy_migration")
+        if not isinstance(migration, dict):
+            return "正在确认本机旧资产的迁移状态"
+        status = migration.get("status")
+        if status in ("migrated", "already_migrated", "manual_approved",
+                      "nothing_to_migrate", "already_completed_local"):
+            return "本机旧资产已处理完成（迁移完成或无需迁移）"
+        if status == "pending_manual_review":
+            return "旧资产等待管理员核对，请保留本机存档"
+        if status == "source_conflict":
+            return "旧资产迁移来源待核对，本机存档尚未扣除"
+        if status == "manual_rejected":
+            return "旧资产迁移未通过，本机账本仍保留"
+        return "本机旧资产迁移状态暂不可用，请保留本机存档"
+
+    def _equipped_appearance_map(self):
+        """Read both the new per-slot map and the old single namecard field."""
+        me = getattr(self, "_cloud_me", {})
+        values = getattr(self, "_cloud_appearances", None)
+        if not isinstance(values, dict) and isinstance(me, dict):
+            values = me.get("equipped_appearances")
+        values = dict(values) if isinstance(values, dict) else {}
+        legacy = (getattr(self, "_cloud_equipped_cosmetic", "")
+                  or (me.get("equipped_cosmetic", "") if isinstance(me, dict) else ""))
+        if legacy and not values.get("comment_frame"):
+            values["comment_frame"] = legacy
+        return values
+
+    def _profile_balance_display(self):
+        """Return cloud wallet UI only; never substitute the obsolete local balance."""
+        try:
+            current = slg_account.session()
+        except slg_account.AccountError:
+            return "云端积分\n读取失败", DANGER_TEXT
+        if (slg_titles.dev_unlocked(self.conn) and current
+                and current.get("account_id") != "developer"):
+            current = None
+        if not current:
+            return "云端积分\n登录后同步", MUTED
+        live_balance = getattr(self, "_cloud_balance", None)
+        if (getattr(self, "_cloud_balance_account_id", None)
+                == current.get("account_id")
+                and isinstance(live_balance, (int, float))):
+            return "云端积分\n%d" % int(live_balance), ACCENT
+        cache = getattr(self, "_cloud_me", {})
+        if (isinstance(cache, dict)
+                and cache.get("account_id") == current.get("account_id")
+                and isinstance(cache.get("balance"), (int, float))):
+            return "云端积分\n%d" % int(cache["balance"]), ACCENT
+        return "云端积分\n正在读取…", MUTED
+
+    def _store_cloud_balance(self, value):
+        """Cache a fresh server wallet value against the current account only."""
+        if not isinstance(value, (int, float)):
+            return
+        self._cloud_balance = int(value)
+        try:
+            current = slg_account.session()
+        except slg_account.AccountError:
+            return
+        if not current:
+            return
+        account_id = current.get("account_id")
+        self._cloud_balance_account_id = account_id
+        cache = getattr(self, "_cloud_me", None)
+        if isinstance(cache, dict) and cache.get("account_id") == account_id:
+            cache["balance"] = self._cloud_balance
+        label = getattr(self, "_profile_balance_label", None)
+        if label is not None and label.winfo_exists():
+            label.configure(text="云端积分\n%d" % self._cloud_balance,
+                            text_color=ACCENT)
 
     def _profile_cloud_account(self, parent):
         """Keep the server wallet visibly separate from legacy local points."""
@@ -5183,22 +5734,21 @@ class App(ctk.CTk):
             if current and cache.get("account_id") == current["account_id"]:
                 is_developer = current["account_id"] == "developer"
                 if is_developer:
-                    status = ("开发者身份 · 云端积分 %s\n本月云端签到 %s 天 · 连续 %s 天 · %s\n"
-                              "旧积分和头衔会在首次关联后自动迁移" % (
-                                  cache.get("balance", 0),
+                    status = ("开发者身份\n本月云端签到 %s 天 · 连续 %s 天 · %s\n%s" % (
                                   cache.get("signin_month_count", 0),
                                   cache.get("signin_streak", 0),
-                                  "今天已签" if cache.get("signed_today") else "今天未签"))
+                                  "今天已签" if cache.get("signed_today") else "今天未签",
+                                  self._legacy_migration_status(cache)))
                 else:
-                    status = ("账号 %s · 云端积分 %s\n本月云端签到 %s 天 · 连续 %s 天 · %s\n"
-                              "旧积分和头衔会在首次云端登录后自动迁移" % (
-                                  current["account_id"], cache.get("balance", 0),
+                    status = ("账号 %s\n本月云端签到 %s 天 · 连续 %s 天 · %s\n%s" % (
+                                  current["account_id"],
                                   cache.get("signin_month_count", 0),
                                   cache.get("signin_streak", 0),
-                                  "今天已签" if cache.get("signed_today") else "今天未签"))
+                                  "今天已签" if cache.get("signed_today") else "今天未签",
+                                  self._legacy_migration_status(cache)))
             else:
                 status = ("正在关联开发者云端身份…" if slg_titles.dev_unlocked(self.conn)
-                          else "账号 %s · 正在读取云端积分…" % current["account_id"]
+                          else "账号 %s · 正在读取账户资料…" % current["account_id"]
                           if current else "尚未创建云端账号")
         except slg_account.AccountError as exc:
             current, status = None, str(exc)
@@ -5313,6 +5863,8 @@ class App(ctk.CTk):
             self._cloud_titles = set()
             self._cloud_equipped = slg_titles.DEFAULT_TITLE_ID
             self._cloud_equipped_cosmetic = ""
+            self._cloud_appearances = {}
+            self._cloud_balance_account_id = None
             self._set_progress("开发者密钥已关联固定云端身份，无需普通登录或恢复码")
             account_window = getattr(self, "_cloud_account_window", None)
             if account_window is not None and account_window.winfo_exists():
@@ -5325,35 +5877,40 @@ class App(ctk.CTk):
             self._run_cloud_action("me", slg_account.me)
             self._fetch_maintenance_reward_status()
             return
-        if kind == "developer_unlock_titles":
+        if kind in ("developer_unlock_titles", "developer_unlock_appearances"):
             self._developer_title_unlock_pending = False
             if error:
-                self._set_progress("云端解锁头衔失败：" + error)
-                messagebox.showwarning("开发者头衔", error, parent=self)
+                self._set_progress("云端解锁装扮失败：" + error)
+                messagebox.showwarning("开发者装扮", error, parent=self)
                 return
             if not slg_titles.dev_unlocked(self.conn):
                 self._set_progress("开发者身份已关闭，未应用云端头衔状态")
                 return
-            # Keep the legacy local collection aligned for offline display;
-            # cloud data remains authoritative for the developer account.
-            slg_titles.unlock_all_titles(self.conn)
-            self._cloud_titles = set(result.get("titles") or [])
+            # `items` is the new complete inventory list; keep `titles` as a
+            # compatibility fallback for older service deployments.
+            self._cloud_titles = set(result.get("items") or result.get("titles") or [])
+            self._cloud_titles.update(result.get("titles") or [])
             self._cloud_titles.add(slg_titles.DEFAULT_TITLE_ID)
             self._cloud_equipped = (result.get("equipped_title")
+                                    or getattr(self, "_cloud_equipped", "")
                                     or slg_titles.DEFAULT_TITLE_ID)
             if isinstance(getattr(self, "_cloud_me", None), dict):
                 self._cloud_me["titles"] = list(self._cloud_titles)
                 self._cloud_me["owned_titles"] = list(self._cloud_titles)
+                self._cloud_me["items"] = list(self._cloud_titles)
                 self._cloud_me["equipped_title"] = self._cloud_equipped
             granted = result.get("granted")
             gained = len(granted) if isinstance(granted, list) else 0
-            self._set_progress("开发者云端头衔已全部解锁（本次新增 %d 个）" % gained)
+            self._set_progress("开发者云端装扮已全部解锁（本次新增 %d 件）" % gained)
             messagebox.showinfo(
-                "开发者特权", "已解锁全部云端头衔（本次新增 %d 个）" % gained,
+                "开发者特权", "已解锁全部云端装扮（本次新增 %d 件）" % gained,
                 parent=self)
-            if getattr(self, "_panel_mode", None) == "profile":
+            if getattr(self, "_panel_mode", None) == "shop":
+                self.open_shop()
+            elif getattr(self, "_panel_mode", None) == "profile":
                 self._skip_profile_cloud_fetch_once = True
                 self.open_profile()
+            self._refresh_open_wardrobe()
             return
         if kind == "me":
             if not error:
@@ -5361,7 +5918,11 @@ class App(ctk.CTk):
                 self._cloud_titles = set(result.get("titles") or [])
                 self._cloud_equipped = result.get("equipped_title") or slg_titles.DEFAULT_TITLE_ID
                 self._cloud_equipped_cosmetic = result.get("equipped_cosmetic") or ""
+                self._cloud_appearances = result.get("equipped_appearances") or {}
                 self._cloud_me = result
+                self._cloud_me_day = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+                self._store_cloud_balance(result.get("balance"))
+                self._update_shop_signin_button()
                 migration = result.get("legacy_migration") or {}
                 if result.get("legacy_migration_error"):
                     self._set_progress("\u65e7\u8d44\u4ea7\u81ea\u52a8\u8fc1\u79fb\u6682\u672a\u5b8c\u6210\uff1b\u8bf7\u4fdd\u7559\u672c\u673a\u5b58\u6863\uff0c\u4e4b\u540e\u518d\u6b21\u6253\u5f00\u4e2a\u4eba\u4e2d\u5fc3\u4f1a\u91cd\u8bd5")
@@ -5385,21 +5946,33 @@ class App(ctk.CTk):
                 else:
                     if result.get("account_id") == "developer":
                         label_text = (
-                            "开发者身份 · 云端积分 %s\n本月云端签到 %s 天 · 连续 %s 天 · %s\n"
-                            "旧积分和头衔会在首次关联后自动迁移" % (
-                                result.get("balance", 0),
+                            "开发者身份\n本月云端签到 %s 天 · 连续 %s 天 · %s\n%s" % (
                                 result.get("signin_month_count", 0),
                                 result.get("signin_streak", 0),
-                                "今天已签" if result.get("signed_today") else "今天未签"))
+                                "今天已签" if result.get("signed_today") else "今天未签",
+                                self._legacy_migration_status(result)))
                     else:
                         label_text = (
-                            "账号 %s · 云端积分 %s\n本月云端签到 %s 天 · 连续 %s 天 · %s\n"
-                            "旧积分和头衔会在首次云端登录后自动迁移" % (
-                                result.get("account_id", ""), result.get("balance", 0),
+                            "账号 %s\n本月云端签到 %s 天 · 连续 %s 天 · %s\n%s" % (
+                                result.get("account_id", ""),
                                 result.get("signin_month_count", 0),
                                 result.get("signin_streak", 0),
-                                "今天已签" if result.get("signed_today") else "今天未签"))
+                                "今天已签" if result.get("signed_today") else "今天未签",
+                                self._legacy_migration_status(result)))
                     label.configure(text=label_text)
+            balance_label = getattr(self, "_profile_balance_label", None)
+            if balance_label is not None and balance_label.winfo_exists():
+                if error:
+                    balance_label.configure(text="云端积分\n读取失败",
+                                            text_color=DANGER_TEXT)
+                elif isinstance(result, dict):
+                    balance = result.get("balance")
+                    if isinstance(balance, (int, float)):
+                        balance_label.configure(text="云端积分\n%d" % int(balance),
+                                                text_color=ACCENT)
+                    else:
+                        balance_label.configure(text="云端积分\n数据异常",
+                                                text_color=DANGER_TEXT)
             shop_label = getattr(self, "_shop_balance_label", None)
             if (not error and shop_label is not None and shop_label.winfo_exists()
                     and getattr(self, "_panel_mode", None) == "shop"):
@@ -5408,6 +5981,8 @@ class App(ctk.CTk):
             if not error and getattr(self, "_panel_mode", None) == "profile":
                 self._skip_profile_cloud_fetch_once = True
                 self.open_profile()
+            if not error:
+                self._refresh_open_wardrobe()
             return
         if kind == "create":
             self._cloud_create_pending = False
@@ -5435,6 +6010,8 @@ class App(ctk.CTk):
             self._cloud_titles = set()
             self._cloud_equipped = slg_titles.DEFAULT_TITLE_ID
             self._cloud_equipped_cosmetic = ""
+            self._cloud_appearances = {}
+            self._cloud_balance_account_id = None
             self._show_new_account_keys(result)
             self.open_profile()
             self._fetch_maintenance_reward_status()
@@ -5445,6 +6022,8 @@ class App(ctk.CTk):
             self._cloud_titles = set()
             self._cloud_equipped = slg_titles.DEFAULT_TITLE_ID
             self._cloud_equipped_cosmetic = ""
+            self._cloud_appearances = {}
+            self._cloud_balance_account_id = None
             self._set_progress("云端账号登录成功")
             self.open_profile()
             self._fetch_maintenance_reward_status()
@@ -5463,8 +6042,8 @@ class App(ctk.CTk):
                 status["claimed"] = bool(result.get("claimed", True))
                 status["balance"] = result.get("balance", status.get("balance", 0))
                 self._maintenance_reward_status = status
-                self._cloud_balance = result.get(
-                    "balance", getattr(self, "_cloud_balance", 0))
+                self._store_cloud_balance(result.get(
+                    "balance", getattr(self, "_cloud_balance", 0)))
                 self._set_progress("全服活动奖励已领取，云端积分 +%d" %
                                    int(result.get("gained") or 0))
             elif error:
@@ -5479,10 +6058,15 @@ class App(ctk.CTk):
             self._set_progress("设备已撤销")
             self.open_cloud_devices()
             return
+        if kind in ("leaderboard_points", "leaderboard_wardrobe"):
+            board = kind.rsplit("_", 1)[-1]
+            self._leaderboard_action_result(board, result, error)
+            return
         if kind == "group":
             if not error:
                 gained = int(result.get("gained") or 0)
-                self._cloud_balance = result.get("balance", getattr(self, "_cloud_balance", 0))
+                self._store_cloud_balance(
+                    result.get("balance", getattr(self, "_cloud_balance", 0)))
                 self._cloud_titles = set(result.get("titles") or [])
                 if isinstance(getattr(self, "_cloud_me", None), dict):
                     self._cloud_me["balance"] = self._cloud_balance
@@ -5496,10 +6080,30 @@ class App(ctk.CTk):
             if label is not None and label.winfo_exists():
                 label.configure(text=message, text_color=ACCENT if not error else DANGER_TEXT)
             return
-        if kind == "signin" and not error:
+        if kind == "signin":
+            if error:
+                self._set_progress("签到失败：" + str(error))
+                self._update_shop_signin_button()
+                messagebox.showwarning("签到失败", str(error), parent=self)
+                return
             gained = int(result.get("gained") or 0)
             bonus = int(result.get("bonus") or 0)
-            self._cloud_balance = result.get("balance", getattr(self, "_cloud_balance", 0))
+            self._store_cloud_balance(
+                result.get("balance", getattr(self, "_cloud_balance", 0)))
+            if isinstance(getattr(self, "_cloud_me", None), dict):
+                self._cloud_me["signed_today"] = True
+                for key in ("signin_month_count", "signin_streak", "signin_month_days"):
+                    if key in result:
+                        self._cloud_me[key] = result[key]
+                signed_day = result.get("day")
+                days = self._cloud_me.get("signin_month_days")
+                if (isinstance(days, list) and isinstance(signed_day, str)
+                        and signed_day[:7] == datetime.now(
+                            timezone(timedelta(hours=8))).date().isoformat()[:7]
+                        and signed_day not in days):
+                    days.append(signed_day)
+                self._cloud_me_day = signed_day
+            self._update_shop_signin_button()
             self._show_signin_result(gained=gained,
                                      already=bool(result.get("already")), dev=False,
                                      bonus=bonus)
@@ -5507,7 +6111,8 @@ class App(ctk.CTk):
                 self.open_profile()
             return
         if kind == "buy" and not error:
-            self._cloud_balance = result.get("balance", getattr(self, "_cloud_balance", 0))
+            self._store_cloud_balance(
+                result.get("balance", getattr(self, "_cloud_balance", 0)))
             self._cloud_titles = set(result.get("titles") or [])
             self._set_progress("云端兑换成功")
             if self._panel_mode == "shop":
@@ -5515,15 +6120,53 @@ class App(ctk.CTk):
             return
         if kind == "equip" and not error:
             self._cloud_equipped = result.get("equipped_title") or slg_titles.DEFAULT_TITLE_ID
-            self.open_titles()
-            if self._panel_mode == "profile":
+            reopen_wardrobe = bool(getattr(self, "_wardrobe_reopen_after_equip", False))
+            self._wardrobe_reopen_after_equip = False
+            if isinstance(getattr(self, "_cloud_me", None), dict):
+                self._cloud_me["equipped_title"] = self._cloud_equipped
+            if reopen_wardrobe:
+                self.open_wardrobe()
+            elif self._panel_mode == "profile":
                 self.open_profile()
             return
         if kind == "equip_cosmetic" and not error:
             self._cloud_equipped_cosmetic = result.get("equipped_cosmetic") or ""
+            self._cloud_appearances = (result.get("equipped_appearances") or
+                                       {"comment_frame": self._cloud_equipped_cosmetic})
+            reopen_wardrobe = bool(getattr(self, "_wardrobe_reopen_after_equip", False))
+            self._wardrobe_reopen_after_equip = False
             if isinstance(getattr(self, "_cloud_me", None), dict):
                 self._cloud_me["equipped_cosmetic"] = self._cloud_equipped_cosmetic
-            if self._panel_mode == "shop":
+                self._cloud_me["equipped_appearances"] = self._cloud_appearances
+            if reopen_wardrobe:
+                self.open_wardrobe()
+            elif self._panel_mode == "shop":
+                self.open_shop()
+            elif self._panel_mode == "profile":
+                self.open_profile()
+            return
+        if kind == "equip_appearance" and not error:
+            pending_slot = getattr(self, "_wardrobe_pending_slot", "comment_frame")
+            pending_item = getattr(self, "_wardrobe_pending_item", "")
+            appearances = result.get("equipped_appearances")
+            if isinstance(appearances, dict):
+                self._cloud_appearances = dict(appearances)
+            else:
+                self._cloud_appearances = self._equipped_appearance_map()
+                if pending_item:
+                    self._cloud_appearances[pending_slot] = pending_item
+                else:
+                    self._cloud_appearances.pop(pending_slot, None)
+            self._cloud_equipped_cosmetic = (
+                self._cloud_appearances.get("comment_frame") or "")
+            reopen_wardrobe = bool(getattr(self, "_wardrobe_reopen_after_equip", False))
+            self._wardrobe_reopen_after_equip = False
+            if isinstance(getattr(self, "_cloud_me", None), dict):
+                self._cloud_me["equipped_appearances"] = self._cloud_appearances
+                self._cloud_me["equipped_cosmetic"] = self._cloud_equipped_cosmetic
+            if reopen_wardrobe:
+                self.open_wardrobe()
+            elif self._panel_mode == "shop":
                 self.open_shop()
             elif self._panel_mode == "profile":
                 self.open_profile()
@@ -5532,8 +6175,24 @@ class App(ctk.CTk):
             self._run_cloud_action("me", slg_account.me)
             self._set_progress("云端昵称已更新")
             return
+        if kind == "profile_message":
+            save_button = getattr(self, "_wardrobe_message_save_button", None)
+            if error:
+                self._set_progress("名片寄语保存失败：" + str(error))
+                if save_button is not None and save_button.winfo_exists():
+                    save_button.configure(text="保存寄语", state="normal")
+                messagebox.showwarning("名片寄语", str(error), parent=self)
+                return
+            message = (result.get("profile_message", self._pending_profile_message)
+                       if isinstance(result, dict) else self._pending_profile_message)
+            if isinstance(getattr(self, "_cloud_me", None), dict):
+                self._cloud_me["profile_message"] = message or ""
+            self._set_progress("公开名片寄语已保存")
+            self._refresh_open_wardrobe()
+            return
         if kind == "lottery" and not error:
-            self._cloud_balance = result.get("balance", getattr(self, "_cloud_balance", 0))
+            self._store_cloud_balance(
+                result.get("balance", getattr(self, "_cloud_balance", 0)))
             self._cloud_titles = set(result.get("titles") or [])
             prize = result.get("prize") or {}
             if isinstance(getattr(self, "_cloud_me", None), dict):
@@ -5546,6 +6205,14 @@ class App(ctk.CTk):
             return
         if kind == "rotate" and not error:
             self._show_new_account_keys(result, rotated=True)
+            return
+        if kind in ("equip", "equip_cosmetic", "equip_appearance"):
+            reopen_wardrobe = bool(getattr(self, "_wardrobe_reopen_after_equip", False))
+            self._wardrobe_reopen_after_equip = False
+            self._set_progress(error or "云端装扮设置未完成")
+            messagebox.showwarning("个性装扮", error or "云端装扮设置未完成", parent=self)
+            if reopen_wardrobe:
+                self.open_wardrobe()
             return
         self._set_progress(error or "云端操作未完成")
         messagebox.showwarning("云端账号", error or "云端操作未完成", parent=self)
@@ -5659,6 +6326,8 @@ class App(ctk.CTk):
                 self._cloud_titles = set()
                 self._cloud_equipped = slg_titles.DEFAULT_TITLE_ID
                 self._cloud_equipped_cosmetic = ""
+                self._cloud_appearances = {}
+                self._cloud_balance_account_id = None
                 win.destroy()
                 self.open_profile()
             ctk.CTkButton(win, text="退出本机账号（清除本机凭证）", height=28,
@@ -5919,19 +6588,51 @@ class App(ctk.CTk):
                      wraplength=420).pack(anchor="w", padx=12, pady=(4, 10))
 
     def open_titles(self):
-        if not self._require_personal_access("查看和管理个人头衔"):
+        """Compatibility entry point; personal cosmetics now share one wardrobe."""
+        self.open_wardrobe()
+
+    def open_wardrobe(self):
+        if not self._require_personal_access("查看和管理个性装扮"):
             return
-        win = self._new_dialog("我的头衔", "380x560")
-        ctk.CTkLabel(win, text="我的头衔", text_color=TEXT,
-                     font=ui_font(size=14, weight="bold")).pack(
-            fill="x", padx=16, pady=(14, 8))
+        existing = getattr(self, "_wardrobe_window", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except tk.TclError:
+                pass
+        win = self._new_dialog("个性装扮", "480x760")
+        self._wardrobe_window = win
+        ctk.CTkLabel(
+            win, text="先看组合效果，再决定是否装备。内置素材按普通、稀有、史诗、传说、至臻分级。",
+            text_color=MUTED, font=ui_font(size=11), wraplength=430,
+            justify="left").pack(anchor="w", padx=16, pady=(14, 8))
         owned = ((getattr(self, "_cloud_titles", set()) if self._has_cloud_account()
                   else slg_db.owned_title_ids(self.conn)) | {slg_titles.DEFAULT_TITLE_ID})
-        equipped = (getattr(self, "_cloud_equipped", slg_titles.DEFAULT_TITLE_ID)
-                    if self._has_cloud_account() else
-                    slg_db.get_equipped_title(self.conn) or slg_titles.DEFAULT_TITLE_ID)
-        box = ctk.CTkScrollableFrame(win, fg_color="transparent")
-        box.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        equipped_title = (getattr(self, "_cloud_equipped", slg_titles.DEFAULT_TITLE_ID)
+                          if self._has_cloud_account() else
+                          slg_db.get_equipped_title(self.conn) or slg_titles.DEFAULT_TITLE_ID)
+        appearances = (self._equipped_appearance_map()
+                       if self._has_cloud_account() else {})
+        self._wardrobe_preview_state = {
+            "title_id": equipped_title,
+            "avatar_frame": appearances.get("avatar_frame", ""),
+            "comment_frame": appearances.get("comment_frame", ""),
+        }
+        preview_panel = ctk.CTkFrame(win, fg_color=CARD, corner_radius=10)
+        preview_panel.pack(fill="x", padx=14, pady=(0, 10))
+        self._wardrobe_preview_panel = preview_panel
+        self._render_wardrobe_preview()
+        tabs = ctk.CTkTabview(win)
+        self._wardrobe_tabs = tabs
+        tabs.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        title_tab = tabs.add("头衔")
+        avatar_tab = tabs.add("头像框")
+        comment_tab = tabs.add("名片框")
+        box = ctk.CTkScrollableFrame(title_tab, fg_color="transparent")
+        box.pack(fill="both", expand=True, padx=6, pady=(0, 6))
         # 按稀有度分节，节头写「稀有度 + 持有 n/m」。列表本来就长，再往后只会更长，
         # 分节头是滚到一半还能知道自己掉到哪一档的唯一线索。不折叠未拥有的档 ——
         # 折叠会把「这枚怎么拿」直接藏掉，跟列表本身的目的相反。
@@ -5943,7 +6644,330 @@ class App(ctk.CTk):
             self._title_section(box, rarity, have, len(group))
             for t in group:
                 self._title_row(box, t, t["id"] in owned,
-                                t["id"] == equipped, win)
+                                t["id"] == equipped_title, win)
+
+        owned_items = set(getattr(self, "_cloud_titles", set()))
+        self._wardrobe_appearance_list(avatar_tab, "avatar_frame", owned_items, win)
+        owns_namecard = any(
+            item.get("kind") == "decoration"
+            and (item.get("appearance") or "comment_frame") == "comment_frame"
+            and item.get("id") in owned_items
+            for item in slg_titles.SHOP_ITEMS)
+        self._wardrobe_profile_message_editor(comment_tab, owns_namecard)
+        self._wardrobe_appearance_list(comment_tab, "comment_frame", owned_items, win)
+        # _fit_dialog's screen-height cap is expressed in geometry units on
+        # high-DPI displays. Clamp this dialog in logical units so it stays
+        # within the physical screen while leaving the list its scroll area.
+        win.update_idletasks()
+        scale = ctk.ScalingTracker.get_window_scaling(win)
+        height_limit = int(win.winfo_screenheight() * 0.9 / float(scale))
+        height = int(min(win.winfo_reqheight() / float(scale), height_limit))
+        self._place(win, 480, height)
+
+    def _wardrobe_profile_message_editor(self, parent, owns_namecard):
+        card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=8)
+        card.pack(fill="x", padx=4, pady=(4, 7))
+        header = ctk.CTkFrame(card, fg_color="transparent")
+        header.pack(fill="x", padx=9, pady=(6, 0))
+        ctk.CTkLabel(header, text="公开名片寄语", text_color=ACCENT,
+                     font=ui_font(size=11, weight="bold")).pack(side="left")
+        editor = ctk.CTkFrame(card, fg_color="transparent")
+        if not owns_namecard:
+            ctk.CTkLabel(
+                card, text="拥有任意一款名片框后，可设置一条最多 20 字的公开寄语。",
+                text_color=MUTED, font=ui_font(size=10), wraplength=390,
+                justify="left").pack(anchor="w", padx=9, pady=(1, 7))
+            return
+        if not self._has_cloud_account():
+            ctk.CTkLabel(
+                card, text="名片寄语需要云端账号。登录后可以保存并在公开评论中展示。",
+                text_color=MUTED, font=ui_font(size=10), wraplength=390,
+                justify="left").pack(anchor="w", padx=9, pady=(1, 7))
+            return
+        message = str(getattr(self, "_cloud_me", {}).get("profile_message", "") or "")
+        ctk.CTkLabel(
+            card, text=("已设置寄语：" + message if message else "尚未设置寄语 · 最多 20 字"),
+            text_color=MUTED, font=ui_font(size=10), wraplength=390,
+            justify="left", anchor="w").pack(anchor="w", padx=9, pady=(1, 3))
+        toggle = ctk.CTkButton(
+            header, text="编辑", width=54, height=23, corner_radius=6,
+            fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+            font=ui_font(size=10))
+        # Keep the callback reference explicit; it avoids relying on child order
+        # if the header gains another control later.
+        toggle.configure(command=lambda target=editor, button=toggle:
+                         self._toggle_wardrobe_message_editor(target, button))
+        toggle.pack(side="right")
+        self._wardrobe_message_editor_expanded = False
+        message = str(getattr(self, "_cloud_me", {}).get("profile_message", "") or "")
+        row = ctk.CTkFrame(editor, fg_color="transparent")
+        row.pack(fill="x", padx=9, pady=(3, 2))
+        entry = ctk.CTkEntry(
+            row, height=30, placeholder_text="写一句简短寄语（最多 20 字）",
+            font=ui_font(size=11))
+        entry.insert(0, message)
+        entry.pack(side="left", fill="x", expand=True)
+        counter = ctk.CTkLabel(editor, text="%d / 20 字" % len(message),
+                               text_color=MUTED, font=ui_font(size=9))
+        counter.pack(anchor="e", padx=10, pady=(0, 1))
+        actions = ctk.CTkFrame(editor, fg_color="transparent")
+        actions.pack(fill="x", padx=9, pady=(0, 7))
+        save = ctk.CTkButton(
+            actions, text="保存寄语", width=1, height=26, corner_radius=7,
+            fg_color=ACCENT, text_color=ON_ACCENT, hover_color=CARD_HOVER,
+            font=ui_font(size=10), command=self._save_profile_message)
+        save.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        clear = ctk.CTkButton(
+            actions, text="清除", width=1, height=26, corner_radius=7,
+            fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+            font=ui_font(size=10), command=lambda: self._save_profile_message(clear=True))
+        clear.pack(side="left", fill="x", expand=True)
+        entry.bind("<KeyRelease>", lambda _e: self._update_profile_message_counter())
+        self._wardrobe_message_entry = entry
+        self._wardrobe_message_counter = counter
+        self._wardrobe_message_save_button = save
+        self._wardrobe_message_clear_button = clear
+
+    def _toggle_wardrobe_message_editor(self, editor, button):
+        """Show message controls only when requested, preserving list space by default."""
+        try:
+            if not editor.winfo_exists() or not button.winfo_exists():
+                return
+            expanded = bool(getattr(self, "_wardrobe_message_editor_expanded", False))
+            if expanded:
+                editor.pack_forget()
+                button.configure(text="编辑")
+            else:
+                editor.pack(fill="x", padx=4, pady=(0, 5))
+                button.configure(text="收起")
+                self._update_profile_message_counter()
+            self._wardrobe_message_editor_expanded = not expanded
+        except tk.TclError:
+            return
+
+    def _update_profile_message_counter(self):
+        entry = getattr(self, "_wardrobe_message_entry", None)
+        counter = getattr(self, "_wardrobe_message_counter", None)
+        save = getattr(self, "_wardrobe_message_save_button", None)
+        clear = getattr(self, "_wardrobe_message_clear_button", None)
+        try:
+            if entry is None or not entry.winfo_exists():
+                return
+            value = entry.get()
+            count = len(value)
+            if counter is not None and counter.winfo_exists():
+                counter.configure(text="%d / 20 字" % count,
+                                  text_color=DANGER_TEXT if count > 20 else MUTED)
+            if save is not None and save.winfo_exists():
+                save.configure(state="disabled" if count > 20 else "normal")
+            if clear is not None and clear.winfo_exists():
+                clear.configure(state="disabled" if not value else "normal")
+        except tk.TclError:
+            return
+
+    def _save_profile_message(self, clear=False):
+        if not self._has_cloud_account():
+            self._set_progress("名片寄语需要连接云端账号")
+            return
+        entry = getattr(self, "_wardrobe_message_entry", None)
+        if entry is None or not entry.winfo_exists():
+            return
+        message = "" if clear else entry.get().strip()
+        if len(message) > 20:
+            messagebox.showwarning("名片寄语", "寄语最多 20 个字符。", parent=self)
+            return
+        button = getattr(self, "_wardrobe_message_save_button", None)
+        if button is not None and button.winfo_exists():
+            button.configure(text="正在保存…", state="disabled")
+        self._pending_profile_message = message
+        self._run_cloud_action(
+            "profile_message", lambda value=message:
+                slg_account.update_profile_message(value))
+
+    def _render_wardrobe_preview(self):
+        panel = getattr(self, "_wardrobe_preview_panel", None)
+        if panel is None or not panel.winfo_exists():
+            return
+        for child in panel.winfo_children():
+            child.destroy()
+        state = getattr(self, "_wardrobe_preview_state", {})
+        title_id = state.get("title_id") or slg_titles.DEFAULT_TITLE_ID
+        avatar_frame = state.get("avatar_frame", "")
+        comment_frame = state.get("comment_frame", "")
+        equipped_title = (getattr(self, "_cloud_equipped", slg_titles.DEFAULT_TITLE_ID)
+                          if self._has_cloud_account() else
+                          slg_db.get_equipped_title(self.conn) or slg_titles.DEFAULT_TITLE_ID)
+        equipped_appearances = (self._equipped_appearance_map()
+                                if self._has_cloud_account() else {})
+        is_equipped = (title_id == equipped_title
+                       and avatar_frame == equipped_appearances.get("avatar_frame", "")
+                       and comment_frame == equipped_appearances.get("comment_frame", ""))
+        profile_name = ((getattr(self, "_cloud_me", {}).get("nickname", "")
+                         if self._has_cloud_account() else
+                         slg_db.get_pref(self.conn, "profile.nickname", ""))
+                        or "未设置昵称")
+        ctk.CTkLabel(panel, text=("当前已装备效果" if is_equipped else "试搭效果预览"),
+                     text_color=ACCENT,
+                     font=ui_font(size=12, weight="bold")).pack(
+            anchor="w", padx=12, pady=(9, 2))
+        line = ctk.CTkFrame(panel, fg_color="transparent")
+        line.pack(fill="x", padx=10, pady=(2, 8))
+        if avatar_frame:
+            self._avatar_frame_canvas(
+                line, avatar_frame,
+                profile_name,
+                size=78, actual_avatar=True).pack(side="left", padx=(0, 10))
+        else:
+            if os.path.exists(slg_db.avatar_path()):
+                avatar = ctk.CTkLabel(line, text="", image=load_avatar(56))
+            else:
+                avatar = ctk.CTkLabel(
+                    line, text=(profile_name[:1] or "我"), width=54, height=54,
+                    corner_radius=27, fg_color=ACCENT, text_color=ON_ACCENT,
+                    font=ui_font(size=19, weight="bold"))
+            avatar.pack(side="left", padx=(0, 10), pady=5)
+        details = ctk.CTkFrame(line, fg_color="transparent")
+        details.pack(side="left", fill="both", expand=True)
+        self._title_badge(details, title_id, max_width=230).pack(anchor="w", pady=(1, 4))
+        title_info = slg_titles.title_by_id(title_id) or {}
+        title_rarity = title_info.get("rarity", "普通")
+        title_description = (title_info.get("desc") or
+                             title_info.get("description") or "暂无头衔说明")
+        ctk.CTkLabel(
+            details,
+            text="%s · %s\n%s" % (title_info.get("name", "普通用户"),
+                                  title_rarity, title_description),
+            text_color=MUTED, font=ui_font(size=10), wraplength=270,
+            justify="left", anchor="w").pack(anchor="w", pady=(0, 3))
+        self._comment_nameplate(details, profile_name, comment_frame)
+        labels = []
+        if avatar_frame:
+            item = self._appearance_item(avatar_frame)
+            labels.append("头像框：%s · %s" % (
+                item.get("name", avatar_frame), item.get("rarity", "普通")))
+        else:
+            labels.append("头像框：未装备")
+        if comment_frame:
+            item = self._appearance_item(comment_frame)
+            labels.append("名片框：%s · %s" % (
+                item.get("name", comment_frame), item.get("rarity", "普通")))
+        else:
+            labels.append("名片框：未装备")
+        ctk.CTkLabel(details, text="\n".join(labels), text_color=MUTED,
+                     font=ui_font(size=10), justify="left").pack(
+            anchor="w", pady=(5, 0))
+        ctk.CTkButton(
+            panel, text="恢复当前已装备组合", width=1, height=24,
+            fg_color="transparent", text_color=MUTED, hover_color=CHIP,
+            font=ui_font(size=10), command=self._reset_wardrobe_preview
+        ).pack(anchor="e", padx=12, pady=(0, 6))
+
+    def _set_wardrobe_preview(self, slot, item_id):
+        state = getattr(self, "_wardrobe_preview_state", None)
+        if not isinstance(state, dict):
+            return
+        if slot == "title_id":
+            state[slot] = item_id or slg_titles.DEFAULT_TITLE_ID
+        elif slot in ("avatar_frame", "comment_frame"):
+            state[slot] = item_id or ""
+        self._render_wardrobe_preview()
+
+    def _reset_wardrobe_preview(self):
+        appearances = self._equipped_appearance_map() if self._has_cloud_account() else {}
+        self._wardrobe_preview_state = {
+            "title_id": (getattr(self, "_cloud_equipped", slg_titles.DEFAULT_TITLE_ID)
+                         if self._has_cloud_account() else
+                         slg_db.get_equipped_title(self.conn) or slg_titles.DEFAULT_TITLE_ID),
+            "avatar_frame": appearances.get("avatar_frame", ""),
+            "comment_frame": appearances.get("comment_frame", ""),
+        }
+        self._render_wardrobe_preview()
+
+    def _wardrobe_appearance_list(self, tab, slot, owned_items, win):
+        items = [item for item in slg_titles.SHOP_ITEMS
+                 if item.get("kind") == "decoration"
+                 and (item.get("appearance") or "comment_frame") == slot]
+        ctk.CTkLabel(
+            tab, text="点击“预览”可以和当前头衔、另一装备槽组合查看；未拥有的商品也能先试搭。",
+            text_color=MUTED, font=ui_font(size=10), wraplength=390,
+            justify="left").pack(anchor="w", padx=8, pady=(5, 7))
+        listing = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+        listing.pack(fill="both", expand=True, padx=4, pady=(0, 5))
+        current = self._equipped_appearance_map().get(slot, "")
+        for item in items:
+            card = ctk.CTkFrame(listing, fg_color=CARD, corner_radius=8,
+                                border_width=1,
+                                border_color=self._appearance_color(item["id"]))
+            card.pack(fill="x", padx=3, pady=4)
+            head = ctk.CTkFrame(card, fg_color="transparent")
+            head.pack(fill="x", padx=9, pady=(7, 2))
+            ctk.CTkLabel(head, text=item.get("name", item["id"]),
+                         text_color=TEXT, font=ui_font(size=12, weight="bold")
+                         ).pack(side="left")
+            ctk.CTkLabel(head, text=item.get("rarity", "普通"),
+                         text_color=self._appearance_color(item["id"]),
+                         font=ui_font(size=10, weight="bold")).pack(side="left", padx=7)
+            owned = item["id"] in owned_items
+            ctk.CTkLabel(head, text=("正在使用" if item["id"] == current else
+                                     "已拥有" if owned else "未拥有"),
+                         text_color=ON_ACCENT if item["id"] == current else MUTED,
+                         fg_color=ACCENT if item["id"] == current else CHIP,
+                         corner_radius=6, height=18,
+                         font=ui_font(size=9)).pack(side="right")
+            ctk.CTkLabel(card, text=item.get("description", ""),
+                         text_color=MUTED, font=ui_font(size=10),
+                         justify="left", wraplength=390, anchor="w").pack(
+                fill="x", padx=9, pady=(2, 6))
+            actions = ctk.CTkFrame(card, fg_color="transparent")
+            actions.pack(fill="x", padx=9, pady=(0, 8))
+            ctk.CTkButton(
+                actions, text="预览搭配", width=1, height=27, corner_radius=7,
+                fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+                font=ui_font(size=10),
+                command=lambda s=slot, i=item["id"]: self._set_wardrobe_preview(s, i)
+            ).pack(side="left", expand=True, fill="x", padx=(0, 5))
+            if owned:
+                active = item["id"] == current
+                ctk.CTkButton(
+                    actions, text="卸下" if active else "装备", width=1,
+                    height=27, corner_radius=7,
+                    fg_color=CHIP if active else ACCENT,
+                    text_color=TEXT if active else ON_ACCENT,
+                    hover_color=CARD_HOVER, font=ui_font(size=10),
+                    command=lambda i=item["id"], s=slot, a=active: (
+                        win.destroy(), self._equip_appearance(
+                            s, "" if a else i, return_to_wardrobe=True))
+                ).pack(side="left", expand=True, fill="x")
+            else:
+                ctk.CTkButton(
+                    actions, text="前往商城", width=1, height=27,
+                    corner_radius=7, fg_color=CHIP, text_color=ACCENT,
+                    hover_color=CARD_HOVER, font=ui_font(size=10),
+                    command=lambda: (win.destroy(), self.open_shop())
+                ).pack(side="left", expand=True, fill="x")
+
+    def _refresh_open_wardrobe(self):
+        """Rebuild the one open wardrobe after its cloud inventory arrives."""
+        win = getattr(self, "_wardrobe_window", None)
+        if win is None:
+            return
+        try:
+            if not win.winfo_exists():
+                return
+            tabs = getattr(self, "_wardrobe_tabs", None)
+            selected = tabs.get() if tabs is not None and tabs.winfo_exists() else None
+            win.destroy()
+        except tk.TclError:
+            return
+        self._wardrobe_window = None
+        self._wardrobe_tabs = None
+        self.open_wardrobe()
+        tabs = getattr(self, "_wardrobe_tabs", None)
+        if selected and tabs is not None:
+            try:
+                tabs.set(selected)
+            except tk.TclError:
+                pass
 
     def _title_section(self, parent, rarity, have, total):
         """稀有度分节头：色点 + 徽记 + 「n/m」。"""
@@ -5994,6 +7018,12 @@ class App(ctk.CTk):
 
         acts = ctk.CTkFrame(card, fg_color="transparent")
         acts.pack(fill="x", padx=10, pady=(7, 8))
+        ctk.CTkButton(
+            acts, text="预览搭配", height=26, corner_radius=8,
+            fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+            font=ui_font(size=10),
+            command=lambda tid=t["id"]: self._set_wardrobe_preview("title_id", tid)
+        ).pack(side="left", fill="x", expand=True, padx=(0, 6))
         # 「获得方式」人人都有：没拿到的想知道怎么拿，拿到了的也可能想知道这枚是什么来头。
         ctk.CTkButton(acts, text="获得方式", height=26, corner_radius=8,
                       fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
@@ -6111,6 +7141,19 @@ class App(ctk.CTk):
         if self._has_cloud_account():
             self._run_cloud_action("me", slg_account.me)
 
+        sign_row = ctk.CTkFrame(d, fg_color="transparent")
+        sign_row.pack(fill="x", padx=16, pady=(0, 2))
+        self._shop_signin_button = ctk.CTkButton(
+            sign_row, text="每日签到", width=126, height=30, corner_radius=8,
+            fg_color=ACCENT, text_color=ON_ACCENT, hover_color=CARD_HOVER,
+            font=ui_font(size=11, weight="bold"), command=self._on_signin_click)
+        self._shop_signin_button.pack(side="left")
+        self.signin_btn = self._shop_signin_button
+        ctk.CTkLabel(
+            sign_row, text="签到积分会计入云端账户", text_color=MUTED,
+            font=ui_font(size=10)).pack(side="left", padx=(9, 0))
+        self._update_shop_signin_button()
+
         self._shop_lottery_card(d)
 
         # 货架：左栏分类、右栏商品。以前分类 tab 和子分类 chip 是上下两排圆角
@@ -6139,6 +7182,57 @@ class App(ctk.CTk):
         if fly:
             self._shop_fly_in(*fly)
 
+    def _update_shop_signin_button(self):
+        button = getattr(self, "_shop_signin_button", None)
+        try:
+            if button is None or not button.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if self._remote_flags.get("disable_signin"):
+            button.configure(text="签到维护中", state="disabled",
+                             fg_color=CHIP, text_color=MUTED)
+            return
+        if slg_titles.dev_unlocked(self.conn):
+            button.configure(text="无限签到", state="normal",
+                             fg_color=ACCENT, text_color=ON_ACCENT)
+            return
+        if self._has_cloud_account():
+            cache = getattr(self, "_cloud_me", {})
+            try:
+                current = slg_account.session()
+            except slg_account.AccountError:
+                current = None
+            if (current and isinstance(cache, dict)
+                    and cache.get("account_id") == current.get("account_id")):
+                today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+                days = cache.get("signin_month_days")
+                if isinstance(days, (list, tuple, set)):
+                    signed_today = today in days
+                elif getattr(self, "_cloud_me_day", None) == today:
+                    signed_today = cache.get("signed_today")
+                else:
+                    signed_today = None
+                if signed_today is None:
+                    button.configure(text="读取签到状态…", state="disabled",
+                                     fg_color=CHIP, text_color=MUTED)
+                    return
+                signed = bool(signed_today)
+                button.configure(
+                    text="今日已签到" if signed else "每日签到",
+                    state="disabled" if signed else "normal",
+                    fg_color=CHIP if signed else ACCENT,
+                    text_color=MUTED if signed else ON_ACCENT)
+            else:
+                button.configure(text="读取签到状态…", state="disabled",
+                                 fg_color=CHIP, text_color=MUTED)
+            return
+        signed = slg_db.last_signin_day(self.conn) == slg_titles.today_str()
+        button.configure(text="今日已签到" if signed else "每日签到",
+                         state="disabled" if signed else "normal",
+                         fg_color=CHIP if signed else ACCENT,
+                         text_color=MUTED if signed else ON_ACCENT)
+
     def _render_shop(self):
         """Draw the filter chips and the product grid for the current filter.
 
@@ -6150,7 +7244,10 @@ class App(ctk.CTk):
         cat = getattr(self, "_shop_cat", "全部")
         sub = getattr(self, "_shop_sub", "全部")
 
-        cats = list(dict.fromkeys(i.get("category") or "其他" for i in items))
+        discovered = list(dict.fromkeys(self._shop_category(i) for i in items))
+        category_order = ("头衔", "头像框", "名片框", "功能道具")
+        cats = ([value for value in category_order if value in discovered]
+                + [value for value in discovered if value not in category_order])
         if cat != "全部" and cat not in cats:
             cat = "全部"
         subs = self._shop_subs(items, cat)
@@ -6165,7 +7262,7 @@ class App(ctk.CTk):
         owned = (getattr(self, "_cloud_titles", set()) if self._has_cloud_account()
                  else slg_db.owned_title_ids(self.conn))
         shown = [i for i in items
-                 if cat in ("全部", i.get("category"))
+                 if cat in ("全部", self._shop_category(i))
                  and sub in ("全部", i.get("subcategory"))]
         # 已拥有的排后面：逛商城是为了看还没拿到的，「已拥有」挡在最前面没有信息量。
         # sorted 是稳定的，同类商品之间的原顺序不变。
@@ -6181,7 +7278,8 @@ class App(ctk.CTk):
                          gap_y=self.SHOP_TILE_GAP, fg_color="transparent")
         flow.pack(fill="x")
         equipped = ((getattr(self, "_cloud_equipped", slg_titles.DEFAULT_TITLE_ID),
-                     getattr(self, "_cloud_equipped_cosmetic", ""))
+                     getattr(self, "_cloud_equipped_cosmetic", ""),
+                     self._equipped_appearance_map())
                     if self._has_cloud_account() else
                     (slg_db.get_equipped_title(self.conn) or "", ""))
         points = (getattr(self, "_cloud_balance", 0) if self._has_cloud_account()
@@ -6191,7 +7289,14 @@ class App(ctk.CTk):
                         for item in shown])
 
     @staticmethod
-    def _shop_subs(items, cat):
+    def _shop_category(item):
+        """Normalize catalog category names while accepting pre-0.23.7 items."""
+        value = item.get("category")
+        return {"头衔类": "头衔", "物品类": "功能道具"}.get(
+            value, value or "其他")
+
+    @classmethod
+    def _shop_subs(cls, items, cat):
         """细分栏的条目。
 
         头衔类的细分就是稀有度，而「这个档现在没货」本身就是有用信息 —— 所以列全
@@ -6200,8 +7305,8 @@ class App(ctk.CTk):
         """
         subs = list(dict.fromkeys(
             i.get("subcategory") or "全部" for i in items
-            if cat in ("全部", i.get("category"))))
-        if cat in ("全部", "头衔类"):
+            if cat in ("全部", cls._shop_category(i))))
+        if cat in ("全部", "头衔", "头像框", "名片框"):
             # 稀有度按档位顺序接在后面。直接 append 漏掉的档会让顺序变成
             # 「稀有 / 史诗 / 普通 / 传说 / 至臻」—— 商品自带的排前面、补的排后面。
             others = [s for s in subs if s not in slg_titles.RARITY_ORDER]
@@ -6772,16 +7877,25 @@ class App(ctk.CTk):
         """
         width = width or self.SHOP_TILE_W
         is_title = item["kind"] == "title"
-        color = self._title_color(item["id"]) if is_title else ACCENT
+        is_decoration = item["kind"] == "decoration"
+        color = (self._title_color(item["id"]) if is_title else
+                 self._appearance_color(item["id"]) if is_decoration else ACCENT)
         rarity = ((slg_titles.title_by_id(item["id"]) or {}).get("rarity", "")
-                  if is_title else "")
+                  if is_title else item.get("rarity", "") if is_decoration else "")
         has = item["id"] in owned
         if isinstance(equipped, tuple):
-            equipped_title, equipped_cosmetic = equipped
+            equipped_title = equipped[0]
+            equipped_cosmetic = equipped[1] if len(equipped) > 1 else ""
+            appearance_map = equipped[2] if len(equipped) > 2 else {}
         else:  # compatibility for direct callers
             equipped_title, equipped_cosmetic = equipped, ""
+            appearance_map = {}
+        slot = item.get("appearance") or "comment_frame"
+        active_item = appearance_map.get(slot) if isinstance(appearance_map, dict) else ""
+        if not active_item and slot == "comment_frame":
+            active_item = equipped_cosmetic
         using = has and item["id"] == (
-            equipped_cosmetic if item["kind"] == "decoration" else equipped_title)
+            active_item if item["kind"] == "decoration" else equipped_title)
         cost = item.get("cost") or 0
         short = 0 if (item.get("locked") or has) else max(0, cost - points)
 
@@ -6816,8 +7930,9 @@ class App(ctk.CTk):
                     corner_radius=8, fg_color=CHIP if using else ACCENT,
                     text_color=TEXT if using else ON_ACCENT,
                     hover_color=CARD_HOVER, font=ui_font(size=12),
-                    command=lambda i=item: self._equip_cosmetic(
-                        "" if using else i["id"])).pack(fill="x")
+                    command=lambda i=item, s=slot, active=using:
+                        self._equip_appearance(s, "" if active else i["id"])
+                ).pack(fill="x")
             else:
                 self._tile_note(foot, "使用中" if using else "已拥有")
         else:
@@ -7102,14 +8217,17 @@ class App(ctk.CTk):
         elif item["id"] in (getattr(self, "_cloud_titles", set())
                             if self._has_cloud_account() else slg_db.owned_title_ids(self.conn)):
             if item["kind"] == "decoration" and self._has_cloud_account():
-                using = item["id"] == getattr(self, "_cloud_equipped_cosmetic", "")
+                slot = item.get("appearance") or "comment_frame"
+                using = item["id"] == self._equipped_appearance_map().get(slot, "")
+                slot_label = "头像框" if slot == "avatar_frame" else "名片框"
                 ctk.CTkButton(
-                    win, text="卸下名片框" if using else "装备名片框", height=36,
+                    win, text=("卸下" + slot_label if using else "装备" + slot_label), height=36,
                     corner_radius=8, fg_color=CHIP if using else ACCENT,
                     text_color=TEXT if using else ON_ACCENT,
                     hover_color=CARD_HOVER, font=ui_font(size=13),
-                    command=lambda: (win.destroy(), self._equip_cosmetic(
-                        "" if using else item["id"]))
+                    command=lambda s=slot, active=using, i=item["id"]: (
+                        win.destroy(), self._equip_appearance(
+                            s, "" if active else i))
                 ).pack(fill="x", padx=16, pady=(16, 0))
                 return
             ctk.CTkButton(win, text="已拥有", height=36, corner_radius=8,
@@ -7813,19 +8931,73 @@ class App(ctk.CTk):
             lambda: slg_account.claim_maintenance_reward(campaign["id"]))
 
     def open_announcement(self):
-        win = self._new_dialog("公告", "480x560")
+        win = self._new_dialog("公告", "480x600")
         slg_db.set_pref(self.conn, "announcement.read.launch-0.23.0", "1")
-        remote = self._remote_config.get("announcement") or {}
+        remote_config = self._remote_config if isinstance(self._remote_config, dict) else {}
+        remote = remote_config.get("announcement") or {}
+        if not isinstance(remote, dict):
+            remote = {}
         if remote.get("id"):
             slg_db.set_pref(self.conn, slg_remote.PREF_ANNOUNCE_SEEN,
                             str(remote.get("id")))
+
+        # The config endpoint may be served by an older server that has no
+        # history field. Keep the current announcement page usable in that case.
+        history = remote_config.get("announcement_history")
+        if not isinstance(history, list):
+            history = remote.get("announcement_history")
+        if not isinstance(history, list):
+            history = []
+
+        def _has_announcement_content(item):
+            return isinstance(item, dict) and any(
+                str(item.get(key) or "").strip() for key in ("id", "title", "body"))
+
+        current = dict(remote) if _has_announcement_content(remote) else None
+        pages = [current]
+        seen_ids = {str(current.get("id") or "").strip()} if current else set()
+        seen_content = {
+            (str(current.get("title") or "").strip(),
+             str(current.get("body") or "").strip())
+        } if current else set()
+        for item in history:
+            if not _has_announcement_content(item):
+                continue
+            item = dict(item)
+            item_id = str(item.get("id") or "").strip()
+            content_key = (str(item.get("title") or "").strip(),
+                           str(item.get("body") or "").strip())
+            if item_id and item_id in seen_ids:
+                continue
+            if not item_id and content_key in seen_content:
+                continue
+            pages.append(item)
+            if item_id:
+                seen_ids.add(item_id)
+            seen_content.add(content_key)
+
         ctk.CTkLabel(win, text="公告与版本说明", text_color=TEXT,
                      font=ui_font(size=16, weight="bold")).pack(
             anchor="w", padx=18, pady=(16, 8))
+
+        page_nav = ctk.CTkFrame(win, fg_color="transparent")
+        page_nav.pack(fill="x", padx=18, pady=(0, 8))
+        previous_button = ctk.CTkButton(
+            page_nav, text="上一条", width=86, height=30, corner_radius=8,
+            fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER)
+        previous_button.pack(side="left")
+        page_indicator = ctk.CTkLabel(
+            page_nav, text="", text_color=MUTED, font=ui_font(size=11))
+        page_indicator.pack(side="left", expand=True)
+        next_button = ctk.CTkButton(
+            page_nav, text="下一条", width=86, height=30, corner_radius=8,
+            fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER)
+        next_button.pack(side="right")
+
         notes = ctk.CTkTextbox(win, height=245, corner_radius=8, fg_color=BG,
                                text_color=TEXT, border_color=CHIP,
                                border_width=1, font=ui_font(size=12), wrap="word")
-        text = (
+        release_notes = (
             "0.23.0 稳定版 · 云端评论与账号更新\n\n"
             "相比上次稳定版 0.22.8，本版加入云端账号与跨设备登录、游戏独立评论页、公开评论自动审核和分页浏览；"
             "本机旧积分与头衔会在首次登录时自动迁移。游客仍可浏览资料与同步目录，个人数据操作和互动功能需要账号。\n\n"
@@ -7833,10 +9005,6 @@ class App(ctk.CTk):
             "是否强制更新以服务器当前配置为准。\n\n"
             "如有全服积分活动，登录后可在这里按活动规则手动领取；奖励金额和开放状态以服务器为准。测试版不发放正式活动积分。"
         )
-        remote_body = (remote.get("title") or "")
-        if remote_body:
-            text += "\n\n服务器公告 · " + remote_body + "\n" + (remote.get("body") or "")
-        notes.insert("1.0", text)
         notes.configure(state="disabled")
         notes.pack(fill="both", expand=True, padx=18, pady=(0, 10))
         self._announcement_reward_label = ctk.CTkLabel(
@@ -7853,8 +9021,64 @@ class App(ctk.CTk):
                       fg_color=CHIP, text_color=TEXT,
                       hover_color=CARD_HOVER, command=win.destroy).pack(
             fill="x", padx=18, pady=(0, 14))
+
+        page_state = {"index": 0}
+
+        def _show_announcement_page(index):
+            index = max(0, min(int(index), len(pages) - 1))
+            page_state["index"] = index
+            is_latest = index == 0
+            item = pages[index]
+            if is_latest:
+                text = release_notes
+                if item:
+                    title = str(item.get("title") or "").strip()
+                    body = str(item.get("body") or "").strip()
+                    if title or body:
+                        text += "\n\n服务器公告"
+                        if title:
+                            text += " · " + title
+                        if body:
+                            text += "\n" + body
+                page_indicator.configure(text="最新公告与版本说明")
+                self._announcement_reward_label.pack(
+                    fill="x", padx=18, pady=(0, 8))
+                self._announcement_claim_button.pack(
+                    fill="x", padx=18, pady=(0, 8))
+                self._render_announcement_reward()
+            else:
+                title = str(item.get("title") or "未命名公告").strip()
+                body = str(item.get("body") or "").strip()
+                text = "服务器公告 · " + title
+                if body:
+                    text += "\n\n" + body
+                created_at = str(item.get("created_at") or "").strip()
+                indicator = "历史公告 %d / %d" % (index, len(pages) - 1)
+                if created_at:
+                    indicator += " · " + created_at
+                page_indicator.configure(text=indicator)
+                self._announcement_reward_label.configure(
+                    text="积分活动仅可在最新公告页查看和领取。")
+                self._announcement_claim_button.configure(
+                    text="返回最新公告领取", state="disabled")
+
+            notes.configure(state="normal")
+            notes.delete("1.0", "end")
+            notes.insert("1.0", text)
+            notes.configure(state="disabled")
+            previous_button.configure(
+                state="normal" if index > 0 else "disabled")
+            next_button.configure(
+                state="normal" if index < len(pages) - 1 else "disabled")
+
+        previous_button.configure(
+            command=lambda: _show_announcement_page(page_state["index"] - 1))
+        next_button.configure(
+            command=lambda: _show_announcement_page(page_state["index"] + 1))
+        if len(pages) <= 1:
+            page_nav.pack_forget()
+        _show_announcement_page(0)
         self._refresh_announcement_badge()
-        self._render_announcement_reward()
 
     def open_settings(self):
         """The gear's door: the theme switch, with 关于 one row inside it.
@@ -8725,7 +9949,7 @@ class App(ctk.CTk):
         self._help_body("评分会参与「按xp推荐」排序；评过的游戏越多，推荐越能反映你的偏好。",
                         color=MUTED)
         self._help_head("个人与积分")
-        self._help_body("右上角的「个人」「每日签到」「积分商城」用于查看账号、领取签到积分和兑换商品。"
+        self._help_body("工具栏的「个人」「排行榜」「积分商城」分别用于管理账号、查看云端积分与装扮排行、兑换商品。每日签到入口在积分商城的余额附近。"
                         "左侧栏「更多工具…」放常用设置；左下角「更多…」放同步和维护操作。")
 
     def _help_what(self):
@@ -8767,7 +9991,7 @@ class App(ctk.CTk):
                         "「收藏夹」就是全部。", color=MUTED)
 
     def _help_profile(self):
-        self._help_body("「个人」面板显示你的昵称、头像、头衔和积分余额，也可以在这里修改昵称、查看头衔或兑换群码。")
+        self._help_body("「个人」面板显示你的昵称、头像、当前头衔和云端积分，也可以在这里修改昵称、搭配个性装扮或兑换群码。")
         self._help_head("积分从哪里来")
         self._help_body("每日签到：每次 +%d 分。每月累计签到达到第 5、10、20 天时，还会分别获得 15、30、50 分；每档每月领取一次。"
                         % slg_titles.DAILY_SIGNIN_POINTS)
@@ -8777,25 +10001,22 @@ class App(ctk.CTk):
                         color=MUTED)
         self._help_body("云端账号保存身份、昵称、云端积分、头衔、签到、名片装饰和公开评论，可在其他设备登录。首次创建或登录后，通过本机存档完整性校验的旧积分和头衔会自动迁入一次；迁入成功后不会再作为本机旧资产重复使用。登录密钥与恢复码请妥善保存，丢失后无法找回。",
                         color=MUTED)
-        self._help_body("本机游戏库、评分、状态、备注、收藏夹和私人评论仍保存在当前电脑（%LOCALAPPDATA%\\slgking\\slgking.db）。公开评论会显示昵称、头衔及已装备的名片框；删除自己的云端评论后，对应内容也会下线。",
+        self._help_body("本机游戏库、评分、状态、备注、收藏夹和私人评论仍保存在当前电脑（%LOCALAPPDATA%\\slgking\\slgking.db）。公开评论会显示昵称、头衔、头像框、名片框和账号寄语；删除自己的云端评论后，对应内容也会下线。",
                         color=MUTED)
 
     def _help_signin(self):
-        self._help_body("每天签到一次可得 %d 分。完成后按钮会显示「今日已签到」，次日恢复。"
-                        % slg_titles.DAILY_SIGNIN_POINTS)
+        self._help_body("打开「积分商城」，在云端积分余额附近点「每日签到」。每天可签到一次，完成后按钮会显示「今日已签到」，次日恢复。")
         self._help_body("当月累计签到达到第 5、10、20 天时，会额外获得 15、30、50 分；达标后自动发放，每个档位每月一次。云端签到按北京时间结算。",
                         color=MUTED)
 
     def _help_titles(self):
-        self._help_body("「个人」→「查看头衔」，能看到全部头衔和各自的获取方式。已拥有的"
-                        "可以随时「装备」或「取消」，装备中的那个会显示在个人页上，"
-                        "带对应的颜色和流光。")
-        self._help_body("头衔的稀有度等级不直接显示，会通过颜色、边框和短动画体现区别；动画不会持续闪烁。")
+        self._help_body("「个人」→「个性装扮」分为头衔、头像框和名片框。可以先预览当前搭配，也可以试搭尚未拥有的商品；头像框与名片框可同时装备。")
+        self._help_body("装扮从普通、稀有、史诗、传说到至臻分级。边框颜色、细节与短动画体现不同档次，动画不会持续闪烁。")
         self._help_body("头衔可通过群码或活动码兑换、在积分商城购买、通过抽奖获得；少数头衔会随成就解锁。",
                         color=MUTED)
 
     def _help_shop(self):
-        self._help_body("在右上角打开「积分商城」，可按商品类别筛选。点商品卡片能查看说明；确认兑换后会扣除相应积分。")
+        self._help_body("点击工具栏的「积分商城」。每日签到位于云端积分余额附近，商品按头衔、头像框、名片框和功能道具分类；点商品卡片可查看说明，兑换会扣除相应积分。")
         self._help_head("每日抽奖")
         self._help_body("每次消耗 5 分，每天最多 3 次。奖品包括头衔和积分；抽到已拥有的头衔时会折算成积分。")
 
@@ -8890,7 +10111,7 @@ class App(ctk.CTk):
         self._help_qa("Q：抽奖的概率是怎么定的？",
                       "A：奖池包含头衔和积分，具体结果以抽奖页面显示为准。抽到已拥有的头衔会折算成积分。")
         self._help_qa("Q：抽中头衔了，界面怎么没变？",
-                      "A：头衔到手了但没自动装备。「个人」→「查看头衔」里找到它，"
+                      "A：头衔到手了但没自动装备。「个人」→「个性装扮」里找到它，"
                       "点「装备」才会显示在个人页。")
         self._help_qa("Q：本机旧积分和头衔怎么迁到云端？",
                       "A：升级到 0.23 后，首次成功创建或登录云端账号时，程序会校验本机存档，并自动迁入通过完整性校验的旧积分和头衔。迁入成功后不会重复迁移；校验异常时不会自动迁移。")

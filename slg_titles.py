@@ -147,35 +147,65 @@ def apply_update_compensation(conn, current_version):
     return amount
 
 # 商城货架。rename_card 本地阶段锁定（昵称仍免费改，改名卡等云端版再开放）。
-# category 是顶层分组（头衔类 / 物品类），subcategory 在其下按属性细分（稀有度 / 类型）。
+# category 是商城分组：头衔、头像框、名片框、功能道具。subcategory 用于组内筛选。
 # daily_lottery 是特殊项：kind="lottery"，不走普通 buy，点「抽一次」触发老虎机。
 SHOP_ITEMS = [
-    {"id": "rename_card",   "name": "改名卡",   "kind": "rename",  "category": "物品类",
+    {"id": "rename_card",   "name": "改名卡",   "kind": "rename",  "category": "功能道具",
      "subcategory": "消耗品", "cost": 100, "locked": True, "note": "即将开放",
      "description": "用于修改昵称。云端版上线后开放，届时昵称唯一、改名消耗一张。"},
-    {"id": "daily_lottery", "name": "每日抽奖", "kind": "lottery", "category": "物品类",
+    {"id": "daily_lottery", "name": "每日抽奖", "kind": "lottery", "category": "功能道具",
      "subcategory": "抽奖", "cost": 5, "note": "每日 3 次",
      "description": "花 5 积分抽一次，有机会赢取史诗头衔「幸运星」或若干积分。每日限 3 次。"},
-    {"id": "senior_user",   "name": "资深用户", "kind": "title",   "category": "头衔类",
+    {"id": "senior_user",   "name": "资深用户", "kind": "title",   "category": "头衔",
      "subcategory": "稀有", "cost": 300,
      "description": "稀有头衔，资深玩家的身份象征，评论上线后展示在昵称旁。"},
-    {"id": "first_release", "name": "首发用户", "kind": "title",   "category": "头衔类",
+    {"id": "first_release", "name": "首发用户", "kind": "title",   "category": "头衔",
      "subcategory": "史诗", "cost": 30, "limited_until": "2026-10-30",
      "description": "首发纪念头衔，销售至 2026-10-30（含当日）；此后下架，绝版永不返场。购得后永久保留。"},
-    {"id": "mid_autumn_happy", "name": "中秋快乐", "kind": "title", "category": "头衔类",
+    {"id": "mid_autumn_happy", "name": "中秋快乐", "kind": "title", "category": "头衔",
      "subcategory": "史诗", "cost": 50, "limited_until": "2026-10-08",
      "cloud_only": True,
      "description": "云端限定中秋节史诗头衔，限时销售至 2026-10-08，当天仍可购买。"},
-    {"id": "national_day_happy", "name": "国庆快乐", "kind": "title", "category": "头衔类",
+    {"id": "national_day_happy", "name": "国庆快乐", "kind": "title", "category": "头衔",
      "subcategory": "史诗", "cost": 50, "limited_until": "2026-10-08",
      "cloud_only": True,
      "description": "云端限定国庆节史诗头衔，限时销售至 2026-10-08，当天仍可购买。"},
     {"id": "neon_comment_frame", "name": "霓虹名片框", "kind": "decoration",
-     "category": "物品类", "subcategory": "外观装饰", "cost": 120,
+     "category": "名片框", "subcategory": "稀有", "cost": 120,
      "cloud_only": True, "appearance": "comment_frame",
      "asset": "neon_comment_frame", "asset_source": "builtin",
+     "rarity": "稀有", "effect_style": "neon",
      "description": "固定内置霓虹边框，装备后展示在个人页和你的公开评论卡片上；不支持上传自定义图片。"},
+    {"id": "avatar_frame_cyber_neon", "name": "赛博霓虹", "kind": "decoration",
+     "category": "头像框", "subcategory": "稀有", "cost": 120,
+     "cloud_only": True, "appearance": "avatar_frame",
+     "asset": "avatar_frame_cyber_neon", "asset_source": "builtin",
+     "rarity": "稀有", "effect_style": "cyber_neon",
+     "description": "稀有级内置头像框，以冷色霓虹光轨和电子刻线勾勒头像轮廓；装备后在个人页与公开评论中展示，不支持上传图片。"},
+    {"id": "avatar_frame_dark_rose", "name": "暗夜黑蔷薇", "kind": "decoration",
+     "category": "头像框", "subcategory": "史诗", "cost": 180,
+     "cloud_only": True, "appearance": "avatar_frame",
+     "asset": "avatar_frame_dark_rose", "asset_source": "builtin",
+     "rarity": "史诗", "effect_style": "dark_rose",
+     "description": "史诗级内置头像框，以暗色花瓣、蔷薇轮廓与低调红光营造夜色质感；装备后在个人页与公开评论中展示，不支持上传图片。"},
 ]
+
+
+def collectible_appearance_ids():
+    """Return sorted, unique IDs for every collectible title and decoration.
+
+    The default title is not a collectible. Utility products such as rename
+    cards and the daily lottery are intentionally excluded.
+    """
+    ids = {
+        title["id"] for title in TITLES
+        if title.get("id") != DEFAULT_TITLE_ID
+    }
+    ids.update(
+        item["id"] for item in SHOP_ITEMS
+        if item.get("kind") == "decoration"
+    )
+    return sorted(ids)
 
 # 固定兑换码（暂无）。「群友」头衔改用每日轮换码（见 group_code），不再用固定字符串，
 # 免得某个码泄露后被长期复用。

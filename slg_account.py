@@ -37,7 +37,7 @@ class SessionExpired(AccountError):
 
 _BASE = SERVER_BASE.rstrip("/")
 _TIMEOUT = 10
-_USER_AGENT = "SLGKing/0.23.3 (+https://slg-king.com; desktop client)"
+_USER_AGENT = "SLGKing/0.23.8 (+https://slg-king.com; desktop client)"
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _DEVELOPER_MODE = False
 
@@ -232,20 +232,28 @@ def developer_login(developer_key):
     return result
 
 
-def developer_grant_all_titles(developer_key):
-    """Grant all titles to the fixed owner account using its owner key."""
+def developer_grant_all_appearances(developer_key):
+    """Grant all collectible appearances to the fixed owner account."""
     if not _DEVELOPER_MODE:
         raise AccountError("仅开发者身份可以解锁全部头衔")
     if not isinstance(developer_key, str) or not developer_key.strip():
         raise AccountError("未找到本机开发者密钥")
     result = request(
-        "/account/developer/titles/grant-all", method="POST", payload={},
+        "/account/developer/appearances/grant-all", method="POST", payload={},
         extra_headers={"X-SLG-Developer-Key": developer_key.strip()})
     if (not isinstance(result, dict)
             or result.get("account_id") != "developer"
             or not isinstance(result.get("titles"), list)):
         raise AccountError("服务器未返回完整的开发者头衔状态")
+    if not isinstance(result.get("items"), list):
+        # Older server responses exposed the full owned-ID list as `titles`.
+        result["items"] = result["titles"]
     return result
+
+
+def developer_grant_all_titles(developer_key):
+    """Backward-compatible client alias for all appearance unlocks."""
+    return developer_grant_all_appearances(developer_key)
 
 
 _LEGACY_SOURCE_PREF = "cloud.legacy_migration_source"
@@ -412,9 +420,53 @@ def equip_cosmetic(cosmetic_id):
                          payload={"cosmetic_id": cosmetic_id})
 
 
-def update_profile(nickname):
-    return authenticated("/account/profile", method="POST", payload={
-        "nickname": nickname.strip()})
+def equip_appearance(slot, item_id):
+    """Equip or clear one cloud appearance slot (empty item_id clears it)."""
+    if slot not in ("avatar_frame", "comment_frame"):
+        raise AccountError("装扮部位无效")
+    if not isinstance(item_id, str) or len(item_id) > 80:
+        raise AccountError("装扮编号无效")
+    return authenticated("/account/equip", method="POST", payload={
+        "appearance_slot": slot, "item_id": item_id})
+
+
+def leaderboard(board="points", limit=30):
+    """Read a public, bounded leaderboard without requiring an account session."""
+    if board not in ("points", "titles", "wardrobe"):
+        raise AccountError("排行榜类型无效")
+    if isinstance(limit, bool):
+        raise AccountError("排行榜数量无效")
+    if isinstance(limit, int):
+        limit_text = str(limit)
+    elif isinstance(limit, str) and limit and all(ch in "0123456789" for ch in limit):
+        limit_text = limit
+    else:
+        raise AccountError("排行榜数量无效")
+    limit_value = int(limit_text)
+    if limit_value < 1 or limit_value > 30:
+        raise AccountError("排行榜数量必须在 1 到 30 之间")
+    query = urllib.parse.urlencode({"board": board, "limit": limit_value})
+    return request("/community/leaderboard?" + query)
+
+
+def update_profile(nickname=None, profile_message=None):
+    payload = {}
+    if nickname is not None:
+        if not isinstance(nickname, str):
+            raise AccountError("nickname must be text")
+        payload["nickname"] = nickname.strip()
+    if profile_message is not None:
+        if not isinstance(profile_message, str):
+            raise AccountError("profile message must be text")
+        payload["profile_message"] = profile_message
+    if not payload:
+        raise AccountError("no profile fields to update")
+    return authenticated("/account/profile", method="POST", payload=payload)
+
+
+def update_profile_message(profile_message):
+    """Set or clear the server-stored public namecard message."""
+    return update_profile(profile_message=profile_message)
 
 
 def maintenance_reward_status():
