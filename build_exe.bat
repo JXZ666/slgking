@@ -9,7 +9,7 @@ cd /d "%~dp0"
 REM Two channels: "build_exe.bat" builds the stable slgking.exe, and
 REM "build_exe.bat test" builds the personal slgking_test.exe. The spec reads
 REM SLGKING_EXE_NAME to pick the name; the version string inside each exe is
-REM whatever slg_gui.APP_VERSION is on the current branch.
+REM APP_VERSION or TEST_APP_VERSION is selected by the executable name.
 set "SLGKING_EXE_NAME=slgking"
 if /i "%~1"=="test" set "SLGKING_EXE_NAME=slgking_test"
 

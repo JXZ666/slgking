@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 REPO = "JXZ666/slgking"
 API_URL = "https://api.github.com/repos/%s/releases/latest" % REPO
 LATEST_URL = "https://github.com/%s/releases/latest" % REPO
-DEFAULT_FALLBACK = "0.23.8"
+DEFAULT_FALLBACK = "0.24.0"
 CACHE_SECONDS = 30 * 60
 RETRY_SECONDS = 5 * 60
 REQUEST_TIMEOUT = 5

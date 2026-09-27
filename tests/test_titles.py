@@ -75,12 +75,85 @@ class Catalogue(unittest.TestCase):
         self.assertIsNotNone(item)
         self.assertEqual(item["kind"], "decoration")
         self.assertEqual(item["category"], "名片框")
-        self.assertEqual(item["cost"], 120)
+        self.assertEqual(item["cost"], 150)
         self.assertTrue(item["cloud_only"])
         self.assertEqual(item["appearance"], "comment_frame")
         self.assertEqual(item["asset"], "neon_comment_frame")
         self.assertEqual(item["asset_source"], "builtin")
         self.assertIn("不支持上传", item["description"])
+
+    def test_new_cosmetic_catalog_entries_have_stable_metadata(self):
+        expected = {
+            "comment_frame_black_gold_member":
+                ("黑金会员", "名片框", "comment_frame", "传说", "black_gold", 500),
+            "comment_frame_sakura":
+                ("樱花", "名片框", "comment_frame", "稀有", "sakura", 150),
+            "comment_frame_mint":
+                ("薄荷", "名片框", "comment_frame", "普通", "mint", 80),
+            "comment_frame_deep_red_velvet":
+                ("深红丝绒", "名片框", "comment_frame", "史诗", "deep_red_velvet", 300),
+            "avatar_frame_gilded_laurel":
+                ("鎏金桂冠", "头像框", "avatar_frame", "传说", "gilded_laurel", 300),
+            "avatar_frame_glitch":
+                ("故障 Glitch", "头像框", "avatar_frame", "史诗", "glitch", 200),
+            "avatar_frame_startrail":
+                ("星轨", "头像框", "avatar_frame", "稀有", "startrail", 100),
+            "avatar_frame_pixel_8bit":
+                ("像素 8-bit", "头像框", "avatar_frame", "稀有", "pixel_8bit", 100),
+            "avatar_frame_blood_moon":
+                ("血月", "头像框", "avatar_frame", "传说", "blood_moon", 300),
+        }
+        items = {item["id"]: item for item in slg_titles.SHOP_ITEMS}
+        for item_id, (name, category, appearance, rarity, style, cost) in expected.items():
+            with self.subTest(item_id=item_id):
+                item = items[item_id]
+                self.assertEqual(item["name"], name)
+                self.assertEqual(item["kind"], "decoration")
+                self.assertEqual(item["category"], category)
+                self.assertEqual(item["subcategory"], rarity)
+                self.assertEqual(item["appearance"], appearance)
+                self.assertEqual(item["rarity"], rarity)
+                self.assertEqual(item["effect_style"], style)
+                self.assertEqual(item["asset"], item_id)
+                self.assertEqual(item["asset_source"], "builtin")
+                self.assertEqual(item["cost"], cost)
+                self.assertTrue(item["cloud_only"])
+
+    def test_permanent_cosmetic_prices_follow_rarity_and_match_title_catalog(self):
+        title_costs = {"普通": 50, "稀有": 100, "史诗": 200, "传说": 300}
+        frame_costs = {"普通": 80, "稀有": 150, "史诗": 300, "传说": 500}
+        titles = {title["id"]: title for title in slg_titles.TITLES}
+        for item in slg_titles.SHOP_ITEMS:
+            if item.get("kind") not in ("title", "decoration"):
+                continue
+            if item.get("limited_until"):
+                continue
+            with self.subTest(item_id=item["id"]):
+                if item["kind"] == "title":
+                    title = titles[item["id"]]
+                    rarity = title["rarity"]
+                    self.assertEqual(item["cost"], title_costs[rarity])
+                    self.assertEqual(title.get("cost"), item["cost"])
+                else:
+                    rarity = item["rarity"]
+                    expected_costs = (frame_costs if item["appearance"] == "comment_frame"
+                                      else title_costs)
+                    self.assertEqual(item["cost"], expected_costs[rarity])
+
+    def test_limited_and_non_cosmetic_prices_are_preserved(self):
+        items = {item["id"]: item for item in slg_titles.SHOP_ITEMS}
+        expected_costs = {
+            "first_release": 30,
+            "mid_autumn_happy": 50,
+            "national_day_happy": 50,
+            "rename_card": 100,
+            "daily_lottery": 5,
+        }
+        for item_id, cost in expected_costs.items():
+            with self.subTest(item_id=item_id):
+                self.assertEqual(items[item_id]["cost"], cost)
+        self.assertEqual(slg_titles.title_by_id("senior_user")["cost"], 100)
+        self.assertEqual(slg_titles.shop_item_by_id("senior_user")["cost"], 100)
 
     def test_lucky_star_is_epic_and_lottery_obtain(self):
         t = slg_titles.title_by_id("lucky_star")

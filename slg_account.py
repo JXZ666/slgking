@@ -42,6 +42,12 @@ _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _DEVELOPER_MODE = False
 
 
+def set_client_version(version):
+    """Identify the version of the executable that is actually running."""
+    global _USER_AGENT
+    _USER_AGENT = "SLGKing/%s (+https://slg-king.com; desktop client)" % version
+
+
 def set_developer_mode(enabled):
     """Select the owner identity for this running client process."""
     global _DEVELOPER_MODE
@@ -154,8 +160,14 @@ def request(path, method="GET", payload=None, token=None, extra_headers=None):
                                                 detail["error_code"])
         except (ValueError, OSError):
             msg = None
-        if exc.code == 404 and not msg:
-            raise ServerNotReady("服务器尚未部署 0.23 账号与评论接口") from exc
+        if exc.code == 404:
+            if path.startswith("/account/quests"):
+                # Old servers may send a JSON {"error": "not found"} body.
+                # Keep the explicit compatibility signal so the client hides
+                # its optional task panel instead of showing a broken one.
+                raise ServerNotReady("每日任务接口尚未部署") from exc
+            if not msg:
+                raise ServerNotReady("服务器尚未部署 0.23 账号与评论接口") from exc
         if exc.code == 401:
             if msg == "recovery required":
                 raise AccountError("新设备登录需要恢复码；请检查两串密钥") from exc
@@ -235,7 +247,7 @@ def developer_login(developer_key):
 def developer_grant_all_appearances(developer_key):
     """Grant all collectible appearances to the fixed owner account."""
     if not _DEVELOPER_MODE:
-        raise AccountError("仅开发者身份可以解锁全部头衔")
+        raise AccountError("仅开发者身份可以解锁全部装扮")
     if not isinstance(developer_key, str) or not developer_key.strip():
         raise AccountError("未找到本机开发者密钥")
     result = request(
@@ -244,7 +256,7 @@ def developer_grant_all_appearances(developer_key):
     if (not isinstance(result, dict)
             or result.get("account_id") != "developer"
             or not isinstance(result.get("titles"), list)):
-        raise AccountError("服务器未返回完整的开发者头衔状态")
+        raise AccountError("服务器未返回完整的开发者装扮状态")
     if not isinstance(result.get("items"), list):
         # Older server responses exposed the full owned-ID list as `titles`.
         result["items"] = result["titles"]
@@ -407,8 +419,13 @@ def buy(item_id):
     return authenticated("/account/shop/buy", method="POST", payload={"item_id": item_id})
 
 
-def lottery_draw():
-    return authenticated("/account/lottery/draw", method="POST", payload={})
+def lottery_draw(request_id=None):
+    """Commit one draw, reusing request_id when retrying an uncertain request."""
+    request_id = str(request_id or uuid.uuid4().hex).strip().lower()
+    if len(request_id) != 32 or any(c not in "0123456789abcdef" for c in request_id):
+        raise AccountError("invalid lottery request")
+    return authenticated("/account/lottery/draw", method="POST",
+                         payload={"request_id": request_id})
 
 
 def equip_title(title_id):
@@ -469,6 +486,19 @@ def update_profile_message(profile_message):
     return update_profile(profile_message=profile_message)
 
 
+def submit_feedback(category, content):
+    """Submit a private, authenticated note for the developer to review."""
+    if category not in ("bug", "suggestion", "data_correction", "other"):
+        raise AccountError("反馈类型无效")
+    if not isinstance(content, str):
+        raise AccountError("反馈内容必须是文字")
+    content = content.strip()
+    if not 20 <= len(content) <= 500:
+        raise AccountError("反馈内容需要填写 20–500 个字")
+    return authenticated("/account/feedback", method="POST", payload={
+        "category": category, "content": content})
+
+
 def maintenance_reward_status():
     """Read the one-time maintenance campaign status for the signed-in account."""
     return authenticated("/account/rewards/maintenance")
@@ -478,3 +508,34 @@ def claim_maintenance_reward(campaign_id):
     """Claim an active maintenance campaign; the server enforces idempotency."""
     return authenticated("/account/rewards/maintenance/claim", method="POST",
                          payload={"campaign_id": str(campaign_id)})
+
+
+def quests():
+    """Read the signed-in account's daily and weekly quest progress."""
+    return authenticated("/account/quests")
+
+
+def get_quests():
+    """Explicitly named alias for callers that prefer a getter."""
+    return quests()
+
+
+def claim_quest(quest_id):
+    """Ask the server to claim one completed quest."""
+    if not isinstance(quest_id, str) or not quest_id.strip() or len(quest_id) > 100:
+        raise AccountError("任务编号无效")
+    return authenticated("/account/quests/claim", method="POST",
+                         payload={"quest_id": quest_id.strip()})
+
+
+def report_rating_event(game_id, rating):
+    """Report a locally saved rating so the server can credit its quest."""
+    try:
+        game_id = int(game_id)
+        rating = int(rating)
+    except (TypeError, ValueError):
+        raise AccountError("评分记录无效")
+    if game_id <= 0 or rating < 1 or rating > 5:
+        raise AccountError("评分记录无效")
+    return authenticated("/account/quests/rating", method="POST",
+                         payload={"game_id": game_id, "rating": rating})

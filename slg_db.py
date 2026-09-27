@@ -19,6 +19,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
+from urllib.parse import urlparse
 
 STATUSES = ("want", "downloaded")
 STATUS_LABELS = {"want": "想玩", "downloaded": "已下载"}
@@ -104,6 +105,64 @@ CREATE TABLE IF NOT EXISTS state (
     note      TEXT,
     my_rating INTEGER,
     updated_at TEXT
+);
+
+-- One canonical game may be listed by several public catalogues. Keep each
+-- site's identity and fields separately so one source cannot silently replace
+-- another source's title, version, developer or overview. Internal-only source
+-- URLs (currently Zyoudao) stay out of list_game_sources(public_only=True) and
+-- are removed from the public catalogue snapshot before it is distributed.
+CREATE TABLE IF NOT EXISTS game_sources (
+    source_id        TEXT NOT NULL,
+    external_id      TEXT NOT NULL,
+    game_id          INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+    source_url       TEXT,
+    source_title     TEXT,
+    source_version   TEXT,
+    developer        TEXT,
+    engine           TEXT,
+    overview         TEXT,
+    tags_json        TEXT,
+    source_modified  TEXT,
+    fetched_at       TEXT NOT NULL,
+    content_hash     TEXT,
+    match_status     TEXT NOT NULL DEFAULT 'new',
+    match_confidence REAL,
+    suggested_game_id INTEGER,
+    PRIMARY KEY (source_id, external_id)
+);
+CREATE INDEX IF NOT EXISTS idx_game_sources_game
+    ON game_sources(game_id, source_id);
+
+-- Public, stable slug redirects created only after a curator confirms that a
+-- source row belongs to another catalogue game and no longer references the
+-- old row. Kept separate from game_sources so internal source records may be
+-- removed from the downloadable snapshot without losing comment compatibility.
+CREATE TABLE IF NOT EXISTS game_redirects (
+    old_slug       TEXT PRIMARY KEY,
+    canonical_slug TEXT NOT NULL
+);
+
+-- Client-only activation state. A downloaded redirect is active only after
+-- every known local reference was migrated without a conflict.
+CREATE TABLE IF NOT EXISTS catalog_redirects (
+    old_slug       TEXT PRIMARY KEY,
+    canonical_slug TEXT NOT NULL,
+    active         INTEGER NOT NULL DEFAULT 0
+);
+
+-- Crawl cursors/errors are operational state, not catalogue data. This table
+-- is intentionally removed from public snapshots.
+CREATE TABLE IF NOT EXISTS source_sync_state (
+    source_id    TEXT PRIMARY KEY,
+    mode         TEXT NOT NULL DEFAULT 'incremental',
+    cursor_page  INTEGER NOT NULL DEFAULT 1,
+    total_pages  INTEGER,
+    window_since TEXT,
+    last_success TEXT,
+    last_error   TEXT,
+    adapter_version INTEGER NOT NULL DEFAULT 0,
+    updated_at   TEXT NOT NULL
 );
 
 -- Version baseline for games the user wants but has not installed. The local
@@ -351,6 +410,12 @@ def session(path=None):
 
 def _migrate(conn):
     """Add columns that CREATE TABLE IF NOT EXISTS will not add to an old db."""
+    source_state_cols = {row["name"] for row in conn.execute(
+        "PRAGMA table_info(source_sync_state)")}
+    if "adapter_version" not in source_state_cols:
+        conn.execute("ALTER TABLE source_sync_state ADD COLUMN adapter_version"
+                     " INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
     # 账本封印列。老档补成 NULL：封印链是「链开始之前的历史行一律信任」，
     # 所以升级上来的存档不会因为一次升级就变成「被外部修改」。
     for table in _LEDGER_TABLES:
@@ -424,6 +489,7 @@ def _migrate(conn):
         conn.commit()
     # 评价 merges into the comment list (see migrate_notes_to_comments).
     migrate_notes_to_comments(conn)
+    _backfill_dikgame_sources(conn)
 
 
 def _repair_site_suffixed_translations(conn):
@@ -459,6 +525,155 @@ def _repair_site_suffixed_translations(conn):
 
 def _now():
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _source_host(source_id):
+    return {
+        "dikgames": "dikgames.com",
+        "f95zone": "f95zone.to.it",
+        "zyoudao": "zyoudao.net",
+    }.get(str(source_id or "").casefold())
+
+
+def _safe_source_url(source_id, value):
+    """Accept only an HTTPS URL on the fixed host assigned to this source."""
+    if not value:
+        return None
+    try:
+        parsed = urlparse(str(value).strip())
+        port = parsed.port
+    except ValueError:
+        return None
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    expected = _source_host(source_id)
+    if expected and host == "www." + expected:
+        host = expected
+        parsed = parsed._replace(netloc=host)
+    elif expected and port == 443:
+        parsed = parsed._replace(netloc=host)
+    if (parsed.scheme != "https" or host != expected or
+            parsed.username or parsed.password or
+            port not in (None, 443)):
+        return None
+    return parsed._replace(query="", fragment="").geturl()[:2048]
+
+
+def _source_text(value, maximum):
+    if value is None:
+        return None
+    text = " ".join(str(value).replace("\x00", " ").split())
+    return text[:maximum] or None
+
+
+def upsert_game_source(conn, source_id, external_id, game_id, source_url=None,
+                       source_title=None, source_version=None, developer=None,
+                       engine=None, overview=None, tags=(), source_modified=None,
+                       content_hash=None, match_status="new",
+                       match_confidence=None, suggested_game_id=None):
+    """Store bounded per-source metadata without overwriting canonical fields."""
+    source_id = _source_text(source_id, 32)
+    external_id = _source_text(external_id, 128)
+    if source_id not in ("dikgames", "f95zone", "zyoudao") or not external_id:
+        raise ValueError("unknown catalogue source identity")
+    if conn.execute("SELECT 1 FROM games WHERE id = ?", (game_id,)).fetchone() is None:
+        raise ValueError("source mapping references a missing game")
+    labels = [str(tag).strip()[:48] for tag in (tags or ()) if str(tag).strip()]
+    tags_json = json.dumps(list(dict.fromkeys(labels[:24])), ensure_ascii=False,
+                           separators=(",", ":")) if labels else None
+    statuses = {"new", "strong_match", "review_candidate", "manual_match",
+                "manual_distinct"}
+    if match_status not in statuses:
+        match_status = "new"
+    confidence = None
+    if match_confidence is not None:
+        try:
+            confidence = max(0.0, min(1.0, float(match_confidence)))
+        except (TypeError, ValueError):
+            confidence = None
+    conn.execute(
+        "INSERT INTO game_sources (source_id, external_id, game_id, source_url,"
+        " source_title, source_version, developer, engine, overview, tags_json,"
+        " source_modified, fetched_at, content_hash, match_status,"
+        " match_confidence, suggested_game_id)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(source_id, external_id) DO UPDATE SET"
+        " game_id=excluded.game_id,"
+        " source_url=COALESCE(excluded.source_url,game_sources.source_url),"
+        " source_title=COALESCE(excluded.source_title,game_sources.source_title),"
+        " source_version=COALESCE(excluded.source_version,game_sources.source_version),"
+        " developer=COALESCE(excluded.developer,game_sources.developer),"
+        " engine=COALESCE(excluded.engine,game_sources.engine),"
+        " overview=COALESCE(excluded.overview,game_sources.overview),"
+        " tags_json=COALESCE(excluded.tags_json,game_sources.tags_json),"
+        " source_modified=COALESCE(excluded.source_modified,game_sources.source_modified),"
+        " fetched_at=excluded.fetched_at,"
+        " content_hash=COALESCE(excluded.content_hash,game_sources.content_hash),"
+        " match_status=excluded.match_status,"
+        " match_confidence=excluded.match_confidence,"
+        " suggested_game_id=excluded.suggested_game_id",
+        (source_id, external_id, game_id,
+         _safe_source_url(source_id, source_url),
+         _source_text(source_title, 300), _source_text(source_version, 100),
+         _source_text(developer, 160), _source_text(engine, 100),
+         _source_text(overview, 1600), tags_json,
+         _source_text(source_modified, 64), _now(),
+         _source_text(content_hash, 64), match_status, confidence,
+         suggested_game_id))
+
+
+def _backfill_dikgame_sources(conn):
+    """Idempotently map old Dikgames catalogue rows to their source identity."""
+    changed = False
+    for row in conn.execute(
+            "SELECT g.id, g.slug, g.url, g.title, g.version, g.developer,"
+            " g.engine, g.overview FROM games g WHERE g.origin = 'site'"
+            " AND NOT EXISTS (SELECT 1 FROM game_sources gs"
+            " WHERE gs.source_id='dikgames' AND gs.external_id=g.slug)"
+            ).fetchall():
+        url = _safe_source_url("dikgames", row["url"])
+        if not url:
+            continue
+        upsert_game_source(
+            conn, "dikgames", row["slug"], row["id"], source_url=url,
+            source_title=row["title"], source_version=row["version"],
+            developer=row["developer"], engine=row["engine"],
+            overview=row["overview"], match_status="strong_match",
+            match_confidence=1.0)
+        changed = True
+    if changed:
+        conn.commit()
+
+
+def list_game_sources(conn, game_id, public_only=True):
+    """Return safe external destinations; Zyoudao is never returned publicly."""
+    rows = conn.execute(
+        "SELECT source_id, source_url FROM game_sources WHERE game_id=?"
+        " ORDER BY CASE source_id WHEN 'dikgames' THEN 0"
+        " WHEN 'f95zone' THEN 1 ELSE 2 END", (game_id,)).fetchall()
+    allowed = ({"dikgames", "f95zone"} if public_only else
+               {"dikgames", "f95zone", "zyoudao"})
+    labels = {"dikgames": "Dikgames", "f95zone": "F95zone.to.it",
+              "zyoudao": "Zyoudao"}
+    result, seen = [], set()
+    for row in rows:
+        source_id = row["source_id"]
+        if source_id not in allowed:
+            continue
+        url = _safe_source_url(source_id, row["source_url"])
+        if not url or (source_id, url) in seen:
+            continue
+        seen.add((source_id, url))
+        result.append({"source_id": source_id, "label": labels[source_id],
+                       "url": url})
+    if not any(item["source_id"] == "dikgames" for item in result):
+        game = conn.execute(
+            "SELECT origin, url FROM games WHERE id=?", (game_id,)).fetchone()
+        if game and game["origin"] == "site":
+            url = _safe_source_url("dikgames", game["url"])
+            if url:
+                result.insert(0, {"source_id": "dikgames",
+                                  "label": labels["dikgames"], "url": url})
+    return result
 
 
 # --- catalogue -----------------------------------------------------------------
@@ -501,6 +716,12 @@ def upsert_game(conn, slug, url, title, version=None, developer=None,
             (url, title, version, developer, engine,
              rating, last_updated, int(bool(complete)), now, lastmod, game_id))
     set_tags(conn, game_id, tags)
+    if _safe_source_url("dikgames", url):
+        upsert_game_source(
+            conn, "dikgames", slug, game_id, source_url=url,
+            source_title=title, source_version=version, developer=developer,
+            engine=engine, match_status="strong_match",
+            match_confidence=1.0)
     return game_id, created
 
 
@@ -769,7 +990,8 @@ def upsert_detail(conn, game_id, rating=None, version=None, developer=None,
 
 def find_games(conn, include=(), exclude=(), search=None, statuses=None,
                downloaded_only=False, collection_id=None,
-               origin="main", sort="score", desc=True):
+               origin="main", sort="score", desc=True,
+               translation_ids=None):
     """Games matching a tag intersection (include) minus a tag union (exclude).
 
     include is an AND: every tag listed must be present. exclude is a NOT:
@@ -781,6 +1003,11 @@ def find_games(conn, include=(), exclude=(), search=None, statuses=None,
       None   - no origin filter (maintenance paths that need every row).
     """
     where, params = [], []
+    # Safe catalogue redirects preserve the old row for recovery, but expose
+    # only its canonical card in normal library queries. Conflicting redirects
+    # are recorded inactive and therefore leave both rows visible.
+    where.append("NOT EXISTS (SELECT 1 FROM catalog_redirects cr"
+                 " WHERE cr.old_slug = g.slug AND cr.active = 1)")
 
     if origin == "main":
         where.append("(g.origin = 'site' OR g.promoted = 1)")
@@ -807,11 +1034,25 @@ def find_games(conn, include=(), exclude=(), search=None, statuses=None,
         # External/local alternate names are searchable too. This also makes
         # curator-approved Chinese aliases useful without replacing the
         # canonical title used by sync, comments, and local user state.
-        where.append(
-            "(g.title LIKE ? OR EXISTS (SELECT 1 FROM game_aliases a"
-            " WHERE a.game_id = g.id AND a.alias LIKE ?))")
+        search_parts = [
+            "g.title LIKE ?",
+            "EXISTS (SELECT 1 FROM game_aliases a"
+            " WHERE a.game_id = g.id AND a.alias LIKE ?)",
+        ]
         pattern = "%" + search + "%"
         params.extend((pattern, pattern))
+        if translation_ids:
+            # The caller supplies IDs found through title_translations(), which
+            # applies the source-hash check for machine translations and gives
+            # manual names precedence. Pass the set as one JSON parameter so a
+            # one-character query cannot exceed SQLite's host-parameter limit.
+            search_parts.append(
+                "g.id IN (SELECT CAST(value AS INTEGER) FROM json_each(?))")
+            params.append(json.dumps(sorted({int(game_id)
+                                            for game_id in translation_ids
+                                            if _int_or_none(game_id) is not None}))
+                          )
+        where.append("(" + " OR ".join(search_parts) + ")")
 
     if statuses:
         qmarks = ",".join("?" * len(statuses))
@@ -1225,6 +1466,27 @@ def title_translations(conn, lang=TAG_LANG):
     return both
 
 
+def title_translation_game_ids(conn, query, lang=TAG_LANG):
+    """Game IDs whose current Chinese title translation contains ``query``.
+
+    Reuse title_translations() so stale machine translations whose source title
+    changed are excluded, while hand-written translations take precedence.
+    Matching is literal and case-insensitive; SQL wildcard characters in the
+    query therefore have no special meaning. An empty query returns no IDs.
+    """
+    needle = str(query or "").strip().casefold()
+    if not needle:
+        return set()
+
+    matches = set()
+    for ref, (translated, _engine) in title_translations(conn, lang).items():
+        if needle in str(translated or "").casefold():
+            game_id = _int_or_none(ref)
+            if game_id is not None:
+                matches.add(game_id)
+    return matches
+
+
 def _int_or_none(text):
     try:
         return int(text)
@@ -1577,7 +1839,28 @@ _USER_GAME_COLS = (
 def _game_id_by_slug(conn, slug):
     if not slug:
         return None
-    row = conn.execute("SELECT id FROM games WHERE slug = ?", (slug,)).fetchone()
+    # User backups created before a catalogue merge can still refer to a
+    # source slug that is now hidden behind an active redirect. Restore those
+    # references to the canonical game so they do not disappear into the
+    # retained recovery row.
+    original = str(slug)
+    current = original
+    seen = set()
+    while current and current not in seen:
+        seen.add(current)
+        redirect = conn.execute(
+            "SELECT canonical_slug FROM catalog_redirects"
+            " WHERE old_slug=? AND active=1", (current,)).fetchone()
+        if not redirect or not redirect[0]:
+            break
+        current = str(redirect[0])
+    if current in seen and current != original:
+        # A corrupt redirect cycle must never re-key backup data unpredictably.
+        if conn.execute(
+                "SELECT 1 FROM catalog_redirects WHERE old_slug=? AND active=1",
+                (current,)).fetchone():
+            current = original
+    row = conn.execute("SELECT id FROM games WHERE slug = ?", (current,)).fetchone()
     return row["id"] if row else None
 
 
@@ -1665,12 +1948,10 @@ def _import_game_rows(conn, table, records):
     if not records:
         return
     cols = dict(_BACKUP_TABLES)[table]
-    id_map = {r["slug"]: r["id"]
-              for r in conn.execute("SELECT id, slug FROM games")}
     qmarks = ",".join("?" * len(cols))
     rows = []
     for rec in records:
-        gid = id_map.get(rec.get("game_slug"))
+        gid = _game_id_by_slug(conn, rec.get("game_slug"))
         if gid is None:
             continue
         rows.append(tuple(gid if c == "game_id" else rec.get(c) for c in cols))
@@ -1737,7 +2018,8 @@ _PRIVATE_TABLES = (
     "state", "collections", "collection_items", "comments", "prefs",
     "exclusions", "local", "game_aliases", "weights", "affinities",
     "sync_log", "translations", "manual_translations",
-    "points_log", "signin", "owned_titles",
+    "points_log", "signin", "owned_titles", "source_sync_state",
+    "wishlist_version_seen", "catalog_redirects", "pending_game_redirects",
 )
 
 
@@ -1757,6 +2039,10 @@ def strip_to_site_catalogue(db_path):
         cols = {r[1] for r in conn.execute("PRAGMA table_info(games)")}
         if "origin" in cols:
             conn.execute("DELETE FROM games WHERE origin IS NULL OR origin != 'site'")
+        source_cols = {r[1] for r in conn.execute("PRAGMA table_info(game_sources)")}
+        if source_cols:
+            conn.execute("DELETE FROM game_sources WHERE game_id NOT IN"
+                         " (SELECT id FROM games)")
         conn.execute("DELETE FROM game_tags WHERE game_id NOT IN (SELECT id FROM games)")
         conn.execute("DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM game_tags)")
         conn.commit()
@@ -1767,7 +2053,7 @@ def strip_to_site_catalogue(db_path):
 
 # --- preference weights --------------------------------------------------------
 
-def recompute_weights(conn):
+def recompute_weights(conn, commit=True):
     """Derive per-tag weights and per-developer/engine affinities from ratings.
 
     Each rated game contributes (rating - 3) to every tag it carries, and to its
@@ -1800,7 +2086,8 @@ def recompute_weights(conn):
           r["n"]) for r in rows])
     _recompute_affinity(conn, "developer")
     _recompute_affinity(conn, "engine")
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def _recompute_affinity(conn, kind):

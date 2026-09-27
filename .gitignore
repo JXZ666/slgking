@@ -53,3 +53,27 @@ tests/test_serve_catalog.py
 tests/test_deploy.py
 tests/test_cloud_store.py
 tests/test_moderation.py
+
+# Server-only additions for 0.24.0. Keep operational code and its test fixtures
+# out of the public desktop-client repository.
+slg_sources.py
+slg_source_covers.py
+slg_source_review_ai.py
+requirements-server.txt
+admin-manifest.json
+admin-sw.js
+assets/admin/
+tests/test_catalog_redirects.py
+tests/test_cloud_quests.py
+tests/test_f95_categories.py
+tests/test_server_admin_auth.py
+tests/test_source_review_api.py
+tests/test_source_review_assistant.py
+tests/test_zyoudao_covers.py
+tests/test_zyoudao_ingest_covers.py
+tests/test_zyoudao_metadata.py
+tools/source_review_assistant.py
+
+# Local install/cache experiments are not application source.
+pip/
+$TaskJsPath

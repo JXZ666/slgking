@@ -15,6 +15,7 @@ import math
 import os
 import queue
 import random
+import sqlite3
 import sys
 import subprocess
 import tempfile
@@ -23,9 +24,11 @@ import time
 import tkinter as tk
 import tkinter.font as tkfont
 import traceback
+import uuid
 import webbrowser
 from datetime import date, datetime, timedelta, timezone
 from tkinter import filedialog, messagebox
+from urllib.parse import urlsplit
 
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageTk
@@ -39,6 +42,7 @@ import slg_comments
 import slg_account
 import slg_db
 import slg_engines
+from slg_game_labels import format_game_label
 import slg_remote
 import slg_scrape
 import slg_titles
@@ -46,8 +50,8 @@ import slg_translate
 import slg_update
 import slg_util
 
-APP_VERSION = "0.23.8"
-TEST_APP_VERSION = "0.23.8"
+APP_VERSION = "0.24.0"
+TEST_APP_VERSION = "0.24.0"
 
 
 def display_app_version():
@@ -63,6 +67,7 @@ def display_app_version():
 # timestamp in the corner of every screen was answering a question the user
 # asks once.
 APP_VERSION_LABEL = "v" + display_app_version()
+slg_account.set_client_version(display_app_version())
 APP_TITLE = "SLG黄游之王"
 AUTHOR = "菊千代赛高"
 GITHUB_URL = "https://github.com/JXZ666"
@@ -77,7 +82,8 @@ QQ_GROUP_COPY_LABEL = "交流群 %s · 群内每日码兑 +10积分" % QQ_GROUP
 # comes from, and two copies of that URL is one copy that goes stale.
 SITE_URL = slg_scrape.BASE
 ADMIN_URL = "https://slg-king.com/admin/"
-SITE_LABEL = "数据来源 · dikgames.com"
+SITE_LABEL = "数据来源"
+F95_SOURCE_URL = "https://f95zone.to.it/genres/"
 # The site is English-first and most games ship untranslated; pointing users at
 # LunaTranslator (real-time machine translation) plus the author's own RenPy
 # tooling is the one referral that both helps and fits the "retrieval only" line.
@@ -86,6 +92,81 @@ LUNA_LABEL = "露娜翻译器 LunaTranslator"
 RPYKIT_URL = "https://github.com/JXZ666/SLG-Renpy-Toolkit"
 RPYKIT_LABEL = "RenPy 汉化小工具 · SLG-Renpy-Toolkit"
 PREF_THEME = "theme"
+PREF_UI_SCALE = "ui.scale_profile"
+UI_SCALE_PROFILES = {
+    "auto": {"label": "自动（跟随系统）", "factor": 1.0},
+    "1366x768": {"label": "1366×768（紧凑，90%）", "factor": 0.90},
+    "1920x1080": {"label": "1920×1080（标准，100%）", "factor": 1.0},
+    "2560x1440": {"label": "2560×1440（宽屏，115%）", "factor": 1.15},
+    "3840x2160": {"label": "3840×2160（4K，130%）", "factor": 1.30},
+}
+UI_SCALE_LABEL_TO_PROFILE = {
+    entry["label"]: key for key, entry in UI_SCALE_PROFILES.items()}
+
+
+def normalize_ui_scale_profile(profile):
+    """Return a known UI scale profile, defaulting safely to system DPI."""
+    profile = str(profile or "auto").strip().lower()
+    return profile if profile in UI_SCALE_PROFILES else "auto"
+
+
+def ui_scale_factor(profile):
+    """Manual multiplier on top of CustomTkinter's detected system DPI.
+
+    Fonts use ui_font() at their normal logical size; CustomTkinter applies the
+    resulting widget scale once. This factor is not baked into ui_font sizes.
+    """
+    return float(UI_SCALE_PROFILES[normalize_ui_scale_profile(profile)]["factor"])
+
+
+def ui_scale_multipliers(profile, system_window_dpi, system_widget_dpi):
+    """Compute CTk manual factors that reach the profile's effective scale.
+
+    CustomTkinter reports effective scaling as detected monitor DPI multiplied
+    by its global manual factor. Divide by the detected DPI here so selecting a
+    profile on a 150%/200% desktop does not multiply the OS scale a second time.
+    """
+    profile = normalize_ui_scale_profile(profile)
+    if profile == "auto":
+        return 1.0, 1.0
+
+    def safe_dpi(value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = 1.0
+        return value if math.isfinite(value) and value > 0 else 1.0
+
+    target = ui_scale_factor(profile)
+    return (max(0.4, target / safe_dpi(system_widget_dpi)),
+            max(0.4, target / safe_dpi(system_window_dpi)))
+
+
+def load_ui_scale_profile(conn):
+    return normalize_ui_scale_profile(
+        slg_db.get_pref(conn, PREF_UI_SCALE, "auto"))
+
+
+def clamp_scaled_size(width, height, scale, screen_width, screen_height,
+                      margin=48, min_width=700, min_height=480):
+    """Clamp logical window dimensions to a physical usable-screen rectangle."""
+    try:
+        scale = float(scale)
+    except (TypeError, ValueError):
+        scale = 1.0
+    if not math.isfinite(scale) or scale <= 0:
+        scale = 1.0
+    usable_width = max(320, int(screen_width) - int(margin))
+    usable_height = max(240, int(screen_height) - int(margin))
+    max_width = max(1, int(usable_width / scale))
+    max_height = max(1, int(usable_height / scale))
+    min_width = min(max_width, max(1, int(min_width)))
+    min_height = min(max_height, max(1, int(min_height)))
+    width = min(max(int(width), min_width), max_width)
+    height = min(max(int(height), min_height), max_height)
+    return width, height
+
+
 PREF_FREE_NOTICE = "free_notice_seen"
 # First-launch onboarding: shown once, then reachable again from 设置.
 PREF_WELCOME_SEEN = "welcome_seen"
@@ -562,6 +643,14 @@ def display_title(game):
     return text or game["title"]
 
 
+def display_game_label(game, title=None):
+    """Show a translated or original title with its available metadata."""
+    title = display_title(game) if title is None else title
+    # Catalogue rows are sqlite3.Row objects: they support keyed access but
+    # do not implement dict.get(). Let the shared formatter read them directly.
+    return format_game_label(game, title=title)
+
+
 def build_stamp():
     """Version, channel and build time, for the 关于 page.
 
@@ -660,6 +749,26 @@ def flow_rows(widths, available, gap=4):
         used += width
         out.append(row)
     return out
+
+
+def detail_overview_wraplength(actual_width, window_scale=1.0):
+    """Fit description wrapping to the detail box in CustomTkinter units.
+
+    Configure events report device pixels; wraplength is scaled by
+    CustomTkinter. Convert with the window's Windows/display scaling factor so
+    4K at 200% behaves like its 1920px logical desktop.
+    """
+    try:
+        scale = float(window_scale)
+    except (TypeError, ValueError):
+        scale = 1.0
+    if not math.isfinite(scale) or scale <= 0:
+        scale = 1.0
+    try:
+        width = max(0, int(actual_width))
+    except (TypeError, ValueError):
+        width = 0
+    return max(120, int(width / scale) - 24)
 
 
 def reel_geometry(cell=52, rows=3, pad=4, slots=14):
@@ -1155,10 +1264,14 @@ class App(ctk.CTk):
         self.theme_mode = slg_db.get_pref(self.conn, PREF_THEME, "system") or "system"
         if self.theme_mode not in _THEME_LABELS:   # hand-edited db, not worth a crash
             self.theme_mode = "system"
+        self.ui_scale_profile = load_ui_scale_profile(self.conn)
+        self._apply_ui_scale_profile(
+            self.ui_scale_profile, persist=False, resize_main=False)
         ctk.set_appearance_mode(self.theme_mode)
         apply_palette(resolved_theme(self.theme_mode))
         self._sys_theme = resolved_theme(self.theme_mode)
         self.configure(fg_color=BG)
+        self._resize_main_for_ui_scale()
         if notify:
             self._splash = _Splash(self)
             self._splash.step("正在加载数据库…", 0.2)
@@ -1263,10 +1376,23 @@ class App(ctk.CTk):
         # from it; both start empty and fill in a few seconds after launch.
         self._remote_config = {}
         self._remote_flags = {}
+        self._remote_config_loaded = False
+        self._announcement_reward_prompted = False
         self._maintenance_reward_status = None
         self._maintenance_reward_fetching = False
         self._announcement_reward_label = None
         self._announcement_claim_button = None
+        self._quest_generation = 0
+        self._quests_supported = None
+        self._quests_fetching = False
+        self._quests_data = None
+        self._quests_error = None
+        self._quest_claiming = None
+        self._quest_panel = None
+        self._quest_status_label = None
+        self._quest_retry_button = None
+        self._quest_rows = None
+        self._quest_claim_buttons = {}
         self._cloud_create_pending = False
         self._cloud_create_button = None
         self._cloud_login_button = None
@@ -1963,7 +2089,7 @@ class App(ctk.CTk):
         ctk.CTkButton(inner, text=SITE_LABEL, height=28, corner_radius=6,
                       fg_color="transparent", text_color=ACCENT,
                       hover_color=CARD_HOVER, font=ui_font(size=12),
-                      command=lambda: webbrowser.open(SITE_URL)
+                      command=self.open_data_sources
                       ).pack(side="left", pady=6)
 
     def _on_theme_pick(self, label):
@@ -2267,12 +2393,15 @@ class App(ctk.CTk):
         resolving a click, counting pages) go on meaning what they meant.
         """
         self._render_filterbar()
+        translation_ids = (slg_db.title_translation_game_ids(self.conn, self.search)
+                           if self.search else None)
         self.rows = slg_db.find_games(
             self.conn, include=self.include, exclude=self.exclude,
             search=self.search or None,
             statuses=[self.view] if self.view else None,
             downloaded_only=False, collection_id=self.collection_id,
-            origin=self.origin, sort=self.sort, desc=self.sort_desc)
+            origin=self.origin, sort=self.sort, desc=self.sort_desc,
+            translation_ids=translation_ids)
         self._refresh_wishlist_notice()
         # A filter or a sort handler sets page 1 already; this is for the other
         # way the set can shrink - the tick after a sync emptied the tail, or a
@@ -2749,9 +2878,7 @@ class App(ctk.CTk):
         selected = self.selected is not None and game["id"] == self.selected["id"]
         self._paint_slot(slot, selected)
         slot["img"].configure(image=load_cover(game))
-        title = display_title(game)
-        if game["version"]:
-            title += "  v%s" % game["version"]
+        title = display_game_label(game)
         slot["title"].configure(text=title)
         slot["meta"].configure(text=meta_text(game),
                                fg=ACCENT if game["complete"] else MUTED)
@@ -2782,9 +2909,7 @@ class App(ctk.CTk):
         label = self._card_title.get(game["id"])
         if label is None or not label.winfo_exists():
             return
-        title = display_title(game)
-        if game["version"]:
-            title += "  v%s" % game["version"]
+        title = display_game_label(game)
         label.configure(text=title)
 
     def _paint_card(self, game_id, selected):
@@ -2918,7 +3043,7 @@ class App(ctk.CTk):
         add("title_note", note, fill="x", padx=18, pady=(2, 0))
 
         order.extend(self._detail_action(
-            d, parts, "url", "在浏览器打开 dikgames 页面", pady=(10, 4)))
+            d, parts, "url", "跳转到外部站点", pady=(10, 4)))
 
         order.extend(self._build_detail_back_profile(d, parts))
         order.extend(self._build_detail_launch(d, parts))
@@ -2995,6 +3120,114 @@ class App(ctk.CTk):
                 widget.pack(**pack)
         self._detail_shown = keys
 
+    @staticmethod
+    def _public_game_source_url(url):
+        """Return a safe public catalogue URL, or None for any other host."""
+        if not isinstance(url, str) or not url.strip():
+            return None
+        try:
+            parsed = urlsplit(url.strip())
+            host = (parsed.hostname or "").lower().rstrip(".")
+            if (parsed.scheme.lower() != "https" or not parsed.netloc
+                    or parsed.username or parsed.password
+                    or parsed.port not in (None, 443)):
+                return None
+        except (TypeError, ValueError):
+            return None
+        if host not in {
+                "dikgames.com", "www.dikgames.com",
+                "f95zone.to.it", "www.f95zone.to.it"}:
+            return None
+        return url.strip()
+
+    def _external_game_sources(self, game):
+        """Read public source rows; keep old catalogs working via games.url.
+
+        Zyoudao is intentionally excluded from user-facing links. The source
+        API is additive, so an older local database can safely fall back to its
+        original Dikgames URL.
+        """
+        sources = []
+        seen_hosts = set()
+        loader = getattr(slg_db, "list_game_sources", None)
+        if callable(loader):
+            try:
+                rows = loader(self.conn, game.get("id"), public_only=True) or []
+            except Exception:
+                rows = []
+            for row in rows:
+                try:
+                    item = dict(row)
+                    source_id = str(item.get("source_id", "")).strip().lower()
+                    if "zyoudao" in source_id or "zyoudao.net" in str(
+                            item.get("url", "")).lower():
+                        continue
+                    target = self._public_game_source_url(item.get("url"))
+                    if not target:
+                        continue
+                    host = urlsplit(target).hostname.lower().rstrip(".")
+                    label = ("Dikgames" if host.endswith("dikgames.com")
+                             else "F95zone.to.it")
+                    # The chooser represents sites. Multiple records from one
+                    # site must not turn into several indistinguishable buttons.
+                    site_key = "dikgames" if host.endswith("dikgames.com") else "f95zone"
+                    if site_key not in seen_hosts:
+                        seen_hosts.add(site_key)
+                        sources.append({"source_id": source_id,
+                                        "label": label, "url": target})
+                except (TypeError, ValueError, AttributeError):
+                    continue
+
+        # Existing installs and older catalog snapshots contain only games.url.
+        # Add that target only when no valid source mapping was available.
+        if not sources and game.get("url"):
+            target = self._public_game_source_url(game.get("url"))
+            if target:
+                host = urlsplit(target).hostname.lower().rstrip(".")
+                sources.append({
+                    "source_id": "dikgames" if host.endswith("dikgames.com") else "f95zone",
+                    "label": "Dikgames" if host.endswith("dikgames.com") else "F95zone.to.it",
+                    "url": target,
+                })
+        return sources
+
+    def _open_game_source(self, source):
+        # Re-validate at the point of use in case a widget retained stale data.
+        target = self._public_game_source_url(source.get("url"))
+        if target:
+            webbrowser.open(target)
+
+    def _choose_game_source(self, game, sources):
+        sources = [dict(item) for item in sources
+                   if self._public_game_source_url(item.get("url"))]
+        if not sources:
+            return
+        if len(sources) == 1:
+            self._open_game_source(sources[0])
+            return
+        win = self._new_dialog("选择外部站点", "340x250")
+        ctk.CTkLabel(
+            win, text=display_game_label(game, self._title_to_show(game)), text_color=TEXT,
+            font=ui_font(size=14, weight="bold"), wraplength=300,
+            justify="center").pack(fill="x", padx=16, pady=(16, 6))
+        ctk.CTkLabel(
+            win, text="这款游戏有多个可用来源，选择要打开的站点。",
+            text_color=MUTED, font=ui_font(size=11), wraplength=300,
+            justify="center").pack(fill="x", padx=16, pady=(0, 10))
+        for source in sources:
+            ctk.CTkButton(
+                win, text=source["label"], height=34, corner_radius=8,
+                fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+                font=ui_font(size=12),
+                command=lambda item=source, dialog=win: (
+                    dialog.destroy(), self._open_game_source(item))
+            ).pack(fill="x", padx=18, pady=4)
+        ctk.CTkButton(
+            win, text="取消", height=30, corner_radius=8,
+            fg_color="transparent", text_color=MUTED,
+            hover_color=CHIP, font=ui_font(size=11),
+            command=win.destroy).pack(fill="x", padx=18, pady=(8, 14))
+
     def _fill_detail(self, game):
         p = self._detail_parts
         p["cover"].configure(image=load_cover(game, DETAIL_W, DETAIL_H))
@@ -3003,8 +3236,10 @@ class App(ctk.CTk):
                                               game["developer"] or "未知作者"))
         p["title_note"].configure(text="")
         is_user = game.get("origin") == "user"
-        if game["url"] and not is_user:
-            p["url"].configure(command=lambda u=game["url"]: webbrowser.open(u))
+        public_sources = self._external_game_sources(game) if not is_user else []
+        if public_sources:
+            p["url"].configure(command=lambda g=game, s=public_sources:
+                                self._choose_game_source(g, s))
         folder = game.get("folder_path")
         if folder:
             p["open_folder"].configure(
@@ -3036,7 +3271,7 @@ class App(ctk.CTk):
         # should do.
         p["ov_seg"].set("原文")
         self._apply_lang(game, "原文", request=False)
-        self._layout_detail(show_url=(not is_user) and bool(game["url"]),
+        self._layout_detail(show_url=bool(public_sources),
                             show_folder=bool(folder),
                             show_remove=self.collection_id is not None,
                             show_user=is_user)
@@ -4021,52 +4256,112 @@ class App(ctk.CTk):
 
     def _show_public_author_card(self, details):
         """Show public-facing profile fields only; never expose account IDs or keys."""
-        win = self._new_dialog("公开名片", "360x320")
-        body = ctk.CTkFrame(win, fg_color=CARD, corner_radius=10)
-        body.pack(fill="both", expand=True, padx=14, pady=14)
         nickname = str(details.get("nickname") or "匿名用户")[:40]
         appearances = details.get("appearances")
         appearances = dict(appearances) if isinstance(appearances, dict) else {}
-        avatar_frame = appearances.get("avatar_frame", "")
-        header = ctk.CTkFrame(body, fg_color="transparent")
-        header.pack(fill="x", padx=12, pady=(12, 7))
-        if avatar_frame:
-            self._avatar_frame_canvas(header, avatar_frame, nickname,
-                                      size=68, actual_avatar=False).pack(side="left", padx=(0, 10))
-        name_area = ctk.CTkFrame(header, fg_color="transparent")
-        name_area.pack(side="left", fill="x", expand=True)
-        ctk.CTkLabel(name_area, text=nickname, text_color=TEXT,
-                     font=ui_font(size=15, weight="bold")).pack(anchor="w")
+        avatar_frame = appearances.get("avatar_frame") or ""
+        comment_frame = appearances.get("comment_frame") or ""
+        message = str(details.get("profile_message") or "")[:20].strip()
         title_id = details.get("title_id")
         title = slg_titles.title_by_id(title_id) if title_id else None
+        has_appearance = bool(avatar_frame or comment_frame)
+
+        # Grow the dialog only for fields that are present. The footer is a
+        # separate packed region, so its close action stays visible when text
+        # wraps at larger Windows display scaling.
+        height = 350 + (68 if message else 0) + (96 if has_appearance else 0)
+        win = self._new_dialog("公开名片", "460x%d" % min(height, 510))
+        win.minsize(400, 340)
+
+        body = ctk.CTkFrame(win, fg_color=CARD, corner_radius=12)
+        body.pack(side="top", fill="both", expand=True, padx=14, pady=(14, 0))
+        footer = ctk.CTkFrame(win, fg_color="transparent")
+        footer.pack(side="bottom", fill="x", padx=14, pady=14)
+
+        identity = ctk.CTkFrame(body, fg_color=BG, corner_radius=10)
+        identity.pack(fill="x", padx=12, pady=12)
+        initial = next((char for char in nickname if not char.isspace()), "?")
+        avatar = ctk.CTkLabel(
+            identity, text=initial, width=62, height=62,
+            corner_radius=31, fg_color=CHIP, text_color=TEXT,
+            font=ui_font(size=22, weight="bold"))
+        avatar.pack(side="left", padx=(12, 10), pady=12)
+
+        identity_text = ctk.CTkFrame(identity, fg_color="transparent")
+        identity_text.pack(side="left", fill="x", expand=True, padx=(0, 12), pady=10)
+        ctk.CTkLabel(
+            identity_text, text=nickname, text_color=TEXT,
+            font=ui_font(size=15, weight="bold"), wraplength=315,
+            justify="left", anchor="w").pack(fill="x", anchor="w")
         if title:
-            self._title_badge(name_area, title_id, max_width=220).pack(
-                anchor="w", pady=(5, 0))
-        message = str(details.get("profile_message") or "")[:20]
+            self._title_badge(identity_text, title_id, max_width=240).pack(
+                anchor="w", pady=(7, 0))
+            ctk.CTkLabel(
+                identity_text, text="头衔 · %s" % (title.get("rarity") or "普通"),
+                text_color=MUTED, font=ui_font(size=10), anchor="w").pack(
+                    anchor="w", pady=(3, 0))
+
         if message:
-            ctk.CTkLabel(body, text=message, text_color=MUTED,
-                         font=ui_font(size=11), wraplength=290,
-                         justify="left", anchor="w").pack(
-                fill="x", padx=12, pady=(3, 8))
-        comment_frame = appearances.get("comment_frame", "")
-        if comment_frame:
-            plate = ctk.CTkFrame(body, fg_color="transparent")
-            plate.pack(anchor="w", padx=12, pady=(0, 6))
-            self._comment_nameplate(plate, nickname, comment_frame)
-        adornments = []
-        for slot, label in (("avatar_frame", "头像框"), ("comment_frame", "名片框")):
-            item_id = appearances.get(slot)
-            item = self._appearance_item(item_id) if item_id else {}
-            if item:
-                adornments.append("%s：%s · %s" % (
-                    label, item.get("name", label), item.get("rarity", "普通")))
-        if adornments:
-            ctk.CTkLabel(body, text="\n".join(adornments), text_color=MUTED,
-                         font=ui_font(size=10), justify="left").pack(
-                anchor="w", padx=12, pady=(2, 10))
-        ctk.CTkButton(body, text="关闭", height=30, fg_color=CHIP,
-                      text_color=TEXT, hover_color=CARD_HOVER,
-                      command=win.destroy).pack(fill="x", padx=12, pady=(0, 12))
+            message_card = ctk.CTkFrame(
+                body, fg_color=BG, corner_radius=9, border_width=1,
+                border_color=CHIP)
+            message_card.pack(fill="x", padx=12, pady=(0, 8))
+            ctk.CTkLabel(
+                message_card, text="公开寄语", text_color=MUTED,
+                font=ui_font(size=10, weight="bold")).pack(
+                    anchor="w", padx=10, pady=(8, 2))
+            ctk.CTkLabel(
+                message_card, text=message, text_color=TEXT,
+                font=ui_font(size=12), wraplength=390,
+                justify="left", anchor="w").pack(
+                    fill="x", padx=10, pady=(0, 9))
+
+        if has_appearance:
+            outfits = ctk.CTkFrame(body, fg_color=BG, corner_radius=9)
+            outfits.pack(fill="x", padx=12, pady=(0, 12))
+            ctk.CTkLabel(
+                outfits, text="装扮预览", text_color=MUTED,
+                font=ui_font(size=10, weight="bold")).pack(
+                    anchor="w", padx=10, pady=(8, 3))
+            preview_row = ctk.CTkFrame(outfits, fg_color="transparent")
+            preview_row.pack(fill="x", padx=10, pady=(0, 9))
+            if avatar_frame:
+                avatar_item = self._appearance_item(avatar_frame)
+                preview = ctk.CTkFrame(preview_row, fg_color="transparent")
+                preview.pack(fill="x", pady=(0, 5))
+                self._avatar_frame_canvas(
+                    preview, avatar_frame, nickname, size=48,
+                    actual_avatar=False).pack(side="left", padx=(0, 7))
+                ctk.CTkLabel(
+                    preview,
+                    text="头像框 · %s · %s" % (
+                        avatar_item.get("name", "已装备"),
+                        avatar_item.get("rarity", "普通")),
+                    text_color=self._appearance_color(avatar_frame),
+                    font=ui_font(size=10), wraplength=300,
+                    justify="left", anchor="w").pack(
+                        side="left", fill="x", expand=True)
+            if comment_frame:
+                comment_item = self._appearance_item(comment_frame)
+                preview = ctk.CTkFrame(preview_row, fg_color="transparent")
+                preview.pack(fill="x")
+                # A short sample shows the frame treatment without repeating
+                # the user's nickname from the identity section.
+                self._comment_nameplate(preview, "名片预览", comment_frame)
+                ctk.CTkLabel(
+                    preview,
+                    text="名片框 · %s · %s" % (
+                        comment_item.get("name", "已装备"),
+                        comment_item.get("rarity", "普通")),
+                    text_color=self._appearance_color(comment_frame),
+                    font=ui_font(size=10), wraplength=260,
+                    justify="left", anchor="w").pack(
+                        side="left", fill="x", expand=True, padx=(7, 0))
+
+        ctk.CTkButton(
+            footer, text="关闭", height=34, fg_color=CHIP,
+            text_color=TEXT, hover_color=CARD_HOVER,
+            command=win.destroy).pack(fill="x")
 
     @staticmethod
     def _appearance_item(item_id):
@@ -4077,6 +4372,29 @@ class App(ctk.CTk):
         if item_id == "neon_comment_frame":
             return {"id": item_id, "appearance": "comment_frame",
                     "rarity": "稀有", "effect_style": "neon"}
+        # The catalogue remains the price/ownership source. These local style
+        # descriptors let an older client still render a newly equipped ID.
+        fallbacks = {
+            "comment_frame_black_gold_member":
+                ("comment_frame", "black_gold", "传说"),
+            "comment_frame_sakura": ("comment_frame", "sakura", "稀有"),
+            "comment_frame_mint": ("comment_frame", "mint", "普通"),
+            "comment_frame_deep_red_velvet":
+                ("comment_frame", "deep_red_velvet", "史诗"),
+            "avatar_frame_gilded_laurel":
+                ("avatar_frame", "gilded_laurel", "传说"),
+            "avatar_frame_glitch": ("avatar_frame", "glitch", "史诗"),
+            "avatar_frame_startrail": ("avatar_frame", "startrail", "稀有"),
+            "avatar_frame_pixel_8bit":
+                ("avatar_frame", "pixel_8bit", "稀有"),
+            "avatar_frame_blood_moon":
+                ("avatar_frame", "blood_moon", "传说"),
+        }
+        fallback = fallbacks.get(item_id)
+        if fallback:
+            appearance, style, rarity = fallback
+            return {"id": item_id, "appearance": appearance,
+                    "effect_style": style, "rarity": rarity}
         return {}
 
     @classmethod
@@ -4138,13 +4456,16 @@ class App(ctk.CTk):
         # Most pixels remain static; only the preview gets a rare, short pulse.
         base = {"普通": "#777480", "稀有": "#52b9e8", "史诗": "#b77afa",
                 "传说": "#efb963", "至臻": "#f27daf"}.get(rarity, accent)
-        outer = cx - diameter * 0.62
+        # Canvas coordinates below use a radius around (cx, cy).  Subtracting
+        # this from cx put the decorative rim *inside* the avatar, where a
+        # user's picture obscured it.
+        outer = diameter * 0.62
         rim_width = 1 if tier <= 1 else 2 if tier <= 3 else 3
         outer_ring = canvas.create_oval(
             cx - outer, cy - outer, cx + outer, cy + outer,
             outline=_mix(base, "#ffffff", 0.10 if tier < 3 else 0.32),
             width=rim_width)
-        inner = cx - diameter * 0.53
+        inner = diameter * 0.53
         canvas.create_oval(cx - inner, cy - inner, cx + inner, cy + inner,
                            outline=_mix(base, BG, 0.28), width=1)
 
@@ -4186,6 +4507,99 @@ class App(ctk.CTk):
             canvas.create_arc(cx - outer, cy - outer, cx + outer, cy + outer,
                               start=198, extent=110, style="arc",
                               outline="#631b35", width=3)
+        elif style == "gilded_laurel":
+            gold, leaf, shade = "#f4d37c", "#77c995", "#286d55"
+            canvas.create_oval(cx - outer, cy - outer, cx + outer, cy + outer,
+                               outline=gold, width=3)
+            for side in (-1, 1):
+                for angle in (115, 138, 161, 184, 207, 230, 253):
+                    rad = math.radians(angle if side < 0 else 360 - angle)
+                    px = cx + (outer * 0.87) * math.cos(rad)
+                    py = cy + (outer * 0.87) * math.sin(rad)
+                    tangent = rad + math.pi / 2
+                    dx, dy = math.cos(tangent), math.sin(tangent)
+                    nx, ny = math.cos(rad), math.sin(rad)
+                    length, width = size * 0.095, size * 0.045
+                    points = [px - dx * length / 2, py - dy * length / 2,
+                              px + nx * width, py + ny * width,
+                              px + dx * length / 2, py + dy * length / 2,
+                              px - nx * width, py - ny * width]
+                    canvas.create_polygon(*points, fill=leaf, outline=shade,
+                                           width=1)
+            canvas.create_polygon(cx, cy - outer - 2,
+                                  cx - size * 0.09, cy - outer * 0.68,
+                                  cx + size * 0.09, cy - outer * 0.68,
+                                  fill=gold, outline="#fff0bb", width=1)
+        elif style == "glitch":
+            # Three offset RGB arcs create a visible chromatic aberration ring.
+            red, green, blue = "#ff315d", "#39f5c5", "#438cff"
+            for offset, color, start in ((-1.7, red, 8), (0, green, 128),
+                                         (1.7, blue, 248)):
+                radius = outer + offset
+                canvas.create_arc(cx - radius, cy - radius,
+                                  cx + radius, cy + radius,
+                                  start=start, extent=104, style="arc",
+                                  outline=color, width=2)
+            for angle in (42, 88, 222, 294):
+                rad = math.radians(angle)
+                px, py = cx + outer * math.cos(rad), cy + outer * math.sin(rad)
+                canvas.create_line(px - 3, py, px + 3, py + 1,
+                                   fill=red, width=1)
+                canvas.create_line(px, py - 3, px - 1, py + 3,
+                                   fill=blue, width=1)
+        elif style == "startrail":
+            indigo, cyan, gold = "#5966d8", "#8ce9ff", "#fff0a1"
+            canvas.create_arc(cx - outer, cy - outer * 0.74,
+                              cx + outer, cy + outer * 0.74,
+                              start=198, extent=145, style="arc",
+                              outline=indigo, width=2)
+            canvas.create_arc(cx - outer * 0.92, cy - outer,
+                              cx + outer * 0.92, cy + outer,
+                              start=18, extent=126, style="arc",
+                              outline=cyan, width=1)
+            for angle, color in ((20, gold), (98, cyan), (196, gold), (286, cyan)):
+                rad = math.radians(angle)
+                px, py = cx + outer * math.cos(rad), cy + outer * math.sin(rad)
+                r = max(1.4, size * 0.035)
+                canvas.create_polygon(px, py - r * 1.8, px + r * 0.55, py - r * 0.5,
+                                      px + r * 1.8, py, px + r * 0.5, py + r * 0.5,
+                                      px, py + r * 1.8, px - r * 0.5, py + r * 0.5,
+                                      px - r * 1.8, py, px - r * 0.5, py - r * 0.5,
+                                      fill=color, outline="")
+        elif style == "pixel_8bit":
+            # Chunky square tiles deliberately contrast with the circular avatar.
+            cell = max(3, int(size * 0.085))
+            tile_colors = ("#4ce9f5", "#a8fbff", "#ff59b8", "#45a8ff")
+            perimeter = [(-3, y) for y in range(-3, 4)]
+            perimeter += [(3, y) for y in range(-3, 4)]
+            perimeter += [(x, -3) for x in range(-2, 3)]
+            perimeter += [(x, 3) for x in range(-2, 3)]
+            for index, (gx, gy) in enumerate(perimeter):
+                x0, y0 = cx + gx * cell - cell / 2, cy + gy * cell - cell / 2
+                canvas.create_rectangle(
+                    x0, y0, x0 + cell - 1, y0 + cell - 1,
+                    fill=tile_colors[index % len(tile_colors)],
+                    outline="#161528", width=1)
+        elif style == "blood_moon":
+            crimson, moon, shadow = "#b9294c", "#ed5769", "#420d22"
+            canvas.create_oval(cx - outer, cy - outer, cx + outer, cy + outer,
+                               outline=crimson, width=3)
+            moon_r = size * 0.075
+            canvas.create_oval(cx - moon_r, cy - outer - moon_r * 0.35,
+                               cx + moon_r, cy - outer + moon_r * 1.65,
+                               fill=moon, outline="#ffc0b2", width=1)
+            canvas.create_oval(cx - moon_r * 0.15, cy - outer - moon_r * 0.4,
+                               cx + moon_r * 1.25, cy - outer + moon_r * 1.25,
+                               fill=shadow, outline="")
+            canvas.create_arc(cx - outer * 0.9, cy - outer * 0.9,
+                              cx + outer * 0.9, cy + outer * 0.9,
+                              start=207, extent=126, style="arc",
+                              outline="#ff8a84", width=1)
+            for angle in (40, 148, 267):
+                rad = math.radians(angle)
+                px, py = cx + outer * math.cos(rad), cy + outer * math.sin(rad)
+                canvas.create_oval(px - 1.5, py - 1.5, px + 1.5, py + 1.5,
+                                   fill="#ffaea0", outline="")
 
         if actual_avatar and tier >= 2:
             pulse_item = outer_ring
@@ -4215,17 +4629,33 @@ class App(ctk.CTk):
         item = self._appearance_item(item_id)
         rarity = item.get("rarity") or "普通"
         style = item.get("effect_style") or ""
-        tint = ("#111a24" if style in ("cyber_neon", "neon") else
-                "#1c1119" if style == "dark_rose" else CARD)
-        edge = ("#4de8ef" if style in ("cyber_neon", "neon") else
-                "#9b294c" if style == "dark_rose" else
-                self._appearance_color(item_id))
+        palettes = {
+            "cyber_neon": ("#111a24", "#4de8ef", "#9ffaff", "⌁"),
+            "neon": ("#111a24", "#4de8ef", "#9ffaff", "⌁"),
+            "dark_rose": ("#1c1119", "#9b294c", "#f4d7df", "✿"),
+            "black_gold": ("#100d08", "#d5ac54", "#ffe6a0", "◆"),
+            "sakura": ("#321827", "#f385ba", "#ffd4e8", "✿"),
+            "mint": ("#14332b", "#55d6a6", "#caffea", "❧"),
+            "deep_red_velvet": ("#310d19", "#c44661", "#ffd5dd", "❖"),
+        }
+        tint, edge, name_color, ornament = palettes.get(
+            style, (CARD, self._appearance_color(item_id), TEXT, ""))
         width = 2 if rarity in ("史诗", "传说", "至臻") else 1
         badge = ctk.CTkFrame(parent, fg_color=tint, corner_radius=6,
                              border_width=width, border_color=edge)
-        ctk.CTkLabel(badge, text=nickname, text_color=("#9ffaff" if style in
-                     ("cyber_neon", "neon") else TEXT),
-                     font=ui_font(size=12, weight="bold")).pack(padx=7, pady=2)
+        if ornament:
+            ctk.CTkLabel(
+                badge, text=ornament, text_color=edge,
+                font=ui_font(size=9, weight="bold")).pack(
+                    side="left", padx=(7, 2), pady=2)
+        ctk.CTkLabel(badge, text=nickname, text_color=name_color,
+                     font=ui_font(size=12, weight="bold")).pack(
+                         side="left", padx=(2, 2) if ornament else 7, pady=2)
+        if ornament:
+            ctk.CTkLabel(
+                badge, text=ornament, text_color=edge,
+                font=ui_font(size=9, weight="bold")).pack(
+                    side="left", padx=(2, 7), pady=2)
         badge.pack(side="left", padx=(0, 4))
         return badge
 
@@ -4380,11 +4810,16 @@ class App(ctk.CTk):
     def _comment_upload_result(self, slug, local_id, result, error=None):
         if isinstance(result, bool):
             result = {"id": local_id, "status": "public"} if result else {}
+        if not isinstance(result, dict):
+            result = {}
         if result.get("id"):
             status = result.get("status")
             if status in ("public", "approved"):
                 gained = int(result.get("gained") or 0)
                 message = "评论已公开" + ("，云端积分 +%d" % gained if gained else "")
+                # Public-review quest progress is authoritative on the server;
+                # pending or rejected submissions never guess local completion.
+                self._fetch_quests(force=True)
             elif status == "pending":
                 message = "评论已提交，等待审核；通过后才会公开并结算积分"
             elif status == "rejected":
@@ -4509,11 +4944,11 @@ class App(ctk.CTk):
 
         box = ctk.CTkFrame(d, fg_color="transparent")
         label = ctk.CTkLabel(box, text="", text_color=TEXT, wraplength=340,
-                             justify="left", anchor="w", font=ui_font(size=12))
-        label.pack(anchor="w")
-        text = ctk.CTkTextbox(box, height=160, corner_radius=8, fg_color=BG,
+                             justify="left", anchor="w", font=ui_font(size=14))
+        label.pack(fill="x", anchor="w")
+        text = ctk.CTkTextbox(box, height=190, corner_radius=8, fg_color=BG,
                               text_color=TEXT, border_color=CHIP,
-                              border_width=1, font=ui_font(size=12), wrap="word")
+                              border_width=1, font=ui_font(size=14), wrap="word")
         text.bind("<Control-Return>", lambda e: self._save_overview_edit())
         text.bind("<Escape>", lambda e: self._cancel_overview_edit())
         save = ctk.CTkButton(box, text="保存", height=28, width=80, corner_radius=8,
@@ -4523,8 +4958,9 @@ class App(ctk.CTk):
         # The name's editor says this through its placeholder, and it is only
         # ever seen when the box is empty. A textbox has no placeholder, and an
         # empty one with no explanation reads as the app having lost the text.
-        hint = ctk.CTkLabel(box, text="", text_color=MUTED, font=ui_font(size=11),
+        hint = ctk.CTkLabel(box, text="", text_color=MUTED, font=ui_font(size=12),
                             anchor="w", wraplength=340, justify="left")
+        box.bind("<Configure>", self._detail_overview_resized, add="+")
         self._ov_label = label
         self._ov_text = text
         parts["ov_head"] = head
@@ -4536,6 +4972,21 @@ class App(ctk.CTk):
         parts["ov_hint"] = hint
         return [("ov_head", head, {"fill": "x", "padx": 18, "pady": (12, 2)}),
                 ("ov_box", box, {"fill": "x", "padx": 18, "pady": (0, 20)})]
+
+    def _detail_overview_resized(self, event):
+        """Use the real detail content width and the active DPI scale."""
+        try:
+            scale = ctk.ScalingTracker.get_window_scaling(self)
+        except Exception:  # noqa: BLE001 - keep initial layout usable during map
+            scale = 1.0
+        wrap = detail_overview_wraplength(getattr(event, "width", 0), scale)
+        for name in ("_ov_label", "_ov_hint"):
+            widget = getattr(self, name, None)
+            try:
+                if widget is not None and widget.winfo_exists():
+                    widget.configure(wraplength=wrap)
+            except tk.TclError:
+                pass
 
     # --- in-place editing -----------------------------------------------------
 
@@ -4637,7 +5088,7 @@ class App(ctk.CTk):
             text="留空 = 恢复自动翻译" if text else "还没译文，可直接输入中文简介")
         p["ov_text"].pack(fill="x")
         p["ov_save"].pack(anchor="e", pady=(4, 0))
-        p["ov_hint"].pack(anchor="w")
+        p["ov_hint"].pack(fill="x", anchor="w")
         self._ov_text.focus_set()
 
     def _cancel_overview_edit(self):
@@ -4805,9 +5256,126 @@ class App(ctk.CTk):
         win.update_idletasks()
         base.update_idletasks()
         scale = ctk.ScalingTracker.get_window_scaling(win)
-        x = base.winfo_rootx() + (base.winfo_width() - width * scale) // 2
-        y = base.winfo_rooty() + (base.winfo_height() - height * scale) // 2
-        win.geometry("%dx%d+%d+%d" % (width, height, max(x, 0), max(y, 0)))
+        left, top, right, bottom = self._usable_screen_bounds(win)
+        width, height = clamp_scaled_size(
+            width, height, scale, right - left, bottom - top,
+            margin=24, min_width=320, min_height=240)
+        pixel_width, pixel_height = width * scale, height * scale
+        x = base.winfo_rootx() + (base.winfo_width() - pixel_width) // 2
+        y = base.winfo_rooty() + (base.winfo_height() - pixel_height) // 2
+        x = min(max(int(x), left), max(left, int(right - pixel_width)))
+        y = min(max(int(y), top), max(top, int(bottom - pixel_height)))
+        win.geometry("%dx%d+%d+%d" % (width, height, x, y))
+
+    @staticmethod
+    def _usable_screen_bounds(widget):
+        """Use the current monitor work area, including the taskbar boundary."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class _MonitorInfo(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wintypes.DWORD),
+                    ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT),
+                    ("dwFlags", wintypes.DWORD),
+                ]
+
+            user32 = ctypes.windll.user32
+            monitor = user32.MonitorFromWindow(wintypes.HWND(widget.winfo_id()), 2)
+            info = _MonitorInfo()
+            info.cbSize = ctypes.sizeof(info)
+            if monitor and user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                rect = info.rcWork
+                if rect.right > rect.left and rect.bottom > rect.top:
+                    return (int(rect.left), int(rect.top),
+                            int(rect.right), int(rect.bottom))
+        except (AttributeError, OSError, tk.TclError, TypeError, ValueError):
+            pass
+        try:
+            left, top = int(widget.winfo_vrootx()), int(widget.winfo_vrooty())
+            width, height = int(widget.winfo_vrootwidth()), int(widget.winfo_vrootheight())
+            if width > 1 and height > 1:
+                return left, top, left + width, top + height
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            pass
+        return (0, 0, int(widget.winfo_screenwidth()),
+                int(widget.winfo_screenheight()))
+
+    def _apply_ui_scale_profile(self, profile, persist=True, resize_main=True):
+        """Apply a target effective scale while retaining the monitor's DPI."""
+        profile = normalize_ui_scale_profile(profile)
+        tracker = ctk.ScalingTracker
+        try:
+            current_widget = float(tracker.get_widget_scaling(self))
+            current_window = float(tracker.get_window_scaling(self))
+            global_widget = float(tracker.widget_scaling)
+            global_window = float(tracker.window_scaling)
+            widget_dpi = current_widget / global_widget if global_widget else 1.0
+            window_dpi = current_window / global_window if global_window else 1.0
+        except (AttributeError, TypeError, ValueError, ZeroDivisionError, tk.TclError):
+            widget_dpi = window_dpi = 1.0
+        widget_factor, window_factor = ui_scale_multipliers(
+            profile, window_dpi, widget_dpi)
+        self.ui_scale_profile = profile
+        ctk.set_widget_scaling(widget_factor)
+        ctk.set_window_scaling(window_factor)
+        if persist and getattr(self, "conn", None) is not None:
+            slg_db.set_pref(self.conn, PREF_UI_SCALE, profile)
+        if resize_main:
+            try:
+                self.after_idle(self._resize_main_for_ui_scale)
+                self.after_idle(self._resize_settings_for_ui_scale)
+                self.after_idle(self._refresh_detail_overview_wrap)
+            except tk.TclError:
+                pass
+
+    def _resize_main_for_ui_scale(self):
+        try:
+            self.update_idletasks()
+            scale = float(ctk.ScalingTracker.get_window_scaling(self))
+            left, top, right, bottom = self._usable_screen_bounds(self)
+            screen_width, screen_height = right - left, bottom - top
+            min_width, min_height = clamp_scaled_size(
+                1020, 600, scale, screen_width, screen_height,
+                margin=48, min_width=700, min_height=480)
+            width, height = clamp_scaled_size(
+                getattr(self, "_current_width", 1180),
+                getattr(self, "_current_height", 760), scale,
+                screen_width, screen_height, margin=48,
+                min_width=min_width, min_height=min_height)
+            self.minsize(min_width, min_height)
+            x = left + max(0, (screen_width - width * scale) // 2)
+            y = top + max(0, (screen_height - height * scale) // 2)
+            self.geometry("%dx%d+%d+%d" % (width, height, int(x), int(y)))
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            return
+
+    def _resize_settings_for_ui_scale(self):
+        for child in self.winfo_children():
+            try:
+                if (isinstance(child, ctk.CTkToplevel) and child.winfo_exists()
+                        and child.title() == "设置"):
+                    self._place(child, 460, 650)
+                    return
+            except tk.TclError:
+                continue
+
+    def _refresh_detail_overview_wrap(self):
+        label = getattr(self, "_ov_label", None)
+        if label is None:
+            return
+        try:
+            if not label.winfo_exists():
+                return
+            box = label.master
+            width = max(0, box.winfo_width())
+            if width <= 1:
+                width = max(0, self.detail.winfo_width() - 36)
+            self._detail_overview_resized(type("ConfigureEvent", (), {"width": width})())
+        except (AttributeError, tk.TclError):
+            return
 
     def _center_on_parent(self, win, parent=None):
         """Park a dialog over the middle of its parent window.
@@ -4824,7 +5392,10 @@ class App(ctk.CTk):
             return
         x = base.winfo_rootx() + (base.winfo_width() - w) // 2
         y = base.winfo_rooty() + (base.winfo_height() - h) // 2
-        win.geometry("+%d+%d" % (max(x, 0), max(y, 0)))
+        left, top, right, bottom = self._usable_screen_bounds(win)
+        x = min(max(x, left), max(left, right - w))
+        y = min(max(y, top), max(top, bottom - h))
+        win.geometry("+%d+%d" % (x, y))
 
     def _fit_dialog(self, win, width, parent=None):
         """Height a dialog from its actual content, clamped to the screen.
@@ -5722,7 +6293,7 @@ class App(ctk.CTk):
         """Keep the server wallet visibly separate from legacy local points."""
         box = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=10)
         box.pack(fill="x", padx=16, pady=(10, 0))
-        ctk.CTkLabel(box, text="云端账号 · 0.23", text_color=ACCENT,
+        ctk.CTkLabel(box, text="云端账号", text_color=ACCENT,
                      font=ui_font(size=13, weight="bold")).pack(
             anchor="w", padx=12, pady=(10, 2))
         try:
@@ -5837,10 +6408,64 @@ class App(ctk.CTk):
                 result, error = func(), None
             except slg_account.AccountError as exc:
                 result, error = None, str(exc)
+            except Exception as exc:  # noqa: BLE001 - always unblock the UI
+                # A failed worker must still deliver a result.  Otherwise the
+                # pending button (feedback, quest claim, purchase, etc.) stays
+                # disabled for the rest of this session.  Keep the traceback
+                # locally instead of showing internal details in the UI.
+                try:
+                    slg_util.log_crash(
+                        type(exc), exc, exc.__traceback__,
+                        os.path.join(slg_db.app_dir(), "crash.log"))
+                except Exception:  # noqa: BLE001 - logging may also fail
+                    pass
+                result, error = None, "程序内部出错，请重试；若持续发生，请反馈错误日志"
             self.queue.put(("cloud_action", (kind, result, error)))
         threading.Thread(target=worker, daemon=True).start()
 
     def _cloud_action_result(self, kind, result, error):
+        if kind.startswith("quest_"):
+            try:
+                action, generation = kind[len("quest_"):].rsplit("_", 1)
+                if int(generation) != self._quest_generation:
+                    return
+            except (TypeError, ValueError):
+                return
+            if action == "status":
+                self._quests_fetching = False
+                if not self._has_quest_session():
+                    self._quests_data = None
+                    self._quests_error = None
+                    self._render_quest_panel()
+                    return
+                if error:
+                    if self._quest_endpoint_missing(error):
+                        self._quests_supported = False
+                        self._quests_data = None
+                        self._quests_error = None
+                    else:
+                        self._quests_error = str(error)
+                elif (isinstance(result, dict)
+                      and isinstance(result.get("tasks"), list)):
+                    self._quests_supported = True
+                    self._quests_data = result
+                    self._quests_error = None
+                    self._quest_claiming = None
+                else:
+                    self._quests_error = "invalid quest response"
+                self._render_quest_panel()
+                return
+            if action == "claim":
+                if error:
+                    self._quest_claiming = None
+                    self._quests_error = str(error)
+                    self._set_progress("\u4efb\u52a1\u9886\u53d6\u5931\u8d25\uff1a" + str(error))
+                self._fetch_quests()
+                return
+            if action == "rating":
+                if not error:
+                    self._fetch_quests()
+                return
         if kind == "admin_login":
             self._developer_cloud_login_pending = False
             if error:
@@ -5860,6 +6485,7 @@ class App(ctk.CTk):
                 return
             self._cloud_me = {}
             self._maintenance_reward_status = None
+            self._reset_quests_for_account()
             self._cloud_titles = set()
             self._cloud_equipped = slg_titles.DEFAULT_TITLE_ID
             self._cloud_equipped_cosmetic = ""
@@ -5911,6 +6537,35 @@ class App(ctk.CTk):
                 self._skip_profile_cloud_fetch_once = True
                 self.open_profile()
             self._refresh_open_wardrobe()
+            return
+        if kind == "feedback_submit":
+            self._feedback_submission_pending = False
+            form = getattr(self, "_feedback_form", None)
+            if isinstance(form, dict):
+                form["pending"] = False
+                submit_button = form.get("submit")
+                status = form.get("status")
+                body = form.get("body")
+                if submit_button is not None and submit_button.winfo_exists():
+                    submit_button.configure(state="normal", text="提交反馈")
+                if error:
+                    if status is not None and status.winfo_exists():
+                        status.configure(text=error, text_color=DANGER_TEXT)
+                    self._set_progress("反馈提交失败：" + error)
+                else:
+                    feedback_id = result.get("id") if isinstance(result, dict) else None
+                    receipt = ("反馈已收到（编号 %s），等待管理员审核。"
+                               "奖励以审核结果为准。" % feedback_id
+                               if feedback_id else
+                               "反馈已收到，等待管理员审核。奖励以审核结果为准。")
+                    if status is not None and status.winfo_exists():
+                        status.configure(text=receipt, text_color=ACCENT)
+                    if body is not None and body.winfo_exists():
+                        body.delete("1.0", "end")
+                    counter = form.get("counter")
+                    if counter is not None and counter.winfo_exists():
+                        counter.configure(text="0 / 500 字", text_color=MUTED)
+                    self._set_progress("意见反馈已提交，等待管理员审核")
             return
         if kind == "me":
             if not error:
@@ -6007,6 +6662,7 @@ class App(ctk.CTk):
         if kind == "create" and not error:
             self._cloud_me = {}
             self._maintenance_reward_status = None
+            self._reset_quests_for_account()
             self._cloud_titles = set()
             self._cloud_equipped = slg_titles.DEFAULT_TITLE_ID
             self._cloud_equipped_cosmetic = ""
@@ -6019,6 +6675,7 @@ class App(ctk.CTk):
         if kind == "login" and not error:
             self._cloud_me = {}
             self._maintenance_reward_status = None
+            self._reset_quests_for_account()
             self._cloud_titles = set()
             self._cloud_equipped = slg_titles.DEFAULT_TITLE_ID
             self._cloud_equipped_cosmetic = ""
@@ -6034,6 +6691,7 @@ class App(ctk.CTk):
                 {"error": error} if error else result)
             self._render_announcement_reward()
             self._refresh_announcement_badge()
+            self._maybe_prompt_announcement_reward()
             return
         if kind == "maintenance_reward_claim":
             if not error and isinstance(result, dict):
@@ -6104,6 +6762,7 @@ class App(ctk.CTk):
                     days.append(signed_day)
                 self._cloud_me_day = signed_day
             self._update_shop_signin_button()
+            self._fetch_quests(force=True)
             self._show_signin_result(gained=gained,
                                      already=bool(result.get("already")), dev=False,
                                      bonus=bonus)
@@ -6120,6 +6779,7 @@ class App(ctk.CTk):
             return
         if kind == "equip" and not error:
             self._cloud_equipped = result.get("equipped_title") or slg_titles.DEFAULT_TITLE_ID
+            self._fetch_quests()
             reopen_wardrobe = bool(getattr(self, "_wardrobe_reopen_after_equip", False))
             self._wardrobe_reopen_after_equip = False
             if isinstance(getattr(self, "_cloud_me", None), dict):
@@ -6131,6 +6791,7 @@ class App(ctk.CTk):
             return
         if kind == "equip_cosmetic" and not error:
             self._cloud_equipped_cosmetic = result.get("equipped_cosmetic") or ""
+            self._fetch_quests()
             self._cloud_appearances = (result.get("equipped_appearances") or
                                        {"comment_frame": self._cloud_equipped_cosmetic})
             reopen_wardrobe = bool(getattr(self, "_wardrobe_reopen_after_equip", False))
@@ -6146,6 +6807,7 @@ class App(ctk.CTk):
                 self.open_profile()
             return
         if kind == "equip_appearance" and not error:
+            self._fetch_quests()
             pending_slot = getattr(self, "_wardrobe_pending_slot", "comment_frame")
             pending_item = getattr(self, "_wardrobe_pending_item", "")
             appearances = result.get("equipped_appearances")
@@ -6190,7 +6852,15 @@ class App(ctk.CTk):
             self._set_progress("公开名片寄语已保存")
             self._refresh_open_wardrobe()
             return
-        if kind == "lottery" and not error:
+        if kind == "lottery":
+            complete = getattr(self, "_lottery_complete", None)
+            if error:
+                self._set_progress("\u4e91\u7aef\u62bd\u5956\u7ed3\u679c\u5c1a\u672a\u786e\u8ba4\uff1a" + str(error))
+                if complete is not None:
+                    complete(error=error)
+                else:
+                    messagebox.showwarning("\u6bcf\u65e5\u62bd\u5956", str(error), parent=self)
+                return
             self._store_cloud_balance(
                 result.get("balance", getattr(self, "_cloud_balance", 0)))
             self._cloud_titles = set(result.get("titles") or [])
@@ -6201,7 +6871,11 @@ class App(ctk.CTk):
                     0 if prize.get("kind") == "title" else
                     self._cloud_me.get("lottery_pity", 0) + 1)
             self._refresh_shop_balance()
-            self._open_slot_machine(prize)
+            self._fetch_quests()
+            if complete is not None:
+                complete(prize=prize)
+            else:
+                self._open_slot_machine(prize)
             return
         if kind == "rotate" and not error:
             self._show_new_account_keys(result, rotated=True)
@@ -6322,6 +6996,7 @@ class App(ctk.CTk):
                 slg_account.forget_session()
                 self._cloud_me = {}
                 self._maintenance_reward_status = None
+                self._reset_quests_for_account()
                 self._refresh_announcement_badge()
                 self._cloud_titles = set()
                 self._cloud_equipped = slg_titles.DEFAULT_TITLE_ID
@@ -6631,20 +7306,16 @@ class App(ctk.CTk):
         title_tab = tabs.add("头衔")
         avatar_tab = tabs.add("头像框")
         comment_tab = tabs.add("名片框")
-        box = ctk.CTkScrollableFrame(title_tab, fg_color="transparent")
-        box.pack(fill="both", expand=True, padx=6, pady=(0, 6))
-        # 按稀有度分节，节头写「稀有度 + 持有 n/m」。列表本来就长，再往后只会更长，
-        # 分节头是滚到一半还能知道自己掉到哪一档的唯一线索。不折叠未拥有的档 ——
-        # 折叠会把「这枚怎么拿」直接藏掉，跟列表本身的目的相反。
-        for rarity in slg_titles.RARITY_ORDER:
-            group = [t for t in slg_titles.TITLES if t["rarity"] == rarity]
-            if not group:
-                continue
-            have = sum(1 for t in group if t["id"] in owned)
-            self._title_section(box, rarity, have, len(group))
-            for t in group:
-                self._title_row(box, t, t["id"] in owned,
-                                t["id"] == equipped_title, win)
+        self._wardrobe_browser(
+            title_tab, list(slg_titles.TITLES), owned,
+            lambda item: item.get("id") == equipped_title,
+            lambda item: " ".join((item.get("name", ""), item.get("desc", ""),
+                                   item.get("rarity", ""),
+                                   slg_titles.obtain_title_text(item))),
+            lambda parent, item: self._title_row(
+                parent, item, item["id"] in owned,
+                item["id"] == equipped_title, win),
+            page_size=5)
 
         owned_items = set(getattr(self, "_cloud_titles", set()))
         self._wardrobe_appearance_list(avatar_tab, "avatar_frame", owned_items, win)
@@ -6727,6 +7398,111 @@ class App(ctk.CTk):
         self._wardrobe_message_counter = counter
         self._wardrobe_message_save_button = save
         self._wardrobe_message_clear_button = clear
+
+    def _wardrobe_browser(self, tab, entries, owned_ids,
+                          equipped_predicate, search_text, render_entry,
+                          page_size):
+        """Build a bounded search/filter/page view for one wardrobe category."""
+        state = {"query": "", "filter": "全部", "page": 0}
+        owned_ids = set(owned_ids)
+        search = ctk.CTkEntry(
+            tab, height=29, corner_radius=8,
+            placeholder_text="搜索名称、说明或获取方式",
+            font=ui_font(size=10))
+        search.pack(fill="x", padx=7, pady=(3, 5))
+        filter_row = ctk.CTkFrame(tab, fg_color="transparent")
+        filter_row.pack(fill="x", padx=7, pady=(0, 5))
+        filters = ctk.CTkSegmentedButton(
+            filter_row, values=["全部", "已拥有", "未拥有", "已装备"],
+            height=26, corner_radius=7, font=ui_font(size=9),
+            selected_color=ACCENT, selected_hover_color=ACCENT,
+            unselected_color=CHIP, unselected_hover_color=CARD_HOVER,
+            text_color=TEXT)
+        filters.set("全部")
+        filters.pack(fill="x", expand=True)
+
+        # Keep the page controls fixed while allowing a small scroll on short
+        # displays; the frame never contains more than one bounded page.
+        listing = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+        listing.pack(fill="both", expand=True, padx=4, pady=(0, 3))
+        footer = ctk.CTkFrame(tab, fg_color="transparent")
+        footer.pack(fill="x", padx=7, pady=(0, 5))
+        previous = ctk.CTkButton(
+            footer, text="上一页", width=74, height=25, corner_radius=7,
+            fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+            font=ui_font(size=10))
+        previous.pack(side="left")
+        page_label = ctk.CTkLabel(
+            footer, text="", text_color=MUTED, font=ui_font(size=10))
+        page_label.pack(side="left", expand=True)
+        following = ctk.CTkButton(
+            footer, text="下一页", width=74, height=25, corner_radius=7,
+            fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+            font=ui_font(size=10))
+        following.pack(side="right")
+
+        def matches(item):
+            owned = item.get("id") in owned_ids
+            equipped = bool(equipped_predicate(item))
+            selected_filter = state["filter"]
+            if selected_filter == "已拥有" and not owned:
+                return False
+            if selected_filter == "未拥有" and owned:
+                return False
+            if selected_filter == "已装备" and not equipped:
+                return False
+            query = state["query"].casefold()
+            return not query or query in str(search_text(item)).casefold()
+
+        def change_page(delta):
+            state["page"] += delta
+            render()
+
+        def render():
+            filtered = [item for item in entries if matches(item)]
+            page_count = max(1, (len(filtered) + page_size - 1) // page_size)
+            state["page"] = min(max(0, state["page"]), page_count - 1)
+            start = state["page"] * page_size
+            visible = filtered[start:start + page_size]
+            for child in listing.winfo_children():
+                child.destroy()
+            if not visible:
+                ctk.CTkLabel(
+                    listing, text="没有符合条件的装扮。",
+                    text_color=MUTED, font=ui_font(size=11)
+                ).pack(expand=True, pady=30)
+            else:
+                for item in visible:
+                    render_entry(listing, item)
+            canvas = getattr(listing, "_parent_canvas", None)
+            if canvas is not None:
+                try:
+                    canvas.yview_moveto(0)
+                except tk.TclError:
+                    pass
+            page_label.configure(
+                text="第 %d / %d 页 · %d 件" % (state["page"] + 1,
+                                               page_count, len(filtered)))
+            previous.configure(
+                state="normal" if state["page"] > 0 else "disabled",
+                command=lambda: change_page(-1))
+            following.configure(
+                state="normal" if state["page"] + 1 < page_count else "disabled",
+                command=lambda: change_page(1))
+
+        def set_filter(value):
+            state["filter"] = value
+            state["page"] = 0
+            render()
+
+        def set_query(_event=None):
+            state["query"] = search.get().strip()
+            state["page"] = 0
+            render()
+
+        filters.configure(command=set_filter)
+        search.bind("<KeyRelease>", set_query)
+        render()
 
     def _toggle_wardrobe_message_editor(self, editor, button):
         """Show message controls only when requested, preserving list space by default."""
@@ -6888,64 +7664,71 @@ class App(ctk.CTk):
                  if item.get("kind") == "decoration"
                  and (item.get("appearance") or "comment_frame") == slot]
         ctk.CTkLabel(
-            tab, text="点击“预览”可以和当前头衔、另一装备槽组合查看；未拥有的商品也能先试搭。",
+            tab, text="点击“预览搭配”可以和当前头衔、另一装备槽组合查看；未拥有的商品也能先试搭。",
             text_color=MUTED, font=ui_font(size=10), wraplength=390,
-            justify="left").pack(anchor="w", padx=8, pady=(5, 7))
-        listing = ctk.CTkScrollableFrame(tab, fg_color="transparent")
-        listing.pack(fill="both", expand=True, padx=4, pady=(0, 5))
+            justify="left").pack(anchor="w", padx=8, pady=(5, 4))
         current = self._equipped_appearance_map().get(slot, "")
-        for item in items:
+
+        def render_item(listing, item):
             card = ctk.CTkFrame(listing, fg_color=CARD, corner_radius=8,
                                 border_width=1,
                                 border_color=self._appearance_color(item["id"]))
-            card.pack(fill="x", padx=3, pady=4)
+            card.pack(fill="x", padx=3, pady=3)
             head = ctk.CTkFrame(card, fg_color="transparent")
-            head.pack(fill="x", padx=9, pady=(7, 2))
+            head.pack(fill="x", padx=8, pady=(5, 1))
             ctk.CTkLabel(head, text=item.get("name", item["id"]),
-                         text_color=TEXT, font=ui_font(size=12, weight="bold")
+                         text_color=TEXT, font=ui_font(size=11, weight="bold")
                          ).pack(side="left")
             ctk.CTkLabel(head, text=item.get("rarity", "普通"),
                          text_color=self._appearance_color(item["id"]),
-                         font=ui_font(size=10, weight="bold")).pack(side="left", padx=7)
+                         font=ui_font(size=9, weight="bold")).pack(side="left", padx=6)
             owned = item["id"] in owned_items
             ctk.CTkLabel(head, text=("正在使用" if item["id"] == current else
                                      "已拥有" if owned else "未拥有"),
                          text_color=ON_ACCENT if item["id"] == current else MUTED,
                          fg_color=ACCENT if item["id"] == current else CHIP,
-                         corner_radius=6, height=18,
+                         corner_radius=6, height=17,
                          font=ui_font(size=9)).pack(side="right")
             ctk.CTkLabel(card, text=item.get("description", ""),
-                         text_color=MUTED, font=ui_font(size=10),
-                         justify="left", wraplength=390, anchor="w").pack(
-                fill="x", padx=9, pady=(2, 6))
+                         text_color=MUTED, font=ui_font(size=9),
+                         justify="left", wraplength=370, anchor="w").pack(
+                fill="x", padx=8, pady=(1, 3))
             actions = ctk.CTkFrame(card, fg_color="transparent")
-            actions.pack(fill="x", padx=9, pady=(0, 8))
+            actions.pack(fill="x", padx=8, pady=(0, 5))
             ctk.CTkButton(
-                actions, text="预览搭配", width=1, height=27, corner_radius=7,
+                actions, text="预览搭配", width=1, height=23, corner_radius=7,
                 fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
-                font=ui_font(size=10),
-                command=lambda s=slot, i=item["id"]: self._set_wardrobe_preview(s, i)
-            ).pack(side="left", expand=True, fill="x", padx=(0, 5))
+                font=ui_font(size=9),
+                command=lambda s=slot, i=item["id"]:
+                    self._set_wardrobe_preview(s, i)
+            ).pack(side="left", expand=True, fill="x", padx=(0, 4))
             if owned:
                 active = item["id"] == current
                 ctk.CTkButton(
                     actions, text="卸下" if active else "装备", width=1,
-                    height=27, corner_radius=7,
+                    height=23, corner_radius=7,
                     fg_color=CHIP if active else ACCENT,
                     text_color=TEXT if active else ON_ACCENT,
-                    hover_color=CARD_HOVER, font=ui_font(size=10),
+                    hover_color=CARD_HOVER, font=ui_font(size=9),
                     command=lambda i=item["id"], s=slot, a=active: (
                         win.destroy(), self._equip_appearance(
                             s, "" if a else i, return_to_wardrobe=True))
                 ).pack(side="left", expand=True, fill="x")
             else:
                 ctk.CTkButton(
-                    actions, text="前往商城", width=1, height=27,
+                    actions, text="前往商城", width=1, height=23,
                     corner_radius=7, fg_color=CHIP, text_color=ACCENT,
-                    hover_color=CARD_HOVER, font=ui_font(size=10),
+                    hover_color=CARD_HOVER, font=ui_font(size=9),
                     command=lambda: (win.destroy(), self.open_shop())
                 ).pack(side="left", expand=True, fill="x")
 
+        self._wardrobe_browser(
+            tab, items, owned_items,
+            lambda item: item.get("id") == current,
+            lambda item: " ".join((item.get("name", ""),
+                                   item.get("description", ""),
+                                   item.get("rarity", ""))),
+            render_item, page_size=4)
     def _refresh_open_wardrobe(self):
         """Rebuild the one open wardrobe after its cloud inventory arrives."""
         win = getattr(self, "_wardrobe_window", None)
@@ -6969,34 +7752,20 @@ class App(ctk.CTk):
             except tk.TclError:
                 pass
 
-    def _title_section(self, parent, rarity, have, total):
-        """稀有度分节头：色点 + 徽记 + 「n/m」。"""
-        color = slg_titles.RARITY_COLORS.get(rarity, MUTED)
-        head = ctk.CTkFrame(parent, fg_color="transparent")
-        head.pack(fill="x", padx=6, pady=(10, 2))
-        ctk.CTkLabel(head, text=self.SHOP_TITLE_GLYPHS.get(rarity, "●"),
-                     text_color=color, font=ui_font(size=13, weight="bold")).pack(
-            side="left")
-        ctk.CTkLabel(head, text=rarity, text_color=color,
-                     font=ui_font(size=12, weight="bold")).pack(
-            side="left", padx=(5, 0))
-        ctk.CTkLabel(head, text="%d/%d" % (have, total), text_color=MUTED,
-                     font=ui_font(size=11)).pack(side="right")
-
     def _title_row(self, parent, t, is_owned, is_equipped, win):
         """一条头衔：名字 + 状态、一句话简介、以及「获得方式 / 装备」两颗按钮。
 
         简介直接摊在列表里 —— 藏进弹窗等于每次都要点一次才知道是什么。
         """
         card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=8)
-        card.pack(fill="x", padx=4, pady=4)
+        card.pack(fill="x", padx=3, pady=2)
 
         head = ctk.CTkFrame(card, fg_color="transparent")
-        head.pack(fill="x", padx=10, pady=(8, 0))
+        head.pack(fill="x", padx=8, pady=(4, 0))
         # Show the actual badge in the collection list, so users can compare
         # what they own without opening every detail dialog.
-        name_badge = self._title_badge(head, t["id"], max_width=210)
-        name_badge.pack(side="left", pady=(0, 2))
+        name_badge = self._title_badge(head, t["id"], max_width=190)
+        name_badge.pack(side="left", pady=(0, 1))
         name_badge.configure(cursor="hand2")
         name_badge.bind("<Button-1>", lambda e, t=t: self._title_info(t, win))
         if is_equipped:
@@ -7008,33 +7777,36 @@ class App(ctk.CTk):
                          corner_radius=6, height=16,
                          font=ui_font(size=9)).pack(side="left", padx=(6, 0))
 
-        desc_lbl = ctk.CTkLabel(card, text=t.get("desc", ""), text_color=MUTED,
-                                font=ui_font(size=10), justify="left",
-                                wraplength=280, anchor="w")
-        desc_lbl.pack(fill="x", padx=10, pady=(3, 0))
+        desc_text = str(t.get("desc", ""))
+        if len(desc_text) > 64:
+            desc_text = desc_text[:63] + "…"
+        desc_lbl = ctk.CTkLabel(card, text=desc_text, text_color=MUTED,
+                                font=ui_font(size=9), justify="left",
+                                wraplength=390, anchor="w")
+        desc_lbl.pack(fill="x", padx=8, pady=(1, 0))
         # 名字和简介也是打开简介的入口，跟那颗按钮同一个弹窗。
         desc_lbl.bind("<Button-1>", lambda e, t=t: self._title_info(t, win))
         desc_lbl.configure(cursor="hand2")
 
         acts = ctk.CTkFrame(card, fg_color="transparent")
-        acts.pack(fill="x", padx=10, pady=(7, 8))
+        acts.pack(fill="x", padx=8, pady=(3, 4))
         ctk.CTkButton(
-            acts, text="预览搭配", height=26, corner_radius=8,
+            acts, text="预览搭配", height=22, corner_radius=7,
             fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
-            font=ui_font(size=10),
+            font=ui_font(size=9),
             command=lambda tid=t["id"]: self._set_wardrobe_preview("title_id", tid)
         ).pack(side="left", fill="x", expand=True, padx=(0, 6))
         # 「获得方式」人人都有：没拿到的想知道怎么拿，拿到了的也可能想知道这枚是什么来头。
-        ctk.CTkButton(acts, text="获得方式", height=26, corner_radius=8,
+        ctk.CTkButton(acts, text="获得方式", height=22, corner_radius=7,
                       fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
-                      font=ui_font(size=11),
+                      font=ui_font(size=9),
                       command=lambda t=t: self._title_info(t, win)).pack(
             side="left", fill="x", expand=True, padx=(0, 6))
         if is_owned:
             ctk.CTkButton(acts, text="取消" if is_equipped else "装备", width=72,
-                          height=26, corner_radius=8, fg_color=CHIP,
+                          height=22, corner_radius=7, fg_color=CHIP,
                           text_color=TEXT, hover_color=CARD_HOVER,
-                          font=ui_font(size=11),
+                          font=ui_font(size=9),
                           command=lambda tid=t["id"]: self._equip_title(win, tid)
                           ).pack(side="left", fill="x", expand=True)
 
@@ -7155,6 +7927,8 @@ class App(ctk.CTk):
         self._update_shop_signin_button()
 
         self._shop_lottery_card(d)
+        self._build_shop_quest_panel(d)
+        self._fetch_quests()
 
         # 货架：左栏分类、右栏商品。以前分类 tab 和子分类 chip 是上下两排圆角
         # 按钮、只差一个高度，层级几乎看不出来；竖排才像货架，顺带把纵向让给商品。
@@ -7181,6 +7955,177 @@ class App(ctk.CTk):
         self._shop_fly = None
         if fly:
             self._shop_fly_in(*fly)
+
+    def _build_shop_quest_panel(self, parent):
+        """Build the compact account quest list inside the existing shop."""
+        panel = ctk.CTkFrame(parent, fg_color=CHIP, corner_radius=9)
+        self._quest_panel = panel
+        header = ctk.CTkFrame(panel, fg_color="transparent")
+        header.pack(fill="x", padx=10, pady=(7, 3))
+        ctk.CTkLabel(header, text="每日 / 每周任务", text_color=TEXT,
+                     font=ui_font(size=12, weight="bold")).pack(side="left")
+        self._quest_status_label = ctk.CTkLabel(
+            header, text="", text_color=MUTED, font=ui_font(size=10),
+            anchor="e")
+        self._quest_status_label.pack(side="right", padx=(6, 0))
+        self._quest_retry_button = ctk.CTkButton(
+            header, text="重试", width=48, height=22, corner_radius=6,
+            fg_color=BG, text_color=ACCENT, hover_color=CARD_HOVER,
+            font=ui_font(size=10), command=self._fetch_quests)
+        self._quest_retry_button.pack(side="right")
+        self._quest_retry_button.pack_forget()
+        self._quest_rows = ctk.CTkFrame(panel, fg_color="transparent")
+        self._quest_rows.pack(fill="x", padx=8, pady=(0, 7))
+        self._quest_claim_buttons = {}
+        self._render_quest_panel()
+
+    def _render_quest_panel(self):
+        panel = getattr(self, "_quest_panel", None)
+        try:
+            if panel is None or not panel.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if (not self._has_quest_session()
+                or getattr(self, "_quests_supported", None) is False):
+            panel.pack_forget()
+            return
+        if panel.winfo_manager() != "pack":
+            panel.pack(fill="x", padx=16, pady=(6, 0))
+
+        status = getattr(self, "_quest_status_label", None)
+        retry = getattr(self, "_quest_retry_button", None)
+        rows = getattr(self, "_quest_rows", None)
+        if status is None or rows is None:
+            return
+        for child in rows.winfo_children():
+            child.destroy()
+        self._quest_claim_buttons = {}
+
+        error = getattr(self, "_quests_error", None)
+        tasks = ((getattr(self, "_quests_data", None) or {}).get("tasks")
+                 if isinstance(getattr(self, "_quests_data", None), dict) else None)
+        if error:
+            status.configure(text="任务暂不可用")
+            if retry is not None and retry.winfo_exists():
+                retry.pack(side="right")
+            ctk.CTkLabel(
+                rows, text="连接失败，稍后可以重新查询。", text_color=MUTED,
+                font=ui_font(size=11), anchor="w").pack(fill="x", padx=3, pady=2)
+            return
+        if retry is not None and retry.winfo_exists():
+            retry.pack_forget()
+        if tasks is None:
+            status.configure(text="正在读取…" if self._quests_fetching else "")
+            return
+        if not isinstance(tasks, list):
+            self._quests_error = "invalid quest response"
+            self._render_quest_panel()
+            return
+        status.configure(text="")
+        for task in tasks:
+            if not isinstance(task, dict) or not task.get("id"):
+                continue
+            quest_id = str(task["id"])
+            try:
+                progress = max(0, int(task.get("progress") or 0))
+                target = max(0, int(task.get("target") or 0))
+                reward = max(0, int(task.get("reward") or 0))
+            except (TypeError, ValueError):
+                progress = target = reward = 0
+            period = "每周" if str(task.get("period") or "").lower() in (
+                "week", "weekly") else "每日"
+            label = str(task.get("label") or quest_id)
+            row = ctk.CTkFrame(rows, fg_color="transparent", height=27)
+            row.pack(fill="x", padx=2, pady=1)
+            ctk.CTkLabel(
+                row, text="%s  %s  %d/%d  +%d" % (
+                    period, label, progress, target, reward),
+                text_color=TEXT, font=ui_font(size=11), anchor="w",
+                justify="left").pack(side="left", fill="x", expand=True)
+            claiming = getattr(self, "_quest_claiming", None) == quest_id
+            if task.get("claimed"):
+                button_text, enabled = "已领取", False
+            elif claiming:
+                button_text, enabled = "提交中…", False
+            elif task.get("claimable"):
+                button_text, enabled = "领取 +%d" % reward, True
+            elif target and progress >= target:
+                button_text, enabled = "已完成", False
+            else:
+                button_text, enabled = "未完成", False
+            button = ctk.CTkButton(
+                row, text=button_text, width=72, height=22, corner_radius=6,
+                fg_color=ACCENT if enabled else BG,
+                text_color=ON_ACCENT if enabled else MUTED,
+                hover_color=CARD_HOVER, font=ui_font(size=10),
+                state="normal" if enabled else "disabled",
+                command=lambda q=quest_id: self._claim_quest(q))
+            button.pack(side="right", padx=(6, 0))
+            self._quest_claim_buttons[quest_id] = button
+
+    def _reset_quests_for_account(self):
+        self._quest_generation += 1
+        self._quests_supported = None
+        self._quests_fetching = False
+        self._quests_data = None
+        self._quests_error = None
+        self._quest_claiming = None
+        self._render_quest_panel()
+
+    def _has_quest_session(self):
+        if not self._has_usable_cloud_session():
+            return False
+        try:
+            return bool(slg_account.session())
+        except slg_account.AccountError:
+            return False
+
+    def _run_quest_action(self, action, func):
+        """Tag asynchronous quest work so stale results cannot cross accounts."""
+        kind = "quest_%s_%d" % (action, self._quest_generation)
+        self._run_cloud_action(kind, func)
+
+    def _fetch_quests(self, force=False):
+        if not self._has_quest_session():
+            self._render_quest_panel()
+            return
+        if self._quests_supported is False:
+            return
+        if self._quests_fetching:
+            if not force:
+                return
+            # A pre-action GET could finish after a comment/signin write and
+            # repaint stale progress. Invalidate it and issue a fresh snapshot.
+            self._quest_generation += 1
+            self._quests_fetching = False
+        self._quests_fetching = True
+        self._quests_error = None
+        self._render_quest_panel()
+        self._run_quest_action("status", slg_account.get_quests)
+
+    @staticmethod
+    def _quest_endpoint_missing(error):
+        text = str(error or "").lower()
+        return ("404" in text or "尚未部署" in text
+                or "not deployed" in text or "endpoint not found" in text)
+
+    def _claim_quest(self, quest_id):
+        if self._quest_claiming is not None:
+            return
+        data = getattr(self, "_quests_data", None)
+        tasks = data.get("tasks", []) if isinstance(data, dict) else []
+        task = next((item for item in tasks if isinstance(item, dict)
+                     and str(item.get("id")) == str(quest_id)), None)
+        if not task or task.get("claimed") or not task.get("claimable"):
+            return
+        if not self._has_quest_session():
+            self._render_quest_panel()
+            return
+        self._quest_claiming = str(quest_id)
+        self._render_quest_panel()
+        self._run_quest_action(
+            "claim", lambda q=str(quest_id): slg_account.claim_quest(q))
 
     def _update_shop_signin_button(self):
         button = getattr(self, "_shop_signin_button", None)
@@ -7417,37 +8362,20 @@ class App(ctk.CTk):
                           command=self._do_lottery).pack(side="right", padx=12, pady=5)
 
     def _do_lottery(self):
-        if not self._require_personal_access("每日抽奖"):
+        if not self._require_personal_access("\u6bcf\u65e5\u62bd\u5956"):
             return
         if self._remote_flags.get("disable_lottery"):
-            messagebox.showinfo("每日抽奖", "抽奖功能维护中，稍后再试", parent=self)
+            messagebox.showinfo("\u6bcf\u65e5\u62bd\u5956", "\u62bd\u5956\u529f\u80fd\u7ef4\u62a4\u4e2d\uff0c\u7a0d\u540e\u518d\u8bd5", parent=self)
             return
-        if self._has_cloud_account():
-            self._run_cloud_action("lottery", slg_account.lottery_draw)
-            self._set_progress("正在云端抽奖…")
-            return
-        if not slg_titles.dev_unlocked(self.conn) and \
-                slg_titles.lottery_draws_today(self.conn) >= \
-                slg_titles.LOTTERY_DAILY_LIMIT:
-            messagebox.showinfo("每日抽奖",
-                                "今日已抽 %d 次，明天再来"
-                                % slg_titles.LOTTERY_DAILY_LIMIT, parent=self)
-            return
-        if slg_db.points_balance(self.conn) < slg_titles.LOTTERY_COST:
-            messagebox.showwarning("积分不足",
-                                   "抽奖需要 %d 积分" % slg_titles.LOTTERY_COST,
-                                   parent=self)
-            return
-        # The result is decided the moment the user commits: draw_lottery deducts
-        # the cost and rolls the prize up front. The reel below is only theatre.
-        ok, msg, prize = slg_titles.draw_lottery(self.conn)
-        if not ok:
-            messagebox.showwarning("每日抽奖", msg, parent=self)
-            return
-        slg_remote.report(self.conn, "lottery",
-                          {"grand": prize["kind"] == "title"})
-        self._refresh_shop_balance()
-        self._open_slot_machine(prize)
+        self._open_slot_machine()
+
+    @staticmethod
+    def _lottery_request_pref_name():
+        """Keep an uncertain cloud draw bound to its account across restarts."""
+        current = slg_account.session()
+        if not current or not current.get("account_id"):
+            raise slg_account.AccountError("请先登录云端账号")
+        return "lottery.pending_request." + str(current["account_id"])
 
     def _refresh_shop_balance(self):
         lbl = getattr(self, "_shop_balance_label", None)
@@ -7610,21 +8538,40 @@ class App(ctk.CTk):
             cache[size] = imgs
         return cache[size]
 
-    def _open_slot_machine(self, prize):
-        """拟真老虎机：三列滚动的符号带 + 一根拉杆。
+    def _open_slot_machine(self, prize=None):
+        """Open the reel UI; the first lever pull is the draw commit point."""
+        existing = getattr(self, "_lottery_machine_window", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.lift()
+                    return
+            except tk.TclError:
+                pass
+            self._lottery_machine_window = None
+        initial_prize = prize
+        prize = None
+        grand = False
+        jackpot = False
+        finals = []
+        label = ""
+        pending = [False]
 
-        点「拉杆」开始滚，再点一次停。但奖项在 `_do_lottery` 里就已定死，这里只是
-        把预定的最终符号滚到中行：最终符号种在每列第 1 格，减速停稳时 travel 落回
-        0，正好把它停在正中。视觉沿用霓虹边框、中行判定线、结果 glitch 脉冲。
-        """
-        grand = prize["kind"] == "title"
-        jackpot = grand and prize["value"] == slg_titles.LOTTERY_JACKPOT_TITLE
-        finals = self._lottery_finals(prize)
-        label = self._lottery_label(prize)
-        # 高度由内容决定，不再是写死的 600：以前内容比 600 高，最后一行免责声明
-        # 就被窗口底边切掉了。头（标题）和脚（按钮 + 保底 + 免责声明）固定，
-        # 中间那段可滚动，这样以后往机器上加东西也只会滚，不会把脚挤下去。
-        win = self._new_dialog("每日抽奖")
+        def close_machine():
+            if pending[0] or spinning or stopping:
+                messagebox.showinfo(
+                    "\u6bcf\u65e5\u62bd\u5956",
+                    "\u7ed3\u679c\u786e\u8ba4\u540e\u9700\u8981\u5148\u7b49\u5f00\u5956\u52a8\u753b\u5b8c\u6210\u3002",
+                    parent=win)
+                return
+            if getattr(self, "_lottery_machine_window", None) is win:
+                self._lottery_machine_window = None
+            if getattr(self, "_lottery_complete", None) is complete_draw:
+                self._lottery_complete = None
+            win.destroy()
+
+        win = self._new_dialog("\u6bcf\u65e5\u62bd\u5956", close_guard=close_machine)
+        self._lottery_machine_window = win
         cell, rows, slots, pad = 52, 3, 14, 4
         height, tiles = reel_geometry(cell, rows, pad, slots)
 
@@ -7663,9 +8610,9 @@ class App(ctk.CTk):
             # The tape is a loop, so slot 1 is where the reel must come to rest.
             # Filling `tiles` entries from that loop (rather than one pass of
             # `slots`) is what keeps symbols under the window at every offset.
-            cycle = [random.choice(slg_titles.SLOT_SYMBOLS) for _ in range(slots)]
-            cycle[1] = finals[idx]
+            cycle = [slg_titles.SLOT_SYMBOLS[0] for _ in range(slots)]
             strip = []
+            symbol_items = []
             for k in range(tiles):
                 img = imgs.get(cycle[k % slots])
                 if img is None:
@@ -7673,7 +8620,9 @@ class App(ctk.CTk):
                 item = canvas.create_image(
                     pad + cell / 2, pad + k * cell + cell / 2, image=img)
                 strip.append(item)
-            reels.append({"canvas": canvas, "strip": strip, "travel": 0.0,
+                symbol_items.append((k % slots, item))
+            reels.append({"canvas": canvas, "strip": strip, "cycle": cycle,
+                          "symbol_items": symbol_items, "travel": 0.0,
                           "i": 0, "schedule": [], "crossed": 0,
                           "payline": payline, "speed": 0.10})
 
@@ -7683,7 +8632,7 @@ class App(ctk.CTk):
                               font=ui_font(size=15, weight="bold"))
         lever.pack(side="left", padx=(0, 10), pady=10)
 
-        result = ctk.CTkLabel(body, text="拉动拉杆开始抽奖", text_color=MUTED,
+        result = ctk.CTkLabel(body, text="\u62c9\u52a8\u62c9\u6746\u5f00\u59cb\u62bd\u5956", text_color=MUTED,
                               font=ui_font(size=15, weight="bold"))
         result.pack(pady=(12, 0))
         prize_slot = ctk.CTkFrame(body, fg_color="transparent")
@@ -7758,7 +8707,80 @@ class App(ctk.CTk):
             _advance(r, r["speed"])
             r["canvas"].after(16, lambda: _spin_tick(r))
 
+        def start_spin(outcome, confirmed_cloud=False):
+            nonlocal prize, grand, jackpot, finals, label, spinning, stopping
+            if (not isinstance(outcome, dict)
+                    or outcome.get("kind") not in ("title", "points")
+                    or "value" not in outcome):
+                raise ValueError("invalid lottery result")
+            new_grand = outcome["kind"] == "title"
+            new_jackpot = (new_grand and
+                           outcome.get("value") == slg_titles.LOTTERY_JACKPOT_TITLE)
+            new_finals = self._lottery_finals(outcome)
+            new_label = self._lottery_label(outcome)
+            if confirmed_cloud:
+                pref_key = getattr(self, "_lottery_pending_pref_key", None)
+                if pref_key is None:
+                    try:
+                        pref_key = self._lottery_request_pref_name()
+                    except slg_account.AccountError:
+                        # An already confirmed result can outlive its session.
+                        # There is no account-specific pending key to clear.
+                        pref_key = None
+                if pref_key is not None:
+                    try:
+                        slg_db.set_pref(self.conn, pref_key, "")
+                    except (sqlite3.Error, OSError):
+                        # The server has already committed this draw. Keep its
+                        # idempotency key for a safe retry, but reveal the prize.
+                        pass
+                    else:
+                        self._lottery_pending_pref_key = None
+            prize = outcome
+            grand = new_grand
+            jackpot = new_jackpot
+            finals = new_finals
+            label = new_label
+            pending[0] = False
+            for idx, reel in enumerate(reels):
+                symbol = finals[idx]
+                cycle = [random.choice(slg_titles.SLOT_SYMBOLS) for _ in range(slots)]
+                cycle[1] = symbol
+                reel["cycle"] = cycle
+                for cycle_index, item in reel["symbol_items"]:
+                    image = imgs.get(cycle[cycle_index])
+                    if image is not None:
+                        reel["canvas"].itemconfigure(item, image=image)
+            result.configure(text="\u6b63\u5728\u63ed\u6653\u2026")
+            spinning = True
+            stopping = False
+            lever.configure(text="\u505c\u6b62", state="normal")
+            for reel in reels:
+                _spin_tick(reel)
+
+        def complete_draw(prize=None, error=None):
+            pending[0] = False
+            if error:
+                result.configure(text="\u7ed3\u679c\u5c1a\u672a\u786e\u8ba4\uff0c\u53ef\u5b89\u5168\u91cd\u8bd5", text_color=MUTED)
+                lever.configure(text="\u91cd\u8bd5\u786e\u8ba4", state="normal")
+                messagebox.showwarning("\u6bcf\u65e5\u62bd\u5956", str(error), parent=win)
+                return
+            try:
+                start_spin(prize, confirmed_cloud=True)
+            except (KeyError, TypeError, ValueError, sqlite3.Error,
+                    slg_account.AccountError) as exc:
+                result.configure(text="\u62bd\u5956\u7ed3\u679c\u65e0\u6cd5\u786e\u8ba4\uff0c\u8bf7\u91cd\u8bd5", text_color=MUTED)
+                lever.configure(text="\u91cd\u8bd5\u786e\u8ba4", state="normal")
+                messagebox.showwarning(
+                    "\u6bcf\u65e5\u62bd\u5956",
+                    "\u62bd\u5956\u7ed3\u679c\u65e0\u6cd5\u4fdd\u5b58\u6216\u8bfb\u53d6\uff0c\u4f1a\u4f7f\u7528\u540c\u4e00\u8bf7\u6c42\u91cd\u8bd5\u786e\u8ba4\u3002\n%s" % exc,
+                    parent=win)
+
+        self._lottery_complete = complete_draw
+
         def _reveal():
+            nonlocal stopping
+            stopping = False
             result.configure(text=label, text_color=ACCENT if grand else TEXT)
             self._refresh_shop_balance()
             if sound:
@@ -7848,20 +8870,69 @@ class App(ctk.CTk):
 
         def toggle():
             nonlocal spinning, stopping
-            if stopping:
+            if pending[0] or stopping:
                 return
-            if not spinning:
-                spinning = True
-                lever.configure(text="停止")
-                for r in reels:
-                    _spin_tick(r)
-            else:
+            if spinning:
                 spinning = False
                 stopping = True
-                lever.configure(text="停止中", state="disabled")
+                lever.configure(text="\u505c\u6b62\u4e2d", state="disabled")
                 stop_all()
+                return
+            if grand or finals:
+                return
+
+            pending[0] = True
+            lever.configure(text="\u6b63\u5728\u786e\u8ba4", state="disabled")
+            result.configure(text="\u6b63\u5728\u786e\u8ba4\u62bd\u5956\u7ed3\u679c\u2026")
+            if self._has_cloud_account():
+                try:
+                    pref_key = self._lottery_request_pref_name()
+                    request_id = slg_db.get_pref(self.conn, pref_key, "") or ""
+                    if (len(request_id) != 32 or
+                            any(c not in "0123456789abcdef" for c in request_id)):
+                        request_id = uuid.uuid4().hex
+                    # Commit before the network call. A response lost before the
+                    # next launch can then be replayed without a second debit.
+                    slg_db.set_pref(self.conn, pref_key, request_id)
+                    self._lottery_pending_pref_key = pref_key
+                except (slg_account.AccountError, OSError, ValueError,
+                        sqlite3.Error) as exc:
+                    complete_draw(error="本机无法保存抽奖请求，未发送到云端：%s" % exc)
+                    return
+                self._set_progress("\u6b63\u5728\u4e0e\u4e91\u7aef\u786e\u8ba4\u62bd\u5956")
+                self._run_cloud_action(
+                    "lottery", lambda rid=request_id: slg_account.lottery_draw(rid))
+                return
+
+            dev = slg_titles.dev_unlocked(self.conn)
+            if not dev and slg_titles.lottery_draws_today(self.conn) >= slg_titles.LOTTERY_DAILY_LIMIT:
+                pending[0] = False
+                lever.configure(text="\u62c9\u6746", state="normal")
+                message = "\u4eca\u5929\u7684\u62bd\u5956\u6b21\u6570\u5df2\u7528\u5b8c"
+                result.configure(text=message)
+                messagebox.showinfo("\u6bcf\u65e5\u62bd\u5956", message, parent=win)
+                return
+            if slg_db.points_balance(self.conn) < slg_titles.LOTTERY_COST:
+                pending[0] = False
+                lever.configure(text="\u62c9\u6746", state="normal")
+                message = "\u79ef\u5206\u4e0d\u8db3\uff0c\u62bd\u5956\u9700\u8981 %d \u79ef\u5206" % slg_titles.LOTTERY_COST
+                result.configure(text=message)
+                messagebox.showwarning("\u79ef\u5206\u4e0d\u8db3", message, parent=win)
+                return
+            ok, message, prize = slg_titles.draw_lottery(self.conn)
+            if not ok:
+                pending[0] = False
+                lever.configure(text="\u62c9\u6746", state="normal")
+                result.configure(text=message)
+                messagebox.showwarning("\u6bcf\u65e5\u62bd\u5956", message, parent=win)
+                return
+            slg_remote.report(self.conn, "lottery", {"grand": prize["kind"] == "title"})
+            self._refresh_shop_balance()
+            start_spin(prize)
 
         lever.configure(command=toggle)
+        if initial_prize is not None:
+            complete_draw(prize=initial_prize)
 
     def _shop_tile(self, parent, item, owned, equipped, points, width=None):
         """One shelf product as a fixed-size card.
@@ -8848,6 +9919,22 @@ class App(ctk.CTk):
                          text_color=DANGER_TEXT if attention else TEXT,
                          width=46 if attention else 38)
 
+    def _maybe_prompt_announcement_reward(self):
+        """Open the announcement once this launch for a server-confirmed reward."""
+        if (getattr(self, "_announcement_reward_prompted", False)
+                or not self._has_usable_cloud_session()):
+            return False
+        status = getattr(self, "_maintenance_reward_status", None)
+        if not isinstance(status, dict) or status.get("error"):
+            return False
+        campaign = status.get("campaign")
+        if (not isinstance(campaign, dict) or not campaign.get("active")
+                or status.get("claimed")):
+            return False
+        self._announcement_reward_prompted = True
+        self.open_announcement()
+        return True
+
     def _fetch_maintenance_reward_status(self):
         if self._maintenance_reward_fetching:
             return
@@ -8889,6 +9976,8 @@ class App(ctk.CTk):
         if status.get("error"):
             label.configure(text="暂时无法读取全服积分活动；请稍后重试。")
             button.configure(text="暂不可领取", state="disabled")
+            button.configure(text="\u91cd\u8bd5\u67e5\u8be2", state="normal",
+                             command=self._fetch_maintenance_reward_status)
             return
         campaign = status.get("campaign")
         if not isinstance(campaign, dict) or not campaign.get("active"):
@@ -8899,7 +9988,8 @@ class App(ctk.CTk):
             label.configure(text="这份账号已领取过本次活动奖励。")
             button.configure(text="已领取", state="disabled")
             return
-        if is_test_build():
+        if (is_test_build()
+                and not (status.get("claimable") or campaign.get("claimable"))):
             label.configure(text="测试包不会领取正式活动奖励。稳定版用户可领取一次 %d 云端积分。"
                             % max(0, int(campaign.get("amount") or 100)))
             button.configure(text="请使用稳定版", state="disabled")
@@ -8912,7 +10002,12 @@ class App(ctk.CTk):
                          command=self._claim_maintenance_reward)
 
     def _claim_maintenance_reward(self):
-        if is_test_build():
+        status = getattr(self, "_maintenance_reward_status", None) or {}
+        campaign = status.get("campaign")
+        server_claimable = bool(
+            status.get("claimable") or
+            (isinstance(campaign, dict) and campaign.get("claimable")))
+        if is_test_build() and not server_claimable:
             self._set_progress("测试版不会领取正式活动积分，请使用稳定版")
             return
         if not self._require_personal_access("领取维护补偿", cloud_only=True):
@@ -8931,6 +10026,10 @@ class App(ctk.CTk):
             lambda: slg_account.claim_maintenance_reward(campaign["id"]))
 
     def open_announcement(self):
+        # Manual access also satisfies this launch's prompt so a status reply
+        # arriving a moment later does not reopen the same dialog.
+        if self._has_usable_cloud_session():
+            self._announcement_reward_prompted = True
         win = self._new_dialog("公告", "480x600")
         slg_db.set_pref(self.conn, "announcement.read.launch-0.23.0", "1")
         remote_config = self._remote_config if isinstance(self._remote_config, dict) else {}
@@ -9089,12 +10188,14 @@ class App(ctk.CTk):
         moved in here and the sort controls moved up into the space, which also
         left room for the gear beside them.
         """
-        win = self._new_dialog("设置", "420x500")
-        ctk.CTkLabel(win, text="主题", text_color=TEXT, anchor="w",
+        win = self._new_dialog("设置", "460x650")
+        body = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=4, pady=4)
+        ctk.CTkLabel(body, text="主题", text_color=TEXT, anchor="w",
                      font=ui_font(size=14, weight="bold")).pack(
             fill="x", padx=16, pady=(16, 0))
         switch = ctk.CTkSegmentedButton(
-            win, values=[_THEME_LABELS[m] for m in ("light", "dark", "system")],
+            body, values=[_THEME_LABELS[m] for m in ("light", "dark", "system")],
             height=34, corner_radius=8, fg_color=CARD, selected_color=ACCENT,
             selected_hover_color=ACCENT, unselected_color=CARD,
             unselected_hover_color=CARD_HOVER, text_color=TEXT,
@@ -9102,14 +10203,30 @@ class App(ctk.CTk):
             command=lambda label: self._pick_theme_from(win, label))
         switch.pack(fill="x", padx=16, pady=(8, 0))
         switch.set(_THEME_LABELS[self.theme_mode])
-        ctk.CTkLabel(win, text="「跟随系统」每 5 秒采样一次 Windows 的浅色/深色设置，"
-                               "所以会有一小段延迟；手动选浅色或深色则会被记住。",
+        ctk.CTkLabel(body, text="「跟随系统」每 5 秒采样一次 Windows 的浅色/深色设置，"
+                                "所以会有一小段延迟；手动选浅色或深色则会被记住。",
                      text_color=MUTED, font=ui_font(size=11), justify="left",
                      anchor="w", wraplength=380).pack(fill="x", padx=16, pady=(6, 14))
-        ctk.CTkLabel(win, text="抽奖音效", text_color=TEXT, anchor="w",
+        ctk.CTkLabel(body, text="界面尺寸", text_color=TEXT, anchor="w",
                      font=ui_font(size=14, weight="bold")).pack(
             fill="x", padx=16, pady=(0, 0))
-        sound = ctk.CTkSwitch(win, text="每日抽奖的转盘声与中奖声", onvalue="1",
+        scale_values = [entry["label"] for entry in UI_SCALE_PROFILES.values()]
+        scale_menu = ctk.CTkOptionMenu(
+            body, values=scale_values, height=34, corner_radius=8,
+            fg_color=CARD, button_color=CHIP, button_hover_color=CARD_HOVER,
+            text_color=TEXT, font=ui_font(size=12),
+            command=self._pick_ui_scale_profile)
+        scale_menu.pack(fill="x", padx=16, pady=(8, 0))
+        scale_menu.set(UI_SCALE_PROFILES[self.ui_scale_profile]["label"])
+        ctk.CTkLabel(
+            body, text="只调整本软件窗口和控件，不会修改 Windows 显示分辨率。"
+                      "分辨率档位是界面缩放预设；「自动」沿用系统 DPI。",
+            text_color=MUTED, font=ui_font(size=11), justify="left",
+            anchor="w", wraplength=400).pack(fill="x", padx=16, pady=(6, 14))
+        ctk.CTkLabel(body, text="抽奖音效", text_color=TEXT, anchor="w",
+                     font=ui_font(size=14, weight="bold")).pack(
+            fill="x", padx=16, pady=(0, 0))
+        sound = ctk.CTkSwitch(body, text="每日抽奖的转盘声与中奖声", onvalue="1",
                               offvalue="0", font=ui_font(size=12),
                               text_color=MUTED, progress_color=ACCENT,
                               command=lambda: slg_db.set_pref(
@@ -9125,7 +10242,7 @@ class App(ctk.CTk):
         ann_label = ("公告 · 补偿待领取" if reward_pending else
                      "公告 · 有新内容" if self._announcement_has_unread() else "公告")
         ctk.CTkButton(
-            win, text=ann_label, height=34, corner_radius=8,
+            body, text=ann_label, height=34, corner_radius=8,
             fg_color=CHIP, text_color=ACCENT if self._announcement_has_unread() else TEXT,
             hover_color=CARD_HOVER, font=ui_font(size=12),
             command=lambda: (win.destroy(), self.open_announcement())
@@ -9134,10 +10251,152 @@ class App(ctk.CTk):
             ("查看新手引导…",
              "重新打开首次启动时的那份功能简介和使用说明。",
              self._show_welcome, None),
+            ("意见反馈…",
+             "把问题、建议或资料纠错私下发给开发者；被采纳后才可能获得奖励。",
+             self.open_feedback, None),
             ("关于本软件…",
              "版本信息、检查软件更新、GitHub 主页、交流群与数据目录。",
              self.open_about, None),
-        ))
+        ), parent=body)
+
+    def _pick_ui_scale_profile(self, label):
+        profile = UI_SCALE_LABEL_TO_PROFILE.get(label, "auto")
+        self._apply_ui_scale_profile(profile)
+
+    def open_data_sources(self):
+        """Show the public catalogue references in one place."""
+        win = self._new_dialog("数据来源", "430x300")
+        ctk.CTkLabel(
+            win, text="目录资料参考来源", text_color=TEXT,
+            font=ui_font(size=16, weight="bold")).pack(
+                anchor="w", padx=18, pady=(18, 4))
+        ctk.CTkLabel(
+            win, text="可点击名称打开对应站点。", text_color=MUTED,
+            font=ui_font(size=12), anchor="w").pack(
+                anchor="w", padx=18, pady=(0, 8))
+        for name, domain, url in (
+                ("Dikgames", "dikgames.com", SITE_URL),
+                ("F95zone.to.it", "f95zone.to.it", F95_SOURCE_URL)):
+            row = ctk.CTkFrame(win, fg_color=CARD, corner_radius=9)
+            row.pack(fill="x", padx=16, pady=5)
+            text = ctk.CTkFrame(row, fg_color="transparent")
+            text.pack(side="left", fill="x", expand=True, padx=12, pady=8)
+            ctk.CTkLabel(text, text=name, text_color=TEXT, anchor="w",
+                         font=ui_font(size=13, weight="bold")).pack(anchor="w")
+            ctk.CTkLabel(text, text=domain, text_color=MUTED, anchor="w",
+                         font=ui_font(size=11)).pack(anchor="w", pady=(1, 0))
+            ctk.CTkButton(
+                row, text="打开", width=64, height=30, corner_radius=7,
+                fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+                font=ui_font(size=11), command=lambda target=url:
+                    webbrowser.open(target)).pack(side="right", padx=10)
+        ctk.CTkButton(
+            win, text="关闭", height=32, corner_radius=8,
+            fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+            font=ui_font(size=12), command=win.destroy).pack(
+                fill="x", padx=16, pady=(8, 14))
+
+    def open_feedback(self):
+        """Submit a short private note for the developer to review."""
+        if not self._require_personal_access("提交意见反馈", cloud_only=True):
+            return
+        if getattr(self, "_feedback_submission_pending", False):
+            messagebox.showinfo("意见反馈", "上一条反馈正在提交，请稍候。", parent=self)
+            return
+        win = self._new_dialog("意见反馈", "460x570")
+        ctk.CTkLabel(win, text="把遇到的问题或想法告诉开发者",
+                     text_color=TEXT, anchor="w",
+                     font=ui_font(size=15, weight="bold")).pack(
+            fill="x", padx=18, pady=(16, 3))
+        ctk.CTkLabel(
+            win, text="反馈仅供管理员查看。请勿填写账号密钥等敏感信息；经审核采纳的反馈才可能获得积分或头衔。",
+            text_color=MUTED, font=ui_font(size=11), anchor="w",
+            justify="left", wraplength=420).pack(
+                fill="x", padx=18, pady=(0, 10))
+
+        ctk.CTkLabel(win, text="反馈类型", text_color=TEXT, anchor="w",
+                     font=ui_font(size=12)).pack(fill="x", padx=18)
+        category_labels = {
+            "问题反馈": "bug",
+            "功能建议": "suggestion",
+            "资料纠错": "data_correction",
+            "其他": "other",
+        }
+        category = tk.StringVar(master=win, value="功能建议")
+        ctk.CTkOptionMenu(
+            win, variable=category, values=list(category_labels), height=34,
+            corner_radius=8, fg_color=CARD, button_color=CHIP,
+            button_hover_color=CARD_HOVER, text_color=TEXT,
+            font=ui_font(size=12)).pack(fill="x", padx=18, pady=(4, 10))
+
+        ctk.CTkLabel(win, text="内容（20–500 字）", text_color=TEXT,
+                     anchor="w", font=ui_font(size=12)).pack(
+            fill="x", padx=18)
+        body = ctk.CTkTextbox(
+            win, height=210, corner_radius=8, fg_color=BG,
+            text_color=TEXT, border_width=1, border_color=CHIP,
+            font=ui_font(size=12), wrap="word")
+        body.pack(fill="both", expand=True, padx=18, pady=(4, 4))
+        counter = ctk.CTkLabel(win, text="0 / 500 字", text_color=MUTED,
+                               anchor="e", font=ui_font(size=11))
+        counter.pack(fill="x", padx=18)
+        status = ctk.CTkLabel(win, text="", text_color=MUTED,
+                              anchor="w", justify="left",
+                              font=ui_font(size=11), wraplength=420)
+        status.pack(fill="x", padx=18, pady=(4, 2))
+        buttons = ctk.CTkFrame(win, fg_color="transparent")
+        buttons.pack(fill="x", padx=18, pady=(5, 14))
+        submit_button = ctk.CTkButton(
+            buttons, text="提交反馈", height=36, corner_radius=8,
+            fg_color=ACCENT, text_color=ON_ACCENT, font=ui_font(size=12))
+        submit_button.pack(side="left", expand=True, fill="x")
+        ctk.CTkButton(
+            buttons, text="取消", height=36, corner_radius=8,
+            fg_color=CHIP, text_color=TEXT, hover_color=CARD_HOVER,
+            font=ui_font(size=12), command=win.destroy).pack(
+                side="left", expand=True, fill="x", padx=(8, 0))
+
+        form = {"win": win, "body": body, "counter": counter,
+                "status": status, "submit": submit_button,
+                "category": category, "pending": False}
+        self._feedback_form = form
+
+        def update_counter(_event=None):
+            if not win.winfo_exists():
+                return
+            count = len(body.get("1.0", "end-1c").strip())
+            counter.configure(text="%d / 500 字" % count,
+                              text_color=(DANGER_TEXT if count > 500 else MUTED))
+
+        def submit():
+            if (form["pending"]
+                    or getattr(self, "_feedback_submission_pending", False)):
+                return
+            content = body.get("1.0", "end-1c").strip()
+            count = len(content)
+            if not 20 <= count <= 500:
+                status.configure(text="请将内容控制在 20–500 字。",
+                                 text_color=DANGER_TEXT)
+                return
+            selected = category.get()
+            form["pending"] = True
+            self._feedback_submission_pending = True
+            submit_button.configure(state="disabled", text="正在提交…")
+            status.configure(text="正在安全地发送反馈…", text_color=MUTED)
+            self._run_cloud_action(
+                "feedback_submit",
+                lambda: slg_account.submit_feedback(
+                    category_labels[selected], content))
+
+        def update_after_edit(_event=None):
+            if win.winfo_exists():
+                win.after_idle(update_counter)
+
+        body.bind("<KeyRelease>", update_after_edit, add="+")
+        body.bind("<<Paste>>", update_after_edit, add="+")
+        body.bind("<<Cut>>", update_after_edit, add="+")
+        submit_button.configure(command=submit)
+        body.focus_set()
 
     def _pick_theme_from(self, win, label):
         """Close the settings dialog, then change the theme.
@@ -9666,8 +10925,11 @@ class App(ctk.CTk):
             for w in frame.winfo_children():
                 w.destroy()
             text = entry.get().strip()
+            translation_ids = (slg_db.title_translation_game_ids(self.conn, text)
+                               if text else None)
             rows = slg_db.find_games(self.conn, search=text or None, origin=None,
-                                     sort="title", desc=False)
+                                     sort="title", desc=False,
+                                     translation_ids=translation_ids)
             for g in rows[:200]:
                 ctk.CTkButton(
                     frame, text=g["title"], height=30, corner_radius=8, anchor="w",
@@ -10044,7 +11306,11 @@ class App(ctk.CTk):
                         "部分接口需要 VPN 或代理才能访问。")
         self._help_body("请求超时会在 8 秒内显示「网络错误：连接超时」，不会一直停在等待状态。",
                         color=MUTED)
-        self._help_link(SITE_LABEL, SITE_URL)
+        ctk.CTkButton(
+            self._help_frame, text=SITE_LABEL, height=32, corner_radius=7,
+            fg_color=CHIP, text_color=ACCENT, hover_color=CARD_HOVER,
+            font=ui_font(size=12), command=self.open_data_sources).pack(
+                fill="x", padx=10, pady=(0, 6))
         self._help_qa("Q：翻译要怎么开？",
                       "A：点左侧栏的「更多工具…」→「翻译设置…」，有两条路。\n"
                       "· 免费机翻：什么都不用填，选上就能用，简介和游戏名都翻。"
@@ -10343,6 +11609,7 @@ class App(ctk.CTk):
 
     def _handle_remote_config(self, cfg):
         self._remote_config = cfg or {}
+        self._remote_config_loaded = True
         flags = self._remote_config.get("flags") or {}
         self._remote_flags = flags
 
@@ -10357,12 +11624,13 @@ class App(ctk.CTk):
 
         # Forced update beats the soft GitHub notice.
         minv = self._remote_config.get("min_version")
-        if minv and slg_update.is_newer(minv, APP_VERSION):
+        if minv and slg_update.is_newer(minv, display_app_version()):
             self._show_forced_update(minv)
 
         # Maintenance: disable the sync button and warn once.
         if self._remote_config.get("maintenance"):
             self._show_maintenance(self._remote_config.get("maintenance_msg"))
+        self._maybe_prompt_announcement_reward()
 
     def _show_announcement(self, ann):
         title = ann.get("title") or "公告"
@@ -10384,7 +11652,7 @@ class App(ctk.CTk):
                      font=ui_font(size=16, weight="bold")).pack(
             fill="x", padx=20, pady=(18, 4))
         ctk.CTkLabel(win, text="当前版本 %s 已不再支持，需要 %s 及以上版本。"
-                     % (APP_VERSION, min_version), text_color=MUTED,
+                      % (display_app_version(), min_version), text_color=MUTED,
                      font=ui_font(size=13), justify="left", wraplength=360).pack(
             fill="x", padx=20, pady=(0, 12))
         ctk.CTkButton(win, text="前往下载", height=34, corner_radius=8,
@@ -10416,7 +11684,7 @@ class App(ctk.CTk):
         found = None
         try:
             with slg_db.session() as conn:
-                found = slg_update.check(conn, APP_VERSION, force=force)
+                found = slg_update.check(conn, display_app_version(), force=force)
         except Exception as exc:  # noqa: BLE001 - a version check is never fatal
             self.queue.put(("note", "检查更新失败：%s" % str(exc)[:100]))
             return
@@ -10425,7 +11693,7 @@ class App(ctk.CTk):
         elif force:
             # Only on a manual click. The startup check saying "已是最新" every
             # launch is noise in the one line that also carries progress.
-            self.queue.put(("note", "已是最新版本 %s" % APP_VERSION))
+            self.queue.put(("note", "已是最新版本 %s" % display_app_version()))
 
     def _show_update(self, release):
         """The sidebar notice, the settings line, and a modal changelog dialog."""

@@ -1,9 +1,11 @@
 """Focused checks for the 0.23 cloud client contract and credential storage."""
 
 import os
+import io
 import secrets
 import tempfile
 import unittest
+import urllib.error
 from unittest import mock
 
 import slg_account
@@ -44,6 +46,18 @@ class SessionStorageTests(unittest.TestCase):
         self.assertEqual(send.call_args.kwargs["payload"], {
             "login_key": "login-key", "recovery_code": "recovery-code"})
 
+    def test_old_server_json_404_hides_optional_quests(self):
+        response = urllib.error.HTTPError(
+            "https://slg-king.com/account/quests", 404, "Not Found", {},
+            io.BytesIO(b'{"error":"not found"}'))
+        with mock.patch.object(slg_account, "session", return_value={
+                "account_id": "account", "device_token": "session"}), \
+                mock.patch.object(slg_account._OPENER, "open",
+                                  side_effect=response):
+            with self.assertRaisesRegex(slg_account.ServerNotReady,
+                                        "每日任务接口尚未部署"):
+                slg_account.quests()
+
 
 class DeveloperIdentityClientTests(unittest.TestCase):
     def tearDown(self):
@@ -72,7 +86,7 @@ class DeveloperIdentityClientTests(unittest.TestCase):
     def test_grant_all_appearances_requires_developer_mode_and_uses_current_route(self):
         slg_account.set_developer_mode(False)
         with mock.patch.object(slg_account, "request") as send:
-            with self.assertRaises(slg_account.AccountError):
+            with self.assertRaisesRegex(slg_account.AccountError, "解锁全部装扮"):
                 slg_account.developer_grant_all_appearances("owner-key")
         send.assert_not_called()
 
@@ -89,7 +103,7 @@ class DeveloperIdentityClientTests(unittest.TestCase):
         self.assertEqual(send.call_args.kwargs["extra_headers"], {
             "X-SLG-Developer-Key": "owner-key"})
         with mock.patch.object(slg_account, "request", return_value=[]):
-            with self.assertRaises(slg_account.AccountError):
+            with self.assertRaisesRegex(slg_account.AccountError, "开发者装扮状态"):
                 slg_account.developer_grant_all_appearances("owner-key")
 
 

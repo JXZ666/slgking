@@ -9,6 +9,7 @@ screen. Run with:
 
 import itertools
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -48,6 +49,25 @@ class _InlineThread:
         self._target()
 
 
+class CloudActionRecovery(unittest.TestCase):
+    def test_unexpected_worker_error_still_unblocks_the_ui(self):
+        def fail():
+            raise RuntimeError("private internal details")
+
+        holder = mock.Mock()
+        with mock.patch.object(slg_gui.threading, "Thread", _InlineThread), \
+                mock.patch.object(slg_gui.slg_db, "app_dir",
+                                  return_value=tempfile.gettempdir()), \
+                mock.patch.object(slg_gui.slg_util, "log_crash") as log:
+            slg_gui.App._run_cloud_action(holder, "feedback_submit", fail)
+        log.assert_called_once()
+        kind, payload = holder.queue.put.call_args.args[0]
+        self.assertEqual(kind, "cloud_action")
+        self.assertEqual(payload[:2], ("feedback_submit", None))
+        self.assertIn("重试", payload[2])
+        self.assertNotIn("private internal details", payload[2])
+
+
 class FlowRows(unittest.TestCase):
     def test_wraps_at_the_available_width(self):
         # 100 + 4 + 100 = 204 fits in 250; a third chip would need 308.
@@ -71,6 +91,73 @@ class FlowRows(unittest.TestCase):
         self.assertGreater(rows[-1], 10)
         # Rows only ever step up by one, so the placement loop cannot skip a row.
         self.assertEqual(rows, sorted(rows))
+
+
+class DetailOverviewWrap(unittest.TestCase):
+    def test_wrap_tracks_content_width_and_windows_scale(self):
+        # Matching logical widths at 100% and 200% Windows scaling should give
+        # the same CustomTkinter wraplength.
+        self.assertEqual(slg_gui.detail_overview_wraplength(520, 1.0),
+                         slg_gui.detail_overview_wraplength(1040, 2.0))
+
+    def test_wider_4k_content_region_gets_a_wider_description_line(self):
+        # These are measured detail-box widths, not monitor dimensions: the
+        # actual window scale is supplied separately for a 4K/high-DPI desktop.
+        compact = slg_gui.detail_overview_wraplength(390, 1.0)
+        full_hd = slg_gui.detail_overview_wraplength(540, 1.0)
+        four_k_at_200_percent = slg_gui.detail_overview_wraplength(1080, 2.0)
+        self.assertGreater(full_hd, compact)
+        self.assertEqual(four_k_at_200_percent, full_hd)
+
+    def test_minimum_detail_width_stays_inside_a_narrow_panel(self):
+        self.assertEqual(slg_gui.detail_overview_wraplength(210, 1.0), 186)
+        self.assertEqual(slg_gui.detail_overview_wraplength(420, 2.0), 186)
+
+
+class UiScaleProfiles(unittest.TestCase):
+    def test_manual_profiles_target_effective_scale_without_dpi_double_count(self):
+        widget_factor, window_factor = slg_gui.ui_scale_multipliers(
+            "3840x2160", system_window_dpi=1.5, system_widget_dpi=2.0)
+        self.assertAlmostEqual(widget_factor * 2.0, 1.30)
+        self.assertAlmostEqual(window_factor * 1.5, 1.30)
+        self.assertEqual(slg_gui.ui_scale_multipliers("auto", 1.5, 2.0),
+                         (1.0, 1.0))
+
+    def test_profile_names_and_bad_values_resolve_safely(self):
+        self.assertEqual(slg_gui.normalize_ui_scale_profile("2560x1440"),
+                         "2560x1440")
+        self.assertEqual(slg_gui.normalize_ui_scale_profile("unknown"), "auto")
+        self.assertEqual(slg_gui.ui_scale_factor("1366x768"), 0.90)
+        self.assertEqual(slg_gui.ui_scale_factor("1920x1080"), 1.0)
+
+    def test_saved_profile_restores_and_auto_is_a_persistable_reset(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE prefs (key TEXT PRIMARY KEY, value TEXT)")
+        try:
+            slg_db.set_pref(conn, slg_gui.PREF_UI_SCALE, "3840x2160")
+            self.assertEqual(slg_gui.load_ui_scale_profile(conn), "3840x2160")
+            slg_db.set_pref(conn, slg_gui.PREF_UI_SCALE, "auto")
+            self.assertEqual(slg_gui.load_ui_scale_profile(conn), "auto")
+            slg_db.set_pref(conn, slg_gui.PREF_UI_SCALE, "invalid-value")
+            self.assertEqual(slg_gui.load_ui_scale_profile(conn), "auto")
+        finally:
+            conn.close()
+
+    def test_window_size_clamps_to_available_work_area(self):
+        width, height = slg_gui.clamp_scaled_size(
+            1180, 760, scale=1.5, screen_width=1366, screen_height=768,
+            margin=48, min_width=700, min_height=480)
+        self.assertLessEqual(width * 1.5, 1366 - 48)
+        self.assertLessEqual(height * 1.5, 768 - 48)
+        self.assertGreaterEqual(width, 1)
+        self.assertGreaterEqual(height, 1)
+
+    def test_4k_profile_keeps_preview_wrap_in_logical_ctk_units(self):
+        effective_scale = slg_gui.ui_scale_factor("3840x2160")
+        self.assertEqual(
+            slg_gui.detail_overview_wraplength(1080 * effective_scale,
+                                               effective_scale), 1056)
 
 
 class ShopColumns(unittest.TestCase):
@@ -750,6 +837,268 @@ class SidebarFit(unittest.TestCase):
         self.app._destroy_detail()
         self._finish()
 
+    def test_quest_claim_posts_once_then_refreshes_server_progress(self):
+        actions = []
+
+        def capture(kind, func):
+            actions.append((kind, func))
+
+        daily = {"id": "daily_lottery", "label": "每日抽奖", "period": "daily",
+                 "progress": 1, "target": 1, "reward": 5,
+                 "claimable": True, "claimed": False}
+        daily_public = {"id": "daily_public_comment",
+                        "label": "发布一条公开评论", "period": "daily",
+                        "progress": 0, "target": 1, "reward": 15,
+                        "claimable": False, "claimed": False}
+        weekly = {"id": "weekly_comments_3", "label": "累计发布三条公开评论",
+                  "period": "weekly", "progress": 0, "target": 3, "reward": 30,
+                  "claimable": False, "claimed": False}
+        weekly_signin = {"id": "weekly_signin_5", "label": "累计登录5天",
+                         "period": "weekly", "progress": 4, "target": 5,
+                         "reward": 30,
+                  "claimable": False, "claimed": False}
+        with mock.patch.object(slg_gui.slg_account, "session",
+                               return_value={"account_id": "quest-test"}), \
+                mock.patch.object(self.app, "_run_cloud_action",
+                                  side_effect=capture):
+            self.app._reset_quests_for_account()
+            self.app.open_shop()
+            generation = self.app._quest_generation
+            self.app._cloud_action_result(
+                "quest_status_%d" % generation,
+                {"timezone": "Asia/Shanghai", "day": "2026-09-27",
+                 "week": "2026-W39",
+                 "tasks": [daily, daily_public, weekly, weekly_signin]}, None)
+            self.app.update()
+            self.assertEqual(set(self.app._quest_claim_buttons),
+                             {"daily_lottery", "daily_public_comment",
+                              "weekly_comments_3", "weekly_signin_5"})
+            rows = self._panel_texts()
+            self.assertTrue(any("1/1" in text and "+5" in text for text in rows))
+            self.assertTrue(any("发布一条公开评论" in text and "+15" in text
+                                for text in rows))
+            self.assertTrue(any("累计发布三条公开评论" in text and "0/3" in text
+                                for text in rows))
+            self.assertTrue(any("累计登录5天" in text and "4/5" in text
+                                for text in rows))
+            self.app._quest_claim_buttons["daily_lottery"].invoke()
+            claim_kind, post = next((kind, fn) for kind, fn in actions
+                                    if kind.startswith("quest_claim_"))
+            with mock.patch.object(slg_gui.slg_account, "claim_quest",
+                                   return_value={"claimed": True}) as claim:
+                post()
+                claim.assert_called_once_with("daily_lottery")
+            self.assertFalse(self.app._quests_data["tasks"][0]["claimed"],
+                             "claim click guessed progress before a status refresh")
+            self.app._cloud_action_result(claim_kind, {"claimed": True}, None)
+            status_calls = [kind for kind, _fn in actions
+                            if kind.startswith("quest_status_")]
+            self.assertGreaterEqual(len(status_calls), 2,
+                                    "claim must be followed by an authoritative GET")
+            daily_claimed = dict(daily, claimed=True, claimable=False)
+            self.app._cloud_action_result(
+                status_calls[-1],
+                {"timezone": "Asia/Shanghai", "day": "2026-09-27",
+                 "week": "2026-W39",
+                 "tasks": [daily_claimed, daily_public, weekly, weekly_signin]}, None)
+            self.app.update()
+            self.assertEqual(
+                self.app._quest_claim_buttons["daily_lottery"].cget("state"),
+                "disabled")
+        self._close_shop()
+
+    def test_public_comment_and_signin_refresh_authoritative_quest_status(self):
+        with mock.patch.object(self.app, "_fetch_quests") as fetch, \
+                mock.patch.object(self.app, "_set_progress"), \
+                mock.patch.object(self.app, "_refresh_comment_view"):
+            self.app.selected = None
+            self.app._comment_upload_result(
+                "some-game", 7, {"id": 19, "status": "pending"})
+            fetch.assert_not_called()
+            self.app._comment_upload_result(
+                "some-game", 7, {"id": 20, "status": "public"})
+            fetch.assert_called_once_with(force=True)
+
+            fetch.reset_mock()
+            old_mode = self.app._panel_mode
+            self.app._panel_mode = "shop"
+            self.app._cloud_me = {}
+            with mock.patch.object(self.app, "_store_cloud_balance"), \
+                    mock.patch.object(self.app, "_update_shop_signin_button"), \
+                    mock.patch.object(self.app, "_show_signin_result"):
+                self.app._cloud_action_result(
+                    "signin", {"gained": 5, "bonus": 0, "balance": 10,
+                               "day": "2026-09-27", "already": False}, None)
+            fetch.assert_called_once_with(force=True)
+            self.app._panel_mode = old_mode
+
+    def test_runtime_scale_selection_persists_and_resets_to_auto(self):
+        with mock.patch.object(slg_gui.ctk, "set_widget_scaling"), \
+                mock.patch.object(slg_gui.ctk, "set_window_scaling"), \
+                mock.patch.object(slg_db, "set_pref") as save_pref:
+            self.app._apply_ui_scale_profile(
+                "2560x1440", persist=True, resize_main=False)
+            self.assertEqual(self.app.ui_scale_profile, "2560x1440")
+            save_pref.assert_called_once_with(
+                self.app.conn, slg_gui.PREF_UI_SCALE, "2560x1440")
+            self.app._apply_ui_scale_profile(
+                "auto", persist=True, resize_main=False)
+            self.assertEqual(self.app.ui_scale_profile, "auto")
+            self.assertEqual(save_pref.call_args.args[-1], "auto")
+
+    def test_new_cosmetic_ids_have_avatar_and_namecard_drawings(self):
+        window = ctk.CTkToplevel(self.app)
+        host = ctk.CTkFrame(window, fg_color="transparent")
+        host.pack()
+        avatar_ids = (
+            "avatar_frame_gilded_laurel", "avatar_frame_glitch",
+            "avatar_frame_startrail", "avatar_frame_pixel_8bit",
+            "avatar_frame_blood_moon")
+        namecard_ids = (
+            "comment_frame_black_gold_member", "comment_frame_sakura",
+            "comment_frame_mint", "comment_frame_deep_red_velvet")
+        try:
+            for item_id in avatar_ids:
+                canvas = self.app._avatar_frame_canvas(
+                    host, item_id, nickname="测试", size=56)
+                canvas.pack(side="left")
+                self.assertGreater(len(canvas.find_all()), 3, item_id)
+            for item_id in namecard_ids:
+                badge = self.app._comment_nameplate(host, "测试昵称", item_id)
+                self.assertGreater(len(badge.winfo_children()), 2, item_id)
+            self.app.update()
+        finally:
+            window.destroy()
+
+    def test_avatar_frame_rim_surrounds_a_real_profile_picture(self):
+        window = ctk.CTkToplevel(self.app)
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                avatar_path = os.path.join(temp_dir, "avatar.png")
+                slg_gui.Image.new("RGB", (96, 96), "#ce557a").save(avatar_path)
+                with mock.patch.object(slg_gui.slg_db, "avatar_path",
+                                       return_value=avatar_path):
+                    canvas = self.app._avatar_frame_canvas(
+                        window, "avatar_frame_glitch", nickname="测试",
+                        size=64, actual_avatar=True)
+                canvas.pack()
+                self.app.update()
+                avatar, outer_ring = canvas.find_all()[:2]
+                self.assertEqual(canvas.type(avatar), "image")
+                self.assertEqual(canvas.type(outer_ring), "oval")
+                image_box = canvas.bbox(avatar)
+                ring_box = canvas.bbox(outer_ring)
+                self.assertLess(ring_box[0], image_box[0])
+                self.assertLess(ring_box[1], image_box[1])
+                self.assertGreater(ring_box[2], image_box[2])
+                self.assertGreater(ring_box[3], image_box[3])
+        finally:
+            window.destroy()
+
+    def test_old_quest_endpoint_404_hides_the_shop_panel(self):
+        actions = []
+        with mock.patch.object(slg_gui.slg_account, "session",
+                               return_value={"account_id": "quest-test"}), \
+                mock.patch.object(self.app, "_run_cloud_action",
+                                  side_effect=lambda kind, fn: actions.append(kind)):
+            self.app.open_shop()
+            panel = self.app._quest_panel
+            self.assertEqual(panel.winfo_manager(), "pack")
+            generation = self.app._quest_generation
+            self.app._cloud_action_result(
+                "quest_status_%d" % generation, None, "HTTP 404: not found")
+            self.assertIs(self.app._quests_supported, False)
+            self.assertEqual(panel.winfo_manager(), "")
+        self._close_shop()
+
+    def test_logged_out_shop_hides_quests_without_requesting_them(self):
+        actions = []
+        with mock.patch.object(self.app, "_run_cloud_action",
+                               side_effect=lambda kind, fn: actions.append(kind)):
+            self.app.open_shop()
+            self.assertEqual(self.app._quest_panel.winfo_manager(), "")
+            self.assertFalse(any(kind.startswith("quest_status_")
+                                 for kind in actions))
+        self._close_shop()
+
+    def test_announcement_reward_prompts_once_per_launch_and_again_next_launch(self):
+        self.app._remote_config_loaded = True
+        reward_status = {
+            # The production status contract has no claimable field.
+            "claimed": False,
+            "campaign": {"id": "campaign-test", "active": True}}
+        self.app._maintenance_reward_status = None
+        self.app._announcement_reward_prompted = False
+        with mock.patch.object(self.app, "_has_usable_cloud_session",
+                               return_value=True), \
+                mock.patch.object(slg_gui, "is_test_build", return_value=True), \
+                mock.patch.object(self.app, "open_announcement") as open_announcement:
+            # The config may arrive first; the later server status opens once.
+            self.app._remote_config_loaded = False
+            self.app._handle_remote_config({})
+            self.app._cloud_action_result(
+                "maintenance_reward_status", reward_status, None)
+            self.assertEqual(open_announcement.call_count, 1)
+            self.app._cloud_action_result(
+                "maintenance_reward_status", reward_status, None)
+            self.assertEqual(open_announcement.call_count, 1)
+            # This is process memory, so a new App instance starts eligible
+            # again while the same server reward remains unclaimed.
+            self.app._announcement_reward_prompted = False
+            self.assertTrue(self.app._maybe_prompt_announcement_reward())
+            self.assertEqual(open_announcement.call_count, 2)
+
+    def test_claimed_or_unavailable_reward_does_not_prompt(self):
+        self.app._remote_config_loaded = True
+        self.app._announcement_reward_prompted = False
+        self.app._maintenance_reward_status = {
+            "claimed": True,
+            "campaign": {"id": "campaign-test", "active": True}}
+        with mock.patch.object(self.app, "_has_usable_cloud_session",
+                               return_value=True), \
+                mock.patch.object(slg_gui, "is_test_build", return_value=True), \
+                mock.patch.object(self.app, "open_announcement") as open_announcement:
+            self.assertFalse(self.app._maybe_prompt_announcement_reward())
+            open_announcement.assert_not_called()
+            self.app._maintenance_reward_status = {"error": "network unavailable"}
+            self.assertFalse(self.app._maybe_prompt_announcement_reward())
+            with mock.patch.object(self.app, "_has_usable_cloud_session",
+                                   return_value=False):
+                self.app._maintenance_reward_status = {
+                    "claimed": False,
+                    "campaign": {"id": "campaign-test", "active": True}}
+                self.assertFalse(self.app._maybe_prompt_announcement_reward())
+                self.assertFalse(self.app._maybe_prompt_announcement_reward())
+            self.assertFalse(self.app._announcement_reward_prompted)
+            open_announcement.assert_not_called()
+
+    def test_test_build_claim_still_requires_server_claimable(self):
+        self.app._maintenance_reward_status = {
+            "claimed": False,
+            "campaign": {"id": "campaign-test", "active": True}}
+        with mock.patch.object(slg_gui, "is_test_build", return_value=True), \
+                mock.patch.object(self.app, "_set_progress"), \
+                mock.patch.object(self.app, "_require_personal_access",
+                                  return_value=True), \
+                mock.patch.object(self.app, "_run_cloud_action") as run_action:
+            self.app._claim_maintenance_reward()
+            run_action.assert_not_called()
+            self.app._maintenance_reward_status["claimable"] = True
+            self.app._claim_maintenance_reward()
+            run_action.assert_called_once()
+
+    def test_test_build_prompts_for_active_unclaimed_reward_without_claimable(self):
+        self.app._announcement_reward_prompted = False
+        self.app._maintenance_reward_status = {
+            "claimed": False,
+            "campaign": {"id": "campaign-test", "active": True}}
+        with mock.patch.object(self.app, "_has_usable_cloud_session",
+                               return_value=True), \
+                mock.patch.object(slg_gui, "is_test_build", return_value=True), \
+                mock.patch.object(self.app, "open_announcement") as open_announcement:
+            self.assertTrue(self.app._maybe_prompt_announcement_reward())
+            self.assertEqual(open_announcement.call_count, 1)
+
     def _shop_tiles(self):
         """The product cards currently drawn in the shop grid."""
         grid = getattr(self.app, "_shop_grid", None)
@@ -905,20 +1254,30 @@ class SidebarFit(unittest.TestCase):
             self.app.update()
             win = self._dialog("个性装扮")
             self.assertIsNotNone(win, "头衔弹窗没打开")
-            how_to = [b for b in self._buttons_in(win)
-                      if b.cget("text") == "获得方式"]
-            self.assertEqual(len(how_to), len(slg_titles.TITLES),
-                             "不是每枚头衔都有「获得方式」按钮")
-
-            t = slg_titles.TITLES[0]
-            how_to[0].invoke()
-            self.app.update()
-            info = self._dialog(t["name"])
-            self.assertIsNotNone(info, "「获得方式」没开出简介弹窗")
-            texts = self._texts_in(info)
-            self.assertIn(t["desc"], texts, "弹窗里没有简介")
-            self.assertIn(slg_titles.obtain_title_text(t), texts,
-                          "弹窗里没有获取路径")
+            page_size = 5
+            titles = list(slg_titles.TITLES)
+            for start in range(0, len(titles), page_size):
+                page = titles[start:start + page_size]
+                how_to = [b for b in self._buttons_in(win)
+                          if b.cget("text") == "获得方式"]
+                self.assertEqual(len(how_to), len(page),
+                                 "当前页不是每枚头衔都有「获得方式」按钮")
+                for button, title in zip(how_to, page):
+                    button.invoke()
+                    self.app.update()
+                    info = self._dialog(title["name"])
+                    self.assertIsNotNone(info, "「获得方式」没开出简介弹窗")
+                    texts = self._texts_in(info)
+                    self.assertIn(title["desc"], texts, "弹窗里没有简介")
+                    self.assertIn(slg_titles.obtain_title_text(title), texts,
+                                  "弹窗里没有获取途径")
+                    info.destroy()
+                    self.app.update()
+                if start + page_size < len(titles):
+                    next_page = next(b for b in self._buttons_in(win)
+                                     if b.cget("text") == "下一页")
+                    next_page.invoke()
+                    self.app.update()
         finally:
             for child in list(self.app.winfo_children()):
                 if isinstance(child, ctk.CTkToplevel):
@@ -1070,6 +1429,33 @@ class SidebarFit(unittest.TestCase):
         win = self._dialog("每日抽奖")
         self.assertIsNotNone(win, "抽奖窗口没开出来")
         return win
+
+    def test_confirmed_lottery_result_reveals_without_cloud_session(self):
+        with mock.patch.object(slg_gui.slg_account, "session", return_value=None), \
+                mock.patch.object(slg_gui.messagebox, "showwarning") as warning:
+            win = self._open_lottery({"kind": "points", "value": 1})
+            try:
+                self.assertTrue(any("正在揭晓" in text
+                                    for text in self._texts_in(win)))
+                warning.assert_not_called()
+            finally:
+                self._close_lottery()
+
+    def test_confirmed_lottery_result_survives_pending_key_write_failure(self):
+        self.app._lottery_pending_pref_key = "lottery.pending_request.test"
+        with mock.patch.object(slg_db, "set_pref",
+                               side_effect=sqlite3.OperationalError("locked")), \
+                mock.patch.object(slg_gui.messagebox, "showwarning") as warning:
+            win = self._open_lottery({"kind": "points", "value": 1})
+            try:
+                self.assertTrue(any("正在揭晓" in text
+                                    for text in self._texts_in(win)))
+                self.assertEqual(self.app._lottery_pending_pref_key,
+                                 "lottery.pending_request.test")
+                warning.assert_not_called()
+            finally:
+                self._close_lottery()
+                self.app._lottery_pending_pref_key = None
 
     def test_the_lottery_disclaimer_is_not_clipped_by_the_window(self):
         # 免责声明是箱底最后一行。窗口高度以前写死 600，内容比它高，这一行就落在
@@ -1772,7 +2158,8 @@ class SidebarFit(unittest.TestCase):
         # section", with nothing on screen to click to write one by hand.
         self._pool_reset()
         try:
-            self._select(self._panel_game(0))
+            self._select(self._panel_game(
+                0, url="https://www.dikgames.com/game/1"))
             self.assertIn("ov_box", self.app._detail_shown)
             self.assertIn("url", self.app._detail_shown)
             self.app.select(self._panel_game(1, overview="", url=""))

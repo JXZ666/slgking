@@ -19,6 +19,7 @@ import slg_db  # noqa: E402
 import slg_comments  # noqa: E402
 import slg_scan  # noqa: E402
 import slg_scrape  # noqa: E402
+import slg_sync_server  # noqa: E402
 
 
 class SetTagsTests(unittest.TestCase):
@@ -169,12 +170,10 @@ class ScrapeTests(unittest.TestCase):
 
 
 class DirectHttpTests(unittest.TestCase):
-    """The sync client must reach the author's own server directly.
+    """The direct transport stays available as the preferred sync path.
 
-    v0.21 switched the catalogue pull to http://43.130.240.89:8080 but kept the
-    default urllib opener, so a user's system/VPN proxy swallowed the request
-    (502 / timeout) and sync reported "服务器不可用". _DIRECT_OPENER is the
-    no-proxy opener those requests now go through.
+    The catalogue sync prefers _DIRECT_OPENER, then retries through a configured
+    system proxy when a user's direct network route cannot reach the server.
     """
 
     def test_direct_opener_bypasses_proxy(self):
@@ -189,6 +188,47 @@ class DirectHttpTests(unittest.TestCase):
         params = inspect.signature(slg_scrape.http_get).parameters
         self.assertIn("direct", params)
         self.assertFalse(params["direct"].default)
+
+
+class ServerSyncProxyFallbackTests(unittest.TestCase):
+    """A healthy server can still be unreachable on a user's direct route."""
+
+    @mock.patch("slg_sync_server.urllib.request.proxy_bypass", return_value=False)
+    @mock.patch("slg_sync_server.urllib.request.getproxies",
+                return_value={"https": "http://127.0.0.1:8888"})
+    @mock.patch("slg_sync_server.slg_scrape.http_get",
+                side_effect=[OSError("direct route unavailable"), b"via proxy"])
+    def test_direct_failure_retries_through_configured_system_proxy(
+            self, get, _proxies, _bypass):
+        result = slg_sync_server._server_http_get(
+            "https://slg-king.com/manifest.json", timeout=7)
+        self.assertEqual(result, b"via proxy")
+        self.assertEqual(get.call_args_list, [
+            mock.call("https://slg-king.com/manifest.json", timeout=7, direct=True),
+            mock.call("https://slg-king.com/manifest.json", timeout=7, direct=False),
+        ])
+
+    @mock.patch("slg_sync_server.urllib.request.getproxies", return_value={})
+    @mock.patch("slg_sync_server.slg_scrape.http_get",
+                side_effect=OSError("direct route unavailable"))
+    def test_no_proxy_configuration_does_not_duplicate_a_slow_direct_attempt(
+            self, get, _proxies):
+        with self.assertRaisesRegex(OSError, "direct route unavailable"):
+            slg_sync_server._server_http_get("https://slg-king.com/manifest.json")
+        get.assert_called_once_with(
+            "https://slg-king.com/manifest.json", timeout=30, direct=True)
+
+    @mock.patch("slg_sync_server.urllib.request.proxy_bypass", return_value=False)
+    @mock.patch("slg_sync_server.urllib.request.getproxies",
+                return_value={"https": "http://127.0.0.1:8888"})
+    @mock.patch("slg_sync_server.slg_scrape.http_get",
+                side_effect=OSError("both routes unavailable"))
+    def test_both_routes_failing_reports_both_path_attempted(
+            self, get, _proxies, _bypass):
+        with self.assertRaisesRegex(
+                RuntimeError, "directly and through the system proxy"):
+            slg_sync_server._server_http_get("https://slg-king.com/manifest.json")
+        self.assertEqual(get.call_count, 2)
 
 
 class NoteMergeTests(unittest.TestCase):
