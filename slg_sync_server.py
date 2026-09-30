@@ -29,6 +29,7 @@ import urllib.request
 
 import slg_db
 import slg_scrape
+import slg_server_transport
 
 SERVER_BASE = "https://slg-king.com"
 PREF_LAST_PULL = "last_pull_lastmod"
@@ -36,29 +37,37 @@ PREF_LAST_PULL_HASH = "last_pull_db_sha256"
 
 
 def _server_http_get(url, timeout=30):
-    """Fetch one HTTPS catalogue asset, preferring direct access.
+    """Fetch one catalogue asset using verified HTTPS routes.
 
     Some users need a system/VPN proxy to reach the domain even while the
-    server itself is healthy. Keep the direct path first, then retry through
-    urllib's normal system-proxy configuration when one is configured for this
-    host. Both paths retain HTTPS; the database caller still verifies SHA-256.
+    server itself is healthy. Try Cloudflare directly, a configured system
+    proxy, and finally the origin over TLS with its own CA and hostname check.
+    Catalogue GETs are safe to retry; the database caller still verifies SHA-256.
     """
     try:
         return slg_scrape.http_get(url, timeout=timeout, direct=True)
-    except Exception as direct_error:  # noqa: BLE001 - retry only this fixed HTTPS origin
+    except Exception as direct_error:  # noqa: BLE001 - these are safe GETs
         parsed = urllib.parse.urlsplit(url)
+        if (parsed.scheme.lower() != "https"
+                or parsed.hostname != slg_server_transport.SERVER_HOST
+                or parsed.port not in (None, 443)):
+            raise direct_error
         proxies = urllib.request.getproxies()
         proxy_configured = bool(
             (parsed.scheme.lower() in proxies or "all" in proxies)
             and not urllib.request.proxy_bypass(parsed.hostname or ""))
-        if not proxy_configured:
-            raise direct_error
+        if proxy_configured:
+            try:
+                return slg_scrape.http_get(url, timeout=timeout, direct=False)
+            except Exception as proxy_error:  # noqa: BLE001 - safe GET fallback
+                pass
         try:
-            return slg_scrape.http_get(url, timeout=timeout, direct=False)
-        except Exception as proxy_error:  # noqa: BLE001 - surface a useful combined failure
-            raise RuntimeError(
-                "HTTPS server request failed directly and through the system proxy"
-            ) from proxy_error
+            return slg_scrape.http_get(
+                url, timeout=timeout, opener=slg_server_transport.ORIGIN_OPENER)
+        except Exception as origin_error:  # noqa: BLE001 - report every failed route
+            raise ConnectionError(
+                "Cloudflare、系统代理与已验证源站 HTTPS 均未取得目录数据"
+            ) from origin_error
 
 
 def _table_columns(conn, table):
@@ -505,8 +514,8 @@ def _sync_catalog_redirects(conn, redirects):
     return {"active": active, "blocked": blocked, "backup": backup_path}
 
 
-def fetch_manifest(timeout=30, tries=3):
-    """The server's manifest dict, or None on any failure.
+def fetch_manifest(timeout=30, tries=3, raise_on_failure=False):
+    """The server's manifest dict, or None on failure unless requested otherwise.
 
     Retried because the box is one cheap instance: the first request after a
     cold start or a publish can take a beat, and the manifest is ~150 bytes, so
@@ -516,8 +525,12 @@ def fetch_manifest(timeout=30, tries=3):
         try:
             raw = _server_http_get(SERVER_BASE + "/manifest.json", timeout=timeout)
             return json.loads(raw.decode("utf-8", "replace"))
-        except Exception:  # noqa: BLE001 - a down server must read as None
+        except Exception as exc:  # noqa: BLE001 - one route may be unavailable
             if attempt == tries - 1:
+                if raise_on_failure:
+                    raise ConnectionError(
+                        "目录清单读取失败：Cloudflare、系统代理和源站 HTTPS 均未成功"
+                    ) from exc
                 return None
             time.sleep(0.6 * (attempt + 1))
     return None
@@ -726,7 +739,7 @@ def pull(conn, log=print, on_progress=None, should_stop=None):
     cut a long cover download short.
     """
     should_stop = should_stop or (lambda: False)
-    manifest = fetch_manifest()
+    manifest = fetch_manifest(raise_on_failure=True)
     if manifest is None:
         raise RuntimeError("服务器不可用，请稍后再试")
 

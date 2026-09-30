@@ -543,6 +543,13 @@ class TitleErrorText(unittest.TestCase):
         self.assertIn("连接超时", text)
 
 
+class BackgroundJobErrorText(unittest.TestCase):
+    def test_network_failure_shows_actionable_message_without_python_type(self):
+        message = slg_gui.App._fail(
+            None, "更新目录", ConnectionError("目录清单读取失败，请检查网络"))
+        self.assertEqual(message, "更新目录失败：目录清单读取失败，请检查网络")
+
+
 class SidebarFit(unittest.TestCase):
     """Window-level regressions, at the smallest window the app allows.
 
@@ -588,6 +595,10 @@ class SidebarFit(unittest.TestCase):
                           "total_count": 0, "total_pages": 0,
                           "has_previous": False, "has_next": False})
         cls._offline_comments.start()
+        # The real UI is intentionally exercised without sending anonymous
+        # telemetry to the production endpoint.
+        cls._telemetry = mock.patch.object(slg_remote, "report")
+        cls._telemetry.start()
         cls._offline = [
             mock.patch.object(slg_translate, "translate_title",
                               side_effect=slg_translate.TranslateError("测试不联网")),
@@ -610,6 +621,7 @@ class SidebarFit(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls._offline_comments.stop()
+        cls._telemetry.stop()
         cls._usable_session.stop()
         cls._personal_access.stop()
         cls.app.destroy()
@@ -1316,24 +1328,189 @@ class SidebarFit(unittest.TestCase):
         try:
             self.app.update()
             texts = self._panel_texts()
-            self.assertTrue(any(t in ("抽一次", "今日已抽") for t in texts),
+            self.assertTrue(any(t in ("打开抽奖", "今日已抽") for t in texts),
                             "商城顶上没有抽奖入口：%s" % texts)
             self.assertIn("每日抽奖", texts)
         finally:
             self._close_shop()
 
-    def test_dev_mode_unlocks_the_daily_lottery_limit(self):
+    def test_admin_mode_does_not_offer_the_regular_user_lottery(self):
         slg_db.set_pref(self.app.conn, "dev.unlocked", "1")
+        slg_gui.slg_account.set_developer_mode(True)
         try:
             self.app.open_shop()
             self.app.update()
             texts = self._panel_texts()
-            self.assertTrue(any("不限次数" in t for t in texts),
-                            "开发者模式下抽奖副标题没变：%s" % texts)
-            self.assertIn("抽一次", texts, "开发者模式下抽奖入口被当日限制挡掉了")
+            self.assertIn("仅普通用户可用", texts)
+            self.assertNotIn("打开抽奖", texts)
         finally:
             self._close_shop()
+            slg_gui.slg_account.set_developer_mode(False)
             slg_db.set_pref(self.app.conn, "dev.unlocked", "")
+
+    def test_profile_invite_binding_is_moved_into_the_unified_code_dialog(self):
+        self.app._profile_referral_account_id = "invite-test"
+        self.app._profile_referral_state = {
+            "invite_code": "AB12CD34EF56GH78",
+            "eligible_to_redeem": True, "redeemed": False,
+            "invite_count": 0, "earned_titles": [],
+        }
+        self.app._profile_referral_error = None
+        self.app._profile_referral_unavailable = False
+        self.app._profile_referral_loading = False
+        self.app._profile_referral_submit_pending = False
+        self.app._profile_referral_after_submit = False
+        with mock.patch.object(slg_gui.slg_account, "session",
+                               return_value={"account_id": "invite-test"}), \
+                mock.patch.object(self.app, "_ensure_referral_context",
+                                  return_value=True):
+            self.app.open_redeem("邀请码")
+            self.app.update()
+            win = self._dialog("兑换码&邀请码")
+            try:
+                self.assertIsNotNone(win, "统一兑换码窗口没有打开")
+                self.assertIn("AB12CD34EF56GH78", self._texts_in(win))
+                self.assertEqual(
+                    self.app._invite_referral_entry.cget("placeholder_text"),
+                    "输入好友的邀请码")
+                self.assertIn("绑定一次", self._texts_in(win))
+                self.assertIsNone(getattr(self.app, "_profile_referral_entry", None),
+                                  "绑定输入框仍留在个人页")
+            finally:
+                if win is not None:
+                    win._slg_close_guard()
+
+    def test_profile_has_no_inline_invite_card_or_title_only_footer(self):
+        with mock.patch.object(slg_gui.slg_account, "session",
+                               return_value={"account_id": "profile-test",
+                                             "device_token": "test-token"}), \
+                mock.patch.object(self.app, "_run_cloud_action"):
+            self.app.open_profile()
+            try:
+                self.app.update()
+                texts = self._panel_texts()
+                self.assertFalse(any("老带新邀请" in text for text in texts))
+                self.assertFalse(any("已拥有头衔" in text for text in texts))
+                self.assertIn("兑换码&邀请码", texts)
+                self.assertIn("个性装扮", texts)
+            finally:
+                self._close_profile()
+
+    def test_wardrobe_collection_counts_titles_and_both_frame_types(self):
+        owned = {
+            slg_titles.DEFAULT_TITLE_ID, "referral_1",
+            "avatar_frame_cyber_neon", "comment_frame_mint",
+            "rename_card", "unknown_old_item",
+        }
+        with mock.patch.object(self.app, "_cloud_titles", owned,
+                               create=True), \
+                mock.patch.object(slg_gui.slg_account, "session",
+                               return_value={"account_id": "wardrobe-test",
+                                             "device_token": "test-token"}):
+            try:
+                self.app.open_wardrobe()
+                self.app.update()
+                win = self._dialog("个性装扮")
+                self.assertIsNotNone(win)
+                total = len(slg_titles.collectible_appearance_ids())
+                self.assertTrue(any("全部装扮收集" in text
+                                    and "%d/%d" % (3, total) in text
+                                    for text in self._texts_in(win)))
+            finally:
+                win = self._dialog("个性装扮")
+                if win is not None:
+                    win.destroy()
+
+    def test_wardrobe_message_save_uses_dialog_identity_and_blocks_second_write(self):
+        self.app._profile_message_pending = False
+        with mock.patch.object(self.app, "_cloud_titles",
+                               {"comment_frame_mint"}, create=True), \
+                mock.patch.object(self.app, "_cloud_me",
+                                  {"profile_message": ""}, create=True), \
+                mock.patch.object(slg_gui.slg_account, "session",
+                               return_value={"account_id": "wardrobe-test",
+                                             "device_token": "test-token"}), \
+                mock.patch.object(self.app, "_run_cloud_action") as run:
+            try:
+                self.app.open_wardrobe()
+                entry = self.app._wardrobe_message_entry
+                entry.insert(0, "新寄语")
+                self.app._update_profile_message_counter()
+                self.app._wardrobe_message_save_button.invoke()
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(run.call_args.args[0], "profile_message")
+                self.assertEqual(
+                    self.app._wardrobe_message_clear_button.cget("state"),
+                    "disabled")
+                self.app._save_profile_message(clear=True)
+                self.assertEqual(run.call_count, 1)
+            finally:
+                self.app._profile_message_pending = False
+                win = self._dialog("个性装扮")
+                if win is not None:
+                    win.destroy()
+
+    def test_invite_entry_survives_dialog_refresh_before_submission(self):
+        self.app._profile_referral_account_id = "invite-test"
+        self.app._profile_referral_state = {
+            "invite_code": "AB12CD34EF56GH78",
+            "eligible_to_redeem": True, "redeemed": False,
+            "invite_count": 0, "earned_titles": [],
+        }
+        self.app._profile_referral_error = None
+        self.app._profile_referral_unavailable = False
+        self.app._profile_referral_input_value = ""
+        self.app._profile_referral_loading = False
+        self.app._profile_referral_submit_pending = False
+        self.app._profile_referral_after_submit = False
+        self.app._profile_referral_post_confirmed = False
+        with mock.patch.object(slg_gui.slg_account, "session",
+                               return_value={"account_id": "invite-test"}), \
+                mock.patch.object(self.app, "_ensure_referral_context",
+                                  return_value=True):
+            self.app.open_redeem("邀请码")
+            win = self._dialog("兑换码&邀请码")
+            try:
+                self.assertIsNotNone(win)
+                self.app._invite_referral_entry.insert(0, "FRIEND-CODE")
+                self.app._render_invite_dialog()
+                self.assertEqual(self.app._invite_referral_entry.get(),
+                                 "FRIEND-CODE")
+            finally:
+                if win is not None:
+                    win._slg_close_guard()
+
+    def test_connectivity_diagnostics_can_be_started_and_shows_safe_summary(self):
+        with mock.patch.object(self.app, "_run_cloud_action") as run:
+            self.app.open_connection_diagnostics()
+            self.app.update()
+            win = self._dialog("服务器连接诊断")
+            self.assertIsNotNone(win)
+            button = next(item for item in self._buttons_in(win)
+                          if item.cget("text") == "开始诊断")
+            button.invoke()
+            self.assertEqual(run.call_args.args[0], "connectivity_diagnostics")
+            self.app._cloud_action_result(
+                "connectivity_diagnostics",
+                {"schema": "slgking-connectivity-v1",
+                 "checks": {
+                     "dns": {"status": "ok", "code": "resolved"},
+                     "tcp": {"status": "ok", "code": "connected"},
+                     "tls": {"status": "failed", "code": "certificate_invalid"},
+                     "healthz": {"status": "ok", "code": "response_ok",
+                                 "route": "direct"},
+                     "manifest": {"status": "ok", "code": "valid_manifest"},
+                 },
+                 "share_text": "SLGking 连接诊断（只读）\nTLS：TLS 证书验证失败"},
+                None)
+            self.app.update()
+            output = self.app._connectivity_diagnostics_widgets["output"]
+            self.assertIn("TLS", output.get("1.0", "end"))
+            self.assertIn("证书验证失败", output.get("1.0", "end"))
+            copy_button = next(item for item in self._buttons_in(win)
+                               if item.cget("text") == "复制摘要")
+            self.assertEqual(copy_button.cget("state"), "normal")
+            win._slg_close_guard()
 
     def test_the_lottery_result_states_the_prize_only(self):
         # 抽奖结果只报「拿到了什么」：盈亏/期望属于内部数值，不该出现在用户眼前。
@@ -1456,6 +1633,62 @@ class SidebarFit(unittest.TestCase):
             finally:
                 self._close_lottery()
                 self.app._lottery_pending_pref_key = None
+
+    def test_lottery_window_and_app_can_close_during_animation(self):
+        with mock.patch.object(slg_gui.messagebox, "showinfo") as info, \
+                mock.patch.object(self.app, "destroy") as destroy:
+            win = self._open_lottery({"kind": "points", "value": 1})
+            self.app._request_close()
+            self.app.update()
+            self.assertFalse(win.winfo_exists(), "抽奖动画期间窗口仍被 close guard 挡住")
+            destroy.assert_called_once_with()
+            info.assert_not_called()
+
+    def test_closed_pending_lottery_does_not_reopen_or_duplicate_on_late_result(self):
+        with mock.patch.object(self.app, "_has_cloud_account", return_value=True), \
+                mock.patch.object(self.app, "_lottery_request_pref_name",
+                                  return_value="lottery.pending_request.test"), \
+                mock.patch.object(self.app, "_run_cloud_action") as request, \
+                mock.patch.object(self.app, "_store_cloud_balance"), \
+                mock.patch.object(self.app, "_refresh_shop_balance"), \
+                mock.patch.object(self.app, "_fetch_quests"), \
+                mock.patch.object(slg_gui.messagebox, "showwarning") as warning:
+            self.app._open_slot_machine()
+            self.app.update()
+            win = self._dialog("每日抽奖")
+            self.assertIsNotNone(win)
+            lever = next(button for button in self._buttons_in(win)
+                         if button.cget("text") == "拉杆")
+            lever.invoke()
+            self.assertTrue(self.app._lottery_request_active)
+            self.assertEqual(request.call_count, 1)
+
+            win._slg_close_guard()
+            self.app.update()
+            self.assertFalse(win.winfo_exists(), "待确认请求不应阻止关闭抽奖窗口")
+            self.app._open_slot_machine()
+            self.app.update()
+            reopened = self._dialog("每日抽奖")
+            self.assertIsNotNone(reopened)
+            next(button for button in self._buttons_in(reopened)
+                 if button.cget("text") == "拉杆").invoke()
+            self.assertEqual(request.call_count, 1,
+                             "上一笔请求未完成时重复拉杆又发送了请求")
+
+            slg_db.set_pref(self.app.conn,
+                            "lottery.pending_request.test", "pending-token")
+            with mock.patch.object(self.app, "_open_slot_machine") as reopen:
+                self.app._cloud_action_result(
+                    "lottery",
+                    {"balance": 95, "titles": [],
+                     "prize": {"kind": "points", "value": 3},
+                     "draws_today": 1}, None)
+                reopen.assert_not_called()
+            self.assertFalse(self.app._lottery_request_active)
+            self.assertEqual(slg_db.get_pref(
+                self.app.conn, "lottery.pending_request.test", ""), "")
+            warning.assert_not_called()
+            self._close_lottery()
 
     def test_the_lottery_disclaimer_is_not_clipped_by_the_window(self):
         # 免责声明是箱底最后一行。窗口高度以前写死 600，内容比它高，这一行就落在
@@ -2727,6 +2960,22 @@ class SidebarFit(unittest.TestCase):
         walk(widget)
         return found
 
+    def _texts_in(self, widget):
+        found = []
+
+        def walk(node):
+            try:
+                text = node.cget("text")
+            except (AttributeError, tk.TclError, ValueError):
+                text = None
+            if isinstance(text, str) and text:
+                found.append(text)
+            for child in node.winfo_children():
+                walk(child)
+
+        walk(widget)
+        return found
+
     def _tag_buttons(self, win):
         """The tag cells only, not the 清空/完成 pair below them.
 
@@ -2913,16 +3162,182 @@ class SidebarFit(unittest.TestCase):
             self._close("关于")
 
     def test_the_tools_dialog_holds_the_set_once_entries(self):
-        # These are set-once tools, out of the sidebar's routine column.
+        # Common and maintenance cards stay visible; the advanced row advertises
+        # its item count and changes appearance/text while toggling the contents.
         try:
             self.app.open_tools()
             win = self._dialog("更多工具")
             self.assertIsNotNone(win, "更多工具弹窗没打开")
-            texts = [b.cget("text") for b in self._buttons_in(win)]
-            for label in ("标签译名…", "偏好权重…", "翻译设置…", "扫描本地目录…", "检查更新"):
+            buttons = self._buttons_in(win)
+            texts = [b.cget("text") for b in buttons]
+            for label in ("检查更新", "管理收藏夹…", "备份与恢复…",
+                          "扫描本地目录…", "同步与维护…"):
                 self.assertIn(label, texts)
+            advanced = next(
+                b for b in buttons if b.cget("text").startswith("进阶工具"))
+            self.assertIn("4 项", advanced.cget("text"))
+            self.assertIn("点击展开", advanced.cget("text"))
+            self.assertNotEqual(advanced.cget("fg_color"), "transparent")
+            self.assertGreater(advanced.cget("border_width"), 0)
+            advanced_entries = (
+                "游戏汉化工具…", "标签译名…", "偏好权重…", "翻译设置…")
+            self.assertTrue(all(
+                not b.winfo_ismapped() for b in buttons
+                if b.cget("text") in advanced_entries),
+                "进阶工具应默认折叠")
+
+            advanced.invoke()
+            self.app.update()
+            self.assertIn("点击收起", advanced.cget("text"))
+            self.assertNotEqual(advanced.cget("fg_color"), "transparent")
+            buttons = self._buttons_in(win)
+            for label in advanced_entries:
+                self.assertIn(label, [b.cget("text") for b in buttons])
+            self.assertTrue(all(
+                b.winfo_ismapped() for b in buttons
+                if b.cget("text") in advanced_entries),
+                "展开后进阶工具应可见")
+
+            advanced.invoke()
+            self.app.update()
+            self.assertIn("点击展开", advanced.cget("text"))
+            buttons = self._buttons_in(win)
+            self.assertTrue(all(
+                not b.winfo_ismapped() for b in buttons
+                if b.cget("text") in advanced_entries),
+                "收起后进阶工具应隐藏")
+
+            self._close("更多工具")
+            previous_busy = self.app.busy
+            self.app.busy = True
+            try:
+                self.app.open_tools()
+                busy_win = self._dialog("更多工具")
+                busy_buttons = self._buttons_in(busy_win)
+                busy_advanced = next(
+                    b for b in busy_buttons
+                    if b.cget("text").startswith("进阶工具"))
+                self.assertEqual(busy_advanced.cget("state"), "disabled")
+                routine_button = next(
+                    b for b in busy_buttons if b.cget("text") == "检查更新")
+                self.assertEqual(routine_button.cget("state"), "disabled")
+            finally:
+                self.app.busy = previous_busy
+                self._close("更多工具")
         finally:
             self._close("更多工具")
+
+    def test_ui_telemetry_uses_only_fixed_event_and_tool_values(self):
+        with mock.patch.object(slg_remote, "report") as report, \
+                mock.patch.object(self.app, "do_updates") as do_updates:
+            self.app.open_tools()
+            report.assert_called_once_with(self.app.conn, "tools_open", {})
+            win = self._dialog("更多工具")
+            button = next(b for b in self._buttons_in(win)
+                          if b.cget("text") == "检查更新")
+            button.invoke()
+            self.app.update()
+            report.assert_called_with(
+                self.app.conn, "tool_open", {"tool_id": "check_updates"})
+            do_updates.assert_called_once_with()
+
+        with mock.patch.object(slg_remote, "report",
+                               side_effect=RuntimeError("telemetry unavailable")):
+            self.app._report_ui_event("tool_open", "free text is rejected")
+            self.app._report_ui_event("settings_open")
+
+    def test_settings_has_navigable_categories_and_preserves_controls(self):
+        try:
+            announcement_handler = mock.Mock()
+            with mock.patch.object(slg_remote, "report") as report, \
+                    mock.patch.object(self.app, "open_announcement",
+                                      announcement_handler):
+                self.app.open_settings()
+                win = self._dialog("设置")
+                self.assertIsNotNone(win)
+                report.assert_called_once_with(
+                    self.app.conn, "settings_open", {})
+            buttons = self._buttons_in(win)
+            labels = [button.cget("text") for button in buttons]
+            for alternatives in (("外观",), ("提醒与声音", "提醒"),
+                                 ("帮助与反馈", "帮助"), ("关于",)):
+                self.assertTrue(any(label in labels for label in alternatives),
+                                alternatives)
+            win.geometry("600x600")
+            self.app.update()
+            self.assertIn("提醒与声音", [b.cget("text")
+                                         for b in self._buttons_in(win)])
+            nav = next(button for button in buttons
+                       if button.cget("text") == "外观").master
+            content = next(child for child in nav.master.winfo_children()
+                           if child is not nav)
+            self.assertEqual(nav.master.pack_slaves(), [nav, content])
+            self.assertEqual(nav.pack_info()["side"], "left")
+            self.assertEqual(content.pack_info()["side"], "left")
+            self.assertLess(nav.winfo_x(), content.winfo_x())
+            win.geometry("360x500")
+            self.app.update()
+            self.assertIn("提醒", [b.cget("text")
+                                    for b in self._buttons_in(win)])
+            self.assertEqual(nav.master.pack_slaves(), [nav, content])
+            self.assertEqual(nav.pack_info()["side"], "top")
+            self.assertEqual(content.pack_info()["side"], "top")
+            self.assertLess(nav.winfo_y(), content.winfo_y())
+            win.geometry("600x600")
+            self.app.update()
+            self.assertEqual(nav.master.pack_slaves(), [nav, content])
+            self.assertEqual(nav.pack_info()["side"], "left")
+            self.assertEqual(content.pack_info()["side"], "left")
+            self.assertLess(nav.winfo_x(), content.winfo_x())
+            texts = self._texts_in(win)
+            self.assertIn("主题", texts)
+            self.assertIn("界面尺寸", texts)
+            action_buttons = []
+            for label in ("查看新手引导…", "意见反馈…", "关于本软件…"):
+                action_buttons.append(next(
+                    button for button in self._buttons_in(win)
+                    if button.cget("text") == label))
+            announcement_button = next(
+                button for button in self._buttons_in(win)
+                if button.cget("text").startswith("公告"))
+            action_buttons.append(announcement_button)
+            # All settings destinations, including the highlighted announcement,
+            # share the same compact action-row and card treatment.
+            for button in action_buttons:
+                self.assertEqual(button.cget("height"), 32)
+                self.assertEqual(button.cget("corner_radius"), 7)
+                self.assertEqual(button.cget("fg_color"), "transparent")
+                self.assertEqual(button.master.cget("fg_color"), slg_gui.CARD)
+                self.assertEqual(button.master.cget("corner_radius"), 10)
+
+            alerts = next(button for button in buttons
+                          if button.cget("text") in ("提醒与声音", "提醒"))
+            alerts.invoke()
+            self.app.update()
+            self.assertEqual(self.app._settings_page, "alerts")
+            self.assertIn("每日抽奖的转盘声与中奖声", self._texts_in(win))
+
+            help_button = next(button for button in self._buttons_in(win)
+                               if button.cget("text") in ("帮助与反馈", "帮助"))
+            help_button.invoke()
+            self.app.update()
+            self.assertEqual(self.app._settings_page, "help")
+            for label in ("查看新手引导…", "意见反馈…"):
+                self.assertIn(label, [b.cget("text")
+                                      for b in self._buttons_in(win)])
+
+            about_button = next(button for button in self._buttons_in(win)
+                                if button.cget("text") == "关于")
+            about_button.invoke()
+            self.app.update()
+            self.assertEqual(self.app._settings_page, "about")
+            self.assertIn("关于本软件…", [b.cget("text")
+                                         for b in self._buttons_in(win)])
+
+            announcement_button.invoke()
+            announcement_handler.assert_called_once_with()
+        finally:
+            self._close("设置")
 
     def test_the_tool_group_no_longer_lists_the_set_once_entries(self):
         # 标签库 is the one routine filter that stayed in the sidebar; 检查更新
@@ -3104,9 +3519,9 @@ class SidebarFit(unittest.TestCase):
             self.app.update()
 
 
-    # --- Web admin console -------------------------------------------------
+    # --- Admin console -------------------------------------------------
 
-    def test_admin_console_button_opens_the_web_admin_page(self):
+    def test_admin_console_button_opens_the_admin_page(self):
         with mock.patch.object(slg_gui.webbrowser, "open") as open_page:
             self.app._open_admin_console()
         open_page.assert_called_once_with(slg_gui.ADMIN_URL)

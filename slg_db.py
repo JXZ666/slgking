@@ -1149,11 +1149,11 @@ def get_game(conn, game_id):
     return conn.execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
 
 
-# One filesystem call per stored cover, and the library has ~1500 of them:
-# 190ms on the author's machine. _render_stats asks for this on every refresh -
-# a sort, a scroll-page, a status write - so the answer is memoised briefly and
-# dropped outright by whatever actually changes it.
-_COVER_GAP_TTL = 15.0
+# One filesystem call per stored cover. On a large local catalogue this cold
+# scan can take hundreds of milliseconds, and _render_stats asks on refreshes
+# during sync. Known mutations invalidate the cache, so keep the fallback TTL
+# longer to avoid repeating the filesystem walk during ordinary refreshes.
+_COVER_GAP_TTL = 60.0
 _missing_covers = None   # (count, monotonic seconds)
 _cover_gap_lock = threading.Lock()
 
@@ -1810,6 +1810,8 @@ def remove_from_collection(conn, game_id, collection_id):
 
 # --- backup / restore ----------------------------------------------------------
 
+LEGACY_IMPORTED_ASSETS_PREF = "cloud.legacy_imported_assets"
+
 # The user's own curation, in JSON: ratings/notes/status, tag exclusions,
 # collections and their members, and hand-written translations. prefs (which
 # holds the API key and the sync gate) and the machine-translation cache stay
@@ -1900,6 +1902,145 @@ def export_user_data(conn):
     return out
 
 
+_BACKUP_FIELDS = {
+    "state": {"game_id", "game_slug", "status", "note", "my_rating", "updated_at"},
+    "exclusions": {"tag", "source"},
+    "collections": {"id", "name", "created_at"},
+    "collection_items": {"collection_id", "game_id", "added_at", "game_slug"},
+    "manual_translations": {"kind", "ref", "lang", "text", "updated_at"},
+    "points_log": {"id", "delta", "reason", "at", "seal"},
+    "signin": {"day", "at"},
+    "owned_titles": {"title_id", "acquired_at", "source", "seal"},
+    "user_games": set(_USER_GAME_COLS) | {"id"},
+    "user_game_tags": {"slug", "name"},
+    "user_local": {"slug", "folder_path", "folder_version", "exe_path"},
+    "user_game_aliases": {"slug", "alias", "source"},
+}
+
+_BACKUP_REQUIRED_FIELDS = {
+    "state": {"game_slug"},
+    "exclusions": {"tag"},
+    "collections": {"name"},
+    "collection_items": {"collection_id", "game_slug"},
+    "manual_translations": {"kind", "ref", "lang", "text"},
+    "points_log": {"delta", "reason", "at"},
+    "signin": {"day", "at"},
+    "owned_titles": {"title_id", "acquired_at", "source"},
+    "user_games": {"slug", "url", "title", "first_seen"},
+    "user_game_tags": {"slug", "name"},
+    "user_local": {"slug"},
+    "user_game_aliases": {"slug", "alias"},
+}
+
+_BACKUP_STRING_FIELDS = {
+    "state": {"game_slug", "status", "note", "updated_at"},
+    "exclusions": {"tag", "source"},
+    "collections": {"name", "created_at"},
+    "collection_items": {"game_slug", "added_at"},
+    "manual_translations": {"kind", "ref", "lang", "text", "updated_at"},
+    "points_log": {"reason", "at"},
+    "signin": {"day", "at"},
+    "owned_titles": {"title_id", "acquired_at", "source"},
+    "user_games": {"slug", "url", "title", "version", "developer", "engine",
+                   "last_updated", "overview", "cover_file", "first_seen",
+                   "last_synced", "lastmod", "origin"},
+    "user_game_tags": {"slug", "name"},
+    "user_local": {"slug", "folder_path", "folder_version", "exe_path"},
+    "user_game_aliases": {"slug", "alias", "source"},
+}
+
+_BACKUP_INTEGER_FIELDS = {
+    "state": {"game_id", "my_rating"},
+    "collections": {"id"},
+    "collection_items": {"collection_id", "game_id"},
+    "points_log": {"id", "delta"},
+    "user_games": {"id", "complete", "fetch_failures", "site_views",
+                   "site_likes", "site_comments", "promoted"},
+}
+
+_BACKUP_NUMBER_FIELDS = {"user_games": {"rating", "heat"}}
+
+
+def validate_user_data(data):
+    """Validate a user backup and return a privacy-safe preview summary.
+
+    Missing sections are treated as empty for compatibility with older backup
+    files. Present sections and rows must match the known JSON backup shape so
+    malformed input is rejected before the restore touches the database.
+    No user-provided values are included in the returned summary.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("备份内容必须是 JSON 对象。")
+    unknown_sections = set(data) - set(_BACKUP_FIELDS)
+    if unknown_sections:
+        raise ValueError("备份包含无法识别的数据项。")
+
+    counts = {}
+    local_path_count = 0
+    for section, allowed_fields in _BACKUP_FIELDS.items():
+        records = data.get(section, [])
+        if not isinstance(records, list):
+            raise ValueError("备份中的 %s 必须是列表。" % section)
+        counts[section] = len(records)
+        required = _BACKUP_REQUIRED_FIELDS[section]
+        strings = _BACKUP_STRING_FIELDS.get(section, set())
+        integers = _BACKUP_INTEGER_FIELDS.get(section, set())
+        numbers = _BACKUP_NUMBER_FIELDS.get(section, set())
+        for index, record in enumerate(records):
+            location = "%s[%d]" % (section, index + 1)
+            if not isinstance(record, dict):
+                raise ValueError("备份中的 %s 必须是对象。" % location)
+            extra_fields = set(record) - allowed_fields
+            if extra_fields:
+                raise ValueError("备份中的 %s 含有无法识别的字段。" % location)
+            missing_fields = required - set(record)
+            if missing_fields:
+                raise ValueError("备份中的 %s 缺少必要字段。" % location)
+
+            for field, value in record.items():
+                if value is None:
+                    continue
+                if field in strings and not isinstance(value, str):
+                    raise ValueError("备份中的 %s.%s 格式无效。" % (location, field))
+                if field in integers:
+                    # bool is an int subclass in Python, but is not a valid
+                    # representation for a database identifier/count here.
+                    if type(value) is not int or not -(2 ** 63) <= value < 2 ** 63:
+                        raise ValueError("备份中的 %s.%s 格式无效。" % (location, field))
+                elif field in numbers:
+                    if type(value) is int:
+                        valid_number = -(2 ** 63) <= value < 2 ** 63
+                    elif type(value) is float:
+                        valid_number = math.isfinite(value)
+                    else:
+                        valid_number = False
+                    if not valid_number:
+                        raise ValueError("备份中的 %s.%s 格式无效。" % (location, field))
+                elif field not in strings:
+                    # SQLite only binds scalar values. Reject nested JSON
+                    # objects/arrays before any table is cleared.
+                    if type(value) not in (str, int, float, bytes):
+                        raise ValueError("备份中的 %s.%s 格式无效。" % (location, field))
+                    if type(value) is int and not -(2 ** 63) <= value < 2 ** 63:
+                        raise ValueError("备份中的 %s.%s 格式无效。" % (location, field))
+                    if type(value) is float and not math.isfinite(value):
+                        raise ValueError("备份中的 %s.%s 格式无效。" % (location, field))
+
+            for field in required:
+                value = record[field]
+                if value is None or (isinstance(value, str) and not value.strip()):
+                    raise ValueError("备份中的 %s.%s 不能为空。" % (location, field))
+            if section == "user_local" and any(
+                    record.get(key) for key in ("folder_path", "exe_path")):
+                local_path_count += 1
+
+    return {
+        "counts": counts,
+        "total_records": sum(counts.values()),
+        "local_path_count": local_path_count,
+    }
+
+
 def import_user_data(conn, data):
     """Overwrite the user's own tables with the backup's contents.
 
@@ -1911,6 +2052,8 @@ def import_user_data(conn, data):
     slug, and tags/aliases/local are re-linked to whatever id that slug lands on
     in this library.
     """
+    validate_user_data(data)
+
     def load(table, cols, records):
         if not records:
             return
@@ -1920,23 +2063,36 @@ def import_user_data(conn, data):
             % (table, ",".join(cols), qmarks),
             [tuple(r.get(c) for c in cols) for r in records])
 
-    # Children cleared before parents. state and collection_items are held back:
-    # their game_id is a rowid that must be re-keyed through the slug, not
-    # bulk-loaded straight off the backup.
-    for table in ("collection_items", "state", "exclusions",
-                  "collections", "manual_translations",
-                  "points_log", "signin", "owned_titles"):
-        conn.execute("DELETE FROM %s" % table)
-    for table, cols in _BACKUP_TABLES:
-        if table in ("state", "collection_items"):
-            continue
-        load(table, cols, data.get(table, []))
-    # User games first: the rows below may point at them, and the foreign key
-    # is enforced on this connection.
-    _import_user_games(conn, data)
-    _import_game_rows(conn, "state", data.get("state", []))
-    _import_game_rows(conn, "collection_items", data.get("collection_items", []))
-    conn.commit()
+    # A savepoint works both on an idle connection and inside a caller-owned
+    # transaction. Any SQL/runtime error restores every table changed below.
+    savepoint = "slg_user_restore_%s" % uuid.uuid4().hex
+    conn.execute("SAVEPOINT " + savepoint)
+    try:
+        # Imported balances are editable backup data, not native legacy
+        # history. Keep this provenance in the same restore transaction so a
+        # failed restore cannot block migration of the original local assets.
+        if data.get("points_log") or data.get("owned_titles"):
+            conn.execute("INSERT OR REPLACE INTO prefs (key,value) VALUES (?,?)",
+                         (LEGACY_IMPORTED_ASSETS_PREF, "1"))
+        # Children cleared before parents. state and collection_items are held
+        # back because their game_id must be re-keyed from game_slug.
+        for table in ("collection_items", "state", "exclusions",
+                      "collections", "manual_translations",
+                      "points_log", "signin", "owned_titles"):
+            conn.execute("DELETE FROM %s" % table)
+        for table, cols in _BACKUP_TABLES:
+            if table in ("state", "collection_items"):
+                continue
+            load(table, cols, data.get(table, []))
+        _import_user_games(conn, data)
+        _import_game_rows(conn, "state", data.get("state", []))
+        _import_game_rows(conn, "collection_items", data.get("collection_items", []))
+        conn.execute("RELEASE SAVEPOINT " + savepoint)
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT " + savepoint)
+        conn.execute("RELEASE SAVEPOINT " + savepoint)
+        raise
+    invalidate_ledger(conn)
 
 
 def _import_game_rows(conn, table, records):

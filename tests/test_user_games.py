@@ -116,6 +116,86 @@ class BackupRoundTrip(unittest.TestCase):
         conn.close()
         conn2.close()
 
+    def test_backup_validation_returns_preview_counts_without_paths(self):
+        conn = slg_db.connect(":memory:")
+        gid = slg_db.add_user_game(conn, "My Game", folder_path="C:/games/my-game",
+                                   tags=["t"])
+        slg_db.add_alias(conn, gid, "Alias")
+        data = slg_db.export_user_data(conn)
+
+        summary = slg_db.validate_user_data(data)
+
+        self.assertEqual(summary["counts"]["user_games"], 1)
+        self.assertEqual(summary["counts"]["user_local"], 1)
+        self.assertEqual(summary["local_path_count"], 1)
+        self.assertEqual(summary["total_records"],
+                         sum(summary["counts"].values()))
+        self.assertNotIn("C:/games/my-game", repr(summary))
+        conn.close()
+
+    def test_malformed_backup_is_rejected_before_existing_data_is_changed(self):
+        conn = slg_db.connect(":memory:")
+        gid = slg_db.add_user_game(conn, "Existing Game", tags=["old"])
+        slg_db.set_state(conn, gid, status="downloaded", my_rating=5)
+        slg_db.create_collection(conn, "Existing collection")
+        before = slg_db.export_user_data(conn)
+
+        malformed = {
+            "collections": [{"name": {"unexpected": "object"}}],
+            "user_games": "not a list",
+        }
+        with self.assertRaises(ValueError):
+            slg_db.import_user_data(conn, malformed)
+
+        self.assertEqual(slg_db.export_user_data(conn), before)
+        conn.close()
+
+    def test_database_failure_during_restore_rolls_back_all_changes(self):
+        conn = slg_db.connect(":memory:")
+        gid = slg_db.add_user_game(conn, "Existing Game", tags=["old"])
+        slg_db.set_state(conn, gid, status="downloaded", my_rating=4)
+        slg_db.create_collection(conn, "Existing collection")
+        conn.execute("INSERT INTO points_log (delta, reason, at)"
+                     " VALUES (5, 'old', '2026-01-01T00:00:00')")
+        conn.execute("INSERT INTO signin (day, at)"
+                     " VALUES ('2026-01-01', '2026-01-01T00:00:00')")
+        conn.commit()
+        before = slg_db.export_user_data(conn)
+        conn.execute(
+            "CREATE TRIGGER fail_backup_restore BEFORE INSERT ON signin"
+            " BEGIN SELECT RAISE(ABORT, 'forced restore failure'); END")
+        conn.commit()
+
+        replacement = {
+            "collections": [{"id": 8, "name": "Replacement", "created_at": "2026-02-01"}],
+            "points_log": [{"delta": 10, "reason": "replacement", "at": "2026-02-01"}],
+            "signin": [{"day": "2026-02-01", "at": "2026-02-01"}],
+        }
+        with self.assertRaisesRegex(Exception, "forced restore failure"):
+            slg_db.import_user_data(conn, replacement)
+
+        self.assertEqual(slg_db.export_user_data(conn), before)
+        self.assertIsNone(slg_db.get_pref(conn, slg_db.LEGACY_IMPORTED_ASSETS_PREF))
+        conn.close()
+
+    def test_missing_backup_sections_remain_backward_compatible(self):
+        summary = slg_db.validate_user_data({"collections": []})
+        self.assertEqual(summary["counts"]["collections"], 0)
+        self.assertEqual(summary["counts"]["user_games"], 0)
+
+    def test_restored_assets_mark_provenance_but_curation_does_not(self):
+        conn = slg_db.connect(":memory:")
+        self.addCleanup(conn.close)
+        slg_db.import_user_data(conn, {"collections": []})
+        self.assertIsNone(slg_db.get_pref(conn, slg_db.LEGACY_IMPORTED_ASSETS_PREF))
+        slg_db.import_user_data(conn, {
+            "owned_titles": [{"title_id": "group_friend", "source": "code",
+                              "acquired_at": "2026-01-01"}],
+        })
+        self.assertEqual(slg_db.get_pref(conn, slg_db.LEGACY_IMPORTED_ASSETS_PREF), "1")
+        slg_db.import_user_data(conn, {})
+        self.assertEqual(slg_db.get_pref(conn, slg_db.LEGACY_IMPORTED_ASSETS_PREF), "1")
+
 
 class StripCatalogue(unittest.TestCase):
     def test_strip_removes_user_games_and_private_tables(self):

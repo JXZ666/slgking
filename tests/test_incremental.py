@@ -478,6 +478,21 @@ class DataGaps(unittest.TestCase):
         self.assertEqual(slg_db.data_gaps(self.conn)["covers"], 0,
                          "invalidate 之后还在用旧结果")
 
+    def test_cover_walk_cache_expires_after_sixty_seconds(self):
+        self._game("g")
+        self.conn.execute("UPDATE games SET cover_file = 'gone.jpg' WHERE id = ?",
+                          (self.gid,))
+        self.conn.commit()
+        with mock.patch.object(slg_db.time, "monotonic",
+                               side_effect=(100.0, 159.9, 160.0)):
+            self.assertEqual(slg_db.data_gaps(self.conn)["covers"], 1)
+            with open(os.path.join(self.tmp, "gone.jpg"), "wb"):
+                pass
+            self.assertEqual(slg_db.data_gaps(self.conn)["covers"], 1,
+                             "缓存 TTL 内继续复用结果")
+            self.assertEqual(slg_db.data_gaps(self.conn)["covers"], 0,
+                             "超过 60 秒后重新检查文件")
+
     def test_an_overview_of_spaces_counts_as_a_gap(self):
         # _clean turns an empty blurb into NULL, but rows written before that
         # exist and hold "". The panel renders the two the same way, and the

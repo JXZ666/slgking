@@ -5,6 +5,7 @@ Run with: `python -m unittest discover tests`
 
 import os
 import unittest
+from unittest import mock
 
 import slg_db
 import slg_titles
@@ -409,14 +410,24 @@ class DevPrivileges(unittest.TestCase):
         self.assertIn("butter_king", slg_db.owned_title_ids(self.conn))
         self.assertTrue(slg_titles.dev_unlocked(self.conn))
 
-    def test_dev_signin_is_unlimited(self):
+    def test_local_unlock_does_not_bypass_daily_signin(self):
         os.environ["SLGKING_DEV_SECRET"] = self.FAKE
         slg_titles.redeem(self.conn, self.FAKE)
-        for _ in range(3):
-            already, _day, gained, bonus = slg_titles.signin(self.conn, "2026-09-22")
-            self.assertFalse(already)
-            self.assertEqual(gained, slg_titles.DAILY_SIGNIN_POINTS)
-            self.assertEqual(bonus, 0, "开发者签到不走累签奖励")
+        with mock.patch("slg_account.developer_mode", return_value=False):
+            self.assertFalse(slg_titles.signin(self.conn, "2026-09-22")[0])
+            self.assertTrue(slg_titles.signin(self.conn, "2026-09-22")[0])
+        self.assertEqual(slg_db.points_balance(self.conn),
+                         slg_titles.DAILY_SIGNIN_POINTS)
+
+    def test_admin_identity_retains_local_signin_helper(self):
+        os.environ["SLGKING_DEV_SECRET"] = self.FAKE
+        slg_titles.redeem(self.conn, self.FAKE)
+        with mock.patch("slg_account.developer_mode", return_value=True):
+            for _ in range(3):
+                already, _day, gained, bonus = slg_titles.signin(self.conn, "2026-09-22")
+                self.assertFalse(already)
+                self.assertEqual(gained, slg_titles.DAILY_SIGNIN_POINTS)
+                self.assertEqual(bonus, 0)
         self.assertEqual(slg_db.points_balance(self.conn),
                          3 * slg_titles.DAILY_SIGNIN_POINTS)
 
@@ -795,8 +806,11 @@ class LotteryPity(unittest.TestCase):
         self.assertIn("重复获得", slg_titles.lottery_prize_text(row))
 
     def test_history_keeps_only_the_newest_batch(self):
-        for _ in range(slg_titles.LOTTERY_HISTORY_KEEP + 5):
-            slg_titles.draw_lottery(self.conn, _FakeRng(ROLL_ONE))
+        for day in range(1, slg_titles.LOTTERY_HISTORY_KEEP + 6):
+            with mock.patch.object(slg_titles, "today_str",
+                                   return_value="2026-09-%02d" % day):
+                ok, msg, _prize = slg_titles.draw_lottery(self.conn, _FakeRng(ROLL_ONE))
+                self.assertTrue(ok, msg)
         rows = slg_titles.lottery_history(self.conn)
         self.assertEqual(len(rows), slg_titles.LOTTERY_HISTORY_KEEP)
 

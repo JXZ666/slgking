@@ -104,7 +104,7 @@ _STATUS_WORDS = {"final", "complete", "completed", "finished", "full release"}
 _DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def http_get(url, timeout=TIMEOUT, direct=False, headers=None):
+def http_get(url, timeout=TIMEOUT, direct=False, headers=None, opener=None):
     """One request, entity-decoded, raw bytes back. Raises on failure.
 
     Module level so the threaded cover pool can use it without going through
@@ -123,7 +123,9 @@ def http_get(url, timeout=TIMEOUT, direct=False, headers=None):
     }
     request_headers.update(headers or {})
     req = urllib.request.Request(url, headers=request_headers)
-    opener = _DIRECT_OPENER if direct else None
+    if opener is not None and direct:
+        raise ValueError("choose either a direct or an explicit HTTP opener")
+    opener = opener or (_DIRECT_OPENER if direct else None)
     with (opener.open(req, timeout=timeout) if opener
           else urllib.request.urlopen(req, timeout=timeout)) as resp:
         raw = resp.read()

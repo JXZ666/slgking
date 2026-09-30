@@ -31,17 +31,17 @@ class DeviceId(unittest.TestCase):
 
 class FetchConfig(unittest.TestCase):
     def test_returns_dict_on_success(self):
-        with mock.patch.object(slg_remote.slg_scrape, "http_get",
+        with mock.patch.object(slg_remote.slg_sync_server, "_server_http_get",
                                return_value=b'{"maintenance": true}'):
             self.assertEqual(slg_remote.fetch_config(), {"maintenance": True})
 
     def test_returns_empty_on_failure(self):
-        with mock.patch.object(slg_remote.slg_scrape, "http_get",
+        with mock.patch.object(slg_remote.slg_sync_server, "_server_http_get",
                                side_effect=OSError("down")):
             self.assertEqual(slg_remote.fetch_config(), {})
 
     def test_rejects_non_dict_body(self):
-        with mock.patch.object(slg_remote.slg_scrape, "http_get",
+        with mock.patch.object(slg_remote.slg_sync_server, "_server_http_get",
                                return_value=b'[1, 2, 3]'):
             self.assertEqual(slg_remote.fetch_config(), {})
 

@@ -4,7 +4,7 @@ import json
 import urllib.parse
 
 import slg_account
-import slg_scrape
+import slg_sync_server
 from slg_sync_server import SERVER_BASE
 
 _COMMENTS = SERVER_BASE + "/comments"
@@ -45,7 +45,7 @@ def fetch_comments_page(game_slug, page=1, limit=20, sort="latest"):
     url = _COMMENTS + "?" + urllib.parse.urlencode({
         "game": game_slug, "page": page, "limit": limit, "sort": sort})
     try:
-        raw = slg_scrape.http_get(url, timeout=_TIMEOUT, direct=True)
+        raw = slg_sync_server._server_http_get(url, timeout=_TIMEOUT)
         data = json.loads(raw.decode("utf-8", "replace"))
         if isinstance(data, dict):
             comments = data.get("comments")

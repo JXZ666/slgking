@@ -210,25 +210,42 @@ class ServerSyncProxyFallbackTests(unittest.TestCase):
 
     @mock.patch("slg_sync_server.urllib.request.getproxies", return_value={})
     @mock.patch("slg_sync_server.slg_scrape.http_get",
-                side_effect=OSError("direct route unavailable"))
-    def test_no_proxy_configuration_does_not_duplicate_a_slow_direct_attempt(
+                side_effect=[OSError("direct route unavailable"), b"via origin"])
+    def test_no_proxy_configuration_uses_verified_origin_after_direct_failure(
             self, get, _proxies):
-        with self.assertRaisesRegex(OSError, "direct route unavailable"):
-            slg_sync_server._server_http_get("https://slg-king.com/manifest.json")
-        get.assert_called_once_with(
-            "https://slg-king.com/manifest.json", timeout=30, direct=True)
+        url = "https://slg-king.com/manifest.json"
+        self.assertEqual(slg_sync_server._server_http_get(url), b"via origin")
+        self.assertEqual(get.call_args_list, [
+            mock.call(url, timeout=30, direct=True),
+            mock.call(url, timeout=30,
+                      opener=slg_sync_server.slg_server_transport.ORIGIN_OPENER),
+        ])
+
+    @mock.patch("slg_sync_server.urllib.request.proxy_bypass", return_value=False)
+    @mock.patch("slg_sync_server.urllib.request.getproxies",
+                return_value={"https": "http://127.0.0.1:8888"})
+    @mock.patch("slg_sync_server.slg_scrape.http_get",
+                side_effect=[OSError("direct unavailable"),
+                             OSError("proxy unavailable"), b"via origin"])
+    def test_proxy_failure_retries_safe_get_at_verified_origin(
+            self, get, _proxies, _bypass):
+        url = "https://slg-king.com/manifest.json"
+        self.assertEqual(slg_sync_server._server_http_get(url), b"via origin")
+        self.assertEqual(get.call_count, 3)
+        self.assertIs(get.call_args.kwargs["opener"],
+                      slg_sync_server.slg_server_transport.ORIGIN_OPENER)
 
     @mock.patch("slg_sync_server.urllib.request.proxy_bypass", return_value=False)
     @mock.patch("slg_sync_server.urllib.request.getproxies",
                 return_value={"https": "http://127.0.0.1:8888"})
     @mock.patch("slg_sync_server.slg_scrape.http_get",
                 side_effect=OSError("both routes unavailable"))
-    def test_both_routes_failing_reports_both_path_attempted(
+    def test_all_routes_failing_reports_unavailable(
             self, get, _proxies, _bypass):
         with self.assertRaisesRegex(
-                RuntimeError, "directly and through the system proxy"):
+                ConnectionError, "源站 HTTPS"):
             slg_sync_server._server_http_get("https://slg-king.com/manifest.json")
-        self.assertEqual(get.call_count, 2)
+        self.assertEqual(get.call_count, 3)
 
 
 class NoteMergeTests(unittest.TestCase):

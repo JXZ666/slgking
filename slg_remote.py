@@ -13,8 +13,10 @@ No nickname, no game name, no cover, no comment text is ever sent.
 import json
 import threading
 import uuid
+from datetime import datetime, timedelta, timezone
 import slg_db
 import slg_scrape
+import slg_sync_server
 from slg_sync_server import SERVER_BASE
 
 PREF_DEVICE_ID = "anon.device_id"
@@ -23,6 +25,7 @@ PREF_ANNOUNCE_SEEN = "remote.announce_seen"
 # Bumped when the report payload shape changes, so the aggregate can tell stale
 # clients apart from current ones.
 PAYLOAD_VERSION = "1"
+CHINA_TZ = timezone(timedelta(hours=8))
 
 
 def device_id(conn):
@@ -41,8 +44,8 @@ def device_id(conn):
 def fetch_config(timeout=6):
     """The server's config.json as a dict, or {} on any failure."""
     try:
-        raw = slg_scrape.http_get(
-            SERVER_BASE + "/config.json", timeout=timeout, direct=True)
+        raw = slg_sync_server._server_http_get(
+            SERVER_BASE + "/config.json", timeout=timeout)
         data = json.loads(raw.decode("utf-8", "replace"))
         return data if isinstance(data, dict) else {}
     except Exception:  # noqa: BLE001 - config is a nicety, never an error
@@ -60,7 +63,9 @@ def report(conn, event_type, data=None):
         "v": PAYLOAD_VERSION,
         "device": device_id(conn),
         "app": "slgking",
-        "ts": slg_db._now(),
+        # Use an explicit offset so the server can bucket reports in
+        # Asia/Shanghai even when this machine's OS timezone differs.
+        "ts": datetime.now(CHINA_TZ).isoformat(timespec="seconds"),
         "event": event_type,
         "data": data or {},
     }

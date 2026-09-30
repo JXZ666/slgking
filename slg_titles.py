@@ -29,6 +29,8 @@ RARITY_COLORS = {
 
 DAILY_SIGNIN_POINTS = 10
 DEFAULT_TITLE_ID = "normal_user"
+REFERRAL_TITLE_STEPS = ((1, "referral_1"), (3, "referral_3"),
+                        (5, "referral_5"))
 
 # 每月累计签到达标奖励：签到满 N 天发一次积分。按档位升序补发，每月各档只领一次。
 SIGNIN_MILESTONES = {5: 15, 10: 30, 20: 50}
@@ -46,6 +48,12 @@ CONNOISSEUR_NEED = 10
 # desc 是给「查看头衔」里那颗「获得方式」按钮用的一句话简介；获取路径由
 # obtain_title_text() 从 obtain/cost/limited_until 推出来，不另写一份。
 TITLES = [
+    {"id": "referral_1", "name": "呼朋引伴", "rarity": "稀有", "obtain": "referral",
+     "desc": "成功邀请一位新用户注册并绑定邀请码后获得。"},
+    {"id": "referral_3", "name": "引路人", "rarity": "史诗", "obtain": "referral",
+     "desc": "成功邀请三位新用户注册并绑定邀请码后获得。"},
+    {"id": "referral_5", "name": "人生导师", "rarity": "传说", "obtain": "referral",
+     "desc": "成功邀请五位新用户注册并绑定邀请码后获得。"},
     {"id": "normal_user",   "name": "普通用户", "rarity": "普通", "obtain": "default",
      "desc": "默认头衔。没有名头的时候就是它，安安静静挂在昵称旁边。"},
     {"id": "group_friend",  "name": "群友",     "rarity": "稀有", "obtain": "code",
@@ -78,6 +86,7 @@ TITLES = [
 
 # 每条头衔的获取路径，一句话。obtain_hint() 是同一个来源的短标签版本。
 _OBTAIN_TEXT = {
+    "referral": "成功邀请并绑定新户后自动获得。",
     "default": "默认头衔，人人都有，无需获取。",
     "code": "加入交流群，用群公告里每天更新的当日兑换码兑换。",
     "lottery": "每日抽奖摇出「777」获得；累计 100 抽必定出一次。",
@@ -323,13 +332,26 @@ def dev_unlocked(conn):
     return slg_db.get_pref(conn, "dev.unlocked", "") == "1"
 
 
+def admin_mode(conn):
+    """True only when local capability and the server-authenticated mode agree."""
+    if not dev_unlocked(conn):
+        return False
+    try:
+        import slg_account
+    except ImportError:
+        # slg_titles is also imported by the server for shared catalogue rules;
+        # client-only account transport must not become a server import dependency.
+        return False
+    return slg_account.developer_mode()
+
+
 def signin(conn, day=None):
     """签到一次。返回 (already, day, gained, bonus)。开发者模式下不限次数。
 
     bonus 是当月累计签到达标补发的积分，签到时一并结算，弹窗可一次展示。
     """
     day = day or today_str()
-    if dev_unlocked(conn):
+    if admin_mode(conn):
         slg_db.add_points(conn, DAILY_SIGNIN_POINTS, "签到（开发者）")
         return (False, day, DAILY_SIGNIN_POINTS, 0)
     already, d, gained = slg_db.record_signin(conn, day, DAILY_SIGNIN_POINTS)
@@ -633,7 +655,7 @@ def draw_lottery(conn, rng=None):
     prize 保持 kind="title" 并带 duplicate=True —— 滚轮照落 777 才算诚实。
     """
     day = today_str()
-    dev = dev_unlocked(conn)
+    dev = admin_mode(conn)
     if not dev and lottery_draws_today(conn) >= LOTTERY_DAILY_LIMIT:
         return (False, "今日已抽 %d 次，明天再来" % LOTTERY_DAILY_LIMIT, None)
     if slg_db.points_balance(conn) < LOTTERY_COST:

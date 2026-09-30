@@ -251,6 +251,7 @@ def scan(conn, roots=None, on_progress=None, log=print,
         log("没有可扫描的目录。在软件里点「扫描本地目录」时会让你选一个文件夹。")
         return {"matched": 0, "unmatched": []}
     index = _title_index(conn)
+    title_by_game_id = _title_index_titles(index)
     found, unmatched = 0, []
 
     for root in roots:
@@ -287,7 +288,7 @@ def scan(conn, roots=None, on_progress=None, log=print,
             found += 1
             if on_progress:
                 on_progress(name, game_id)
-            log("匹配：%s -> #%d %s" % (name, game_id, _title_index_title(index, game_id)))
+            log("匹配：%s -> #%d %s" % (name, game_id, title_by_game_id.get(game_id, "?")))
     conn.commit()
     # A scan can name games the catalogue had no row for, and those rows bring
     # their own cover_file with them - so the memoised cover-gap count is now
@@ -299,11 +300,16 @@ def scan(conn, roots=None, on_progress=None, log=print,
     return {"matched": found, "unmatched": unmatched}
 
 
-def _title_index_title(index, game_id):
+def _title_index_titles(index):
+    """Build a constant-time display-title lookup for a scan's title index.
+
+    Keep the first title for each game ID, matching the former linear lookup:
+    catalogue titles appear before translations and aliases in ``index``.
+    """
+    titles = {}
     for _, gid, title in index:
-        if gid == game_id:
-            return title
-    return "?"
+        titles.setdefault(gid, title)
+    return titles
 
 
 def check_updates(conn):
