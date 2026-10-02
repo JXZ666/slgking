@@ -3519,6 +3519,248 @@ class SidebarFit(unittest.TestCase):
             self.app.update()
 
 
+    # --- font size -----------------------------------------------------------
+
+    def test_ui_font_bakes_the_font_multiplier_in(self):
+        # The multiplier is applied when the font is built, and the font object
+        # is shared, so set_font_scale() reaches every widget already using it.
+        original = slg_gui._font_scale_profile
+        try:
+            slg_gui.set_font_scale("normal")
+            self.assertEqual(slg_gui.ui_font(10).cget("size"), 10)
+            slg_gui.set_font_scale("large")          # 1.20
+            self.assertEqual(slg_gui.ui_font(10).cget("size"), 12)
+            slg_gui.set_font_scale("small")          # 0.90
+            self.assertEqual(slg_gui.ui_font(10).cget("size"), 9)
+        finally:
+            slg_gui.set_font_scale(original)
+
+    def test_ui_tkfont_multiplies_the_setting_by_the_callers_dpi_scale(self):
+        # A plain tk.Label and a canvas item get no help from customtkinter, so
+        # the card list passes its own widget scaling down through dpi_scale.
+        original = slg_gui._font_scale_profile
+        try:
+            slg_gui.set_font_scale("normal")
+            self.assertEqual(
+                slg_gui.ui_tkfont(10, dpi_scale=1.5).cget("size"), 15)
+            slg_gui.set_font_scale("xl")             # 1.40
+            self.assertEqual(
+                slg_gui.ui_tkfont(10, dpi_scale=1.5).cget("size"), 21)
+        finally:
+            slg_gui.set_font_scale(original)
+
+    def test_an_unusable_font_scale_falls_back_to_normal(self):
+        self.assertEqual(slg_gui.normalize_font_scale(None), "normal")
+        self.assertEqual(slg_gui.normalize_font_scale("gigantic"), "normal")
+        self.assertEqual(slg_gui.normalize_font_scale(" XL "), "xl")
+
+    def test_the_font_scale_choices_are_the_four_documented_ones(self):
+        self.assertEqual(list(slg_gui.FONT_SCALE_PROFILES),
+                         ["small", "normal", "large", "xl"])
+        self.assertEqual(slg_gui.FONT_SCALE_PROFILES["normal"]["factor"], 1.0)
+
+    def test_picking_a_font_size_applies_it_and_remembers_it(self):
+        original = self.app.font_scale_profile
+        label = slg_gui.FONT_SCALE_PROFILES["xl"]["label"]
+        try:
+            with mock.patch.object(slg_db, "set_pref") as set_pref:
+                self.app._pick_font_scale(label)
+            set_pref.assert_called_once_with(
+                self.app.conn, slg_gui.PREF_FONT_SCALE, "xl")
+            self.assertEqual(self.app.font_scale_profile, "xl")
+            self.assertEqual(slg_gui._font_scale_profile, "xl")
+            self.assertEqual(slg_gui.ui_font(10).cget("size"), 14)
+        finally:
+            self.app.font_scale_profile = original
+            slg_gui.set_font_scale(original)
+
+    def _card_title_size(self, slot):
+        return slg_gui.tkfont.nametofont(str(slot["title"].cget("font"))).cget("size")
+
+    def test_the_card_text_follows_the_font_size(self):
+        # The three card labels are plain tk.Labels, which is what made them
+        # the one part of the window that ignored every scaling setting. They
+        # only follow a late change through this explicit refresh.
+        original = slg_gui._font_scale_profile
+        self._show_games(self._panel_game(0))
+        try:
+            slot = self.app._card_pool[0]
+            slg_gui.set_font_scale("normal")
+            self.app._refresh_card_text_scaling()
+            before = self._card_title_size(slot)
+            slg_gui.set_font_scale("xl")
+            self.app._refresh_card_text_scaling()
+            self.assertGreater(self._card_title_size(slot), before)
+        finally:
+            slg_gui.set_font_scale(original)
+            self.app._refresh_card_text_scaling()
+
+    # --- keyboard navigation -------------------------------------------------
+
+    def _show_games(self, *games, page_size=None):
+        """Render `games` as the list, at a small page size.
+
+        PAGE_SIZE is patched down rather than the fixture grown to eight, so a
+        page turn is one keystroke away and the fixture still has a second page
+        to turn to.
+        """
+        games = list(games)
+        self.addCleanup(self._finish)
+        patchers = [
+            mock.patch.object(slg_gui, "PAGE_SIZE",
+                              page_size or max(1, len(games))),
+            mock.patch.object(slg_db, "find_games",
+                              side_effect=lambda *a, **k: list(games)),
+            mock.patch.object(self.app, "_render_filterbar"),
+            mock.patch.object(self.app, "_render_stats"),
+            mock.patch.object(self.app, "_render_detail_if_stale"),
+        ]
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.app.page = 1
+        self.app.selected = None
+        self.app.refresh()
+        self.app.update()
+        return games
+
+    def _key(self, keysym):
+        return self.app._on_card_key(mock.Mock(keysym=keysym))
+
+    def test_down_walks_the_selection_down_the_page(self):
+        games = self._show_games(*[self._panel_game(i) for i in range(3)])
+        self.app.focus_set()
+        self._key("Down")
+        self.assertEqual(self.app.selected["id"], games[0]["id"])
+        self._key("Down")
+        self.assertEqual(self.app.selected["id"], games[1]["id"])
+        self._key("Up")
+        self.assertEqual(self.app.selected["id"], games[0]["id"])
+
+    def test_down_on_the_last_card_turns_the_page(self):
+        games = self._show_games(*[self._panel_game(i) for i in range(3)],
+                                 page_size=2)
+        self.app.focus_set()
+        self.app.selected = games[1]
+        self.assertEqual(self._key("Down"), "break")
+        self.assertEqual(self.app.page, 2)
+        self.assertEqual(self.app.selected["id"], games[2]["id"])
+
+    def test_up_on_the_first_card_turns_back_a_page(self):
+        games = self._show_games(*[self._panel_game(i) for i in range(3)],
+                                 page_size=2)
+        self.app.focus_set()
+        self.app._goto_page(2)
+        self.app.selected = games[2]
+        self._key("Up")
+        self.assertEqual(self.app.page, 1)
+        self.assertEqual(self.app.selected["id"], games[1]["id"])
+
+    def test_down_on_the_very_last_card_stays_put(self):
+        games = self._show_games(*[self._panel_game(i) for i in range(2)],
+                                 page_size=2)
+        self.app.focus_set()
+        self.app.selected = games[1]
+        self.assertEqual(self._key("Down"), "break")
+        self.assertEqual(self.app.page, 1)
+        self.assertEqual(self.app.selected["id"], games[1]["id"])
+
+    def test_page_keys_turn_the_page(self):
+        self._show_games(*[self._panel_game(i) for i in range(4)], page_size=2)
+        self.app.focus_set()
+        self._key("Next")
+        self.assertEqual(self.app.page, 2)
+        self._key("Prior")
+        self.assertEqual(self.app.page, 1)
+
+    def test_enter_opens_the_panel_without_moving_the_selection(self):
+        # Enter goes through the same select() a click does, and never starts a
+        # process: a keystroke that launches a game is the one mistake here
+        # that another keystroke cannot undo.
+        games = self._show_games(*[self._panel_game(i) for i in range(3)])
+        self.app.focus_set()
+        self.app.selected = games[1]
+        with mock.patch.object(self.app, "select") as select, \
+                mock.patch.object(slg_gui.subprocess, "Popen") as popen, \
+                mock.patch.object(slg_gui.os, "startfile",
+                                  create=True) as startfile:
+            self.assertEqual(self._key("Return"), "break")
+        select.assert_called_once_with(games[1])
+        popen.assert_not_called()
+        startfile.assert_not_called()
+        self.assertEqual(self.app.selected["id"], games[1]["id"])
+
+    def test_the_arrows_are_left_to_a_text_box_that_has_focus(self):
+        # The bindings live on the window, so without the guard an arrow typed
+        # into the search box would also turn the page behind it.
+        self._show_games(*[self._panel_game(i) for i in range(4)], page_size=2)
+        self.app.search_entry.focus_set()
+        self.app.update()
+        self.assertIsNone(self._key("Down"))
+        self.assertIsNone(self._key("Return"))
+        self.assertEqual(self.app.page, 1)
+        self.assertIsNone(self.app.selected)
+
+    def test_the_key_bindings_are_installed_on_the_window(self):
+        # Bound on the window rather than on the cards: eighty tk.Labels with a
+        # tab stop each would sit worthless between the search box and the
+        # detail panel. Tk normalises the sequence names, hence the Key- form.
+        for sequence in ("<Key-Up>", "<Key-Down>", "<Key-Prior>", "<Key-Next>",
+                         "<Key-Return>"):
+            self.assertIn(sequence, self.app.bind())
+
+    # --- save inventory ------------------------------------------------------
+
+    def test_the_save_inventory_lists_what_the_scan_found(self):
+        with slg_db.session() as conn:
+            slg_db.clear_local_saves(conn)
+            slg_db.set_local_save(conn, r"C:\fake\saves",
+                                  display_title="Inventoried Game",
+                                  save_count=6, total_size=2048,
+                                  last_modified="2026-09-01 10:00:00")
+        self.addCleanup(self._drop_save_inventory_rows)
+        self.app.open_save_inventory()
+        self.app.update()
+        windows = [w for w in self.app.winfo_children()
+                   if isinstance(w, ctk.CTkToplevel) and w.title() == "本地存档"]
+        self.assertEqual(len(windows), 1)
+        texts = self._texts_in(windows[0])
+        self.assertTrue(any("Inventoried Game" in t for t in texts), texts)
+        self.assertTrue(any("6 个存档" in t and "2.0 KB" in t for t in texts),
+                        texts)
+        windows[0].destroy()
+        self.app.update()
+
+    def test_the_save_inventory_says_so_when_nothing_has_been_scanned(self):
+        with slg_db.session() as conn:
+            slg_db.clear_local_saves(conn)
+        self.app.open_save_inventory()
+        self.app.update()
+        windows = [w for w in self.app.winfo_children()
+                   if isinstance(w, ctk.CTkToplevel) and w.title() == "本地存档"]
+        self.assertEqual(len(windows), 1)
+        texts = self._texts_in(windows[0])
+        self.assertTrue(any("还没有扫描过本地存档" in t for t in texts), texts)
+        windows[0].destroy()
+        self.app.update()
+
+    def test_opening_the_inventory_twice_reuses_one_window(self):
+        with slg_db.session() as conn:
+            slg_db.clear_local_saves(conn)
+        self.app.open_save_inventory()
+        self.app.update()
+        self.app.open_save_inventory()
+        self.app.update()
+        windows = [w for w in self.app.winfo_children()
+                   if isinstance(w, ctk.CTkToplevel) and w.title() == "本地存档"]
+        self.assertEqual(len(windows), 1)
+        windows[0].destroy()
+        self.app.update()
+
+    def _drop_save_inventory_rows(self):
+        with slg_db.session() as conn:
+            slg_db.clear_local_saves(conn)
+
     # --- Admin console -------------------------------------------------
 
     def test_admin_console_button_opens_the_admin_page(self):

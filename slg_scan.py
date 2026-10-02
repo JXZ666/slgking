@@ -8,6 +8,7 @@ Folder names are the only version record these games have - Ren'Py installs
 carry no manifest - so the whole thing leans on a title/version split.
 """
 
+import datetime
 import difflib
 import os
 import re
@@ -342,6 +343,173 @@ def _compare(left, right):
     if slg_db._version_gt(right, left):
         return -1
     return 0
+
+
+# --- save files -----------------------------------------------------------------
+
+# Where each engine writes saves *inside* its own folder. Ren'Py is the one
+# this library is really built around; the rest are cheap to probe, and the
+# scan is manual, so a miss here costs a directory listing and nothing else.
+_ENGINE_SAVE_DIRS = {
+    "Ren'Py": ("game/saves", "saves"),
+    "Unity": ("saves", "save", "SaveData"),
+    "RPG Maker": ("save", "saves", "www/save"),
+    "HTML": ("save", "saves"),
+}
+# The fallback probe, for a folder whose engine could not be identified.
+# "game/saves" is in here on purpose: that is the Ren'Py layout, and a Ren'Py
+# build shipped without a top-level renpy/ folder still writes its saves
+# there. Probing it against a non-Ren'Py game costs one isdir() and finds
+# nothing.
+_ANY_SAVE_DIRS = ("saves", "save", "SaveData", "game/saves")
+
+# Ren'Py parks these under %APPDATA%/RenPy alongside the real game folders.
+# Without this the sweep reports engine bookkeeping as if it were a game.
+_RENPY_HOUSEKEEPING = {"backups", "tokens", "cache"}
+
+
+def human_size(size):
+    """Bytes as a short string, for a column that gets read at a glance."""
+    value = float(size)
+    if value < 1024:
+        return "%d B" % value
+    for unit in ("KB", "MB", "GB"):
+        value /= 1024
+        if value < 1024 or unit == "GB":
+            return "%.1f %s" % (value, unit)
+
+
+def _dir_stats(path):
+    """(file count, total bytes, newest mtime) for a save folder.
+
+    Recursive and error-tolerant in the same spirit as _listdir: a save the
+    game currently holds open must not abort the walk and lose the whole run.
+    The stamp is None rather than an epoch date when nothing was readable.
+    """
+    count, total, newest = 0, 0, 0.0
+    for base, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                stat = os.stat(os.path.join(base, name))
+            except OSError:
+                continue
+            count += 1
+            total += stat.st_size
+            newest = max(newest, stat.st_mtime)
+    stamp = (datetime.datetime.fromtimestamp(newest)
+             .strftime("%Y-%m-%d %H:%M:%S")) if newest else None
+    return count, total, stamp
+
+
+def _local_low_roots():
+    """The Unity save root, when this machine has one."""
+    profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    path = os.path.join(profile, "AppData", "LocalLow")
+    return [path] if os.path.isdir(path) else []
+
+
+def _system_save_dirs():
+    """Yield (name hint, save directory, engine) for saves kept outside the game.
+
+    Unity and some RPG Maker builds write to LocalLow/<company>/<product> and
+    %APPDATA%/RenPy/<name> instead of next to the exe. Sweeping those is the
+    half of the scan that can name a game the user never bound to a folder.
+    """
+    found = []
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        renpy = os.path.join(appdata, "RenPy")
+        for name in sorted(_listdir(renpy)):
+            if name.lower() in _RENPY_HOUSEKEEPING:
+                continue
+            path = os.path.join(renpy, name)
+            if os.path.isdir(path):
+                found.append((name, path, "Ren'Py"))
+    for base in _local_low_roots():
+        for company in sorted(_listdir(base)):
+            company_dir = os.path.join(base, company)
+            if not os.path.isdir(company_dir):
+                continue
+            for product in sorted(_listdir(company_dir)):
+                path = os.path.join(company_dir, product)
+                if os.path.isdir(path):
+                    found.append((product, path, "Unity"))
+    return found
+
+
+def _slug_for(conn, game_id):
+    if game_id is None:
+        return None
+    row = conn.execute("SELECT slug FROM games WHERE id = ?",
+                       (game_id,)).fetchone()
+    return row["slug"] if row is not None else None
+
+
+def scan_saves(conn, roots=None, on_progress=None, log=print,
+               should_stop=None):
+    """Inventory the save files on this machine. Read-only.
+
+    Two passes. Every folder the user has bound gets probed for the
+    directories its engine would write saves into, and then the system
+    locations get swept for saves belonging to a game that was never bound at
+    all. Nothing here deletes, moves or writes a save - the table it fills is
+    a report, and the only way to lose a row is to scan again.
+
+    `roots` is accepted for signature parity with scan() and is not used: a
+    save directory is found by engine, not by walking a user-chosen root.
+    """
+    index = _title_index(conn)
+    titles = _title_index_titles(index)
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    seen, found = set(), []
+
+    def record(folder_name, path, engine, source_kind, game_id):
+        key = os.path.normcase(os.path.abspath(path))
+        if key in seen:
+            return
+        seen.add(key)
+        count, size, modified = _dir_stats(path)
+        if not count:
+            return          # an empty saves folder is not worth a row
+        slg_db.set_local_save(
+            conn, path, game_slug=_slug_for(conn, game_id),
+            display_title=titles.get(game_id) or folder_title(folder_name),
+            engine=engine, source_kind=source_kind, save_count=count,
+            total_size=size, last_modified=modified, scanned_at=stamp)
+        found.append({"path": path, "count": count, "size": size})
+
+    if should_stop is None:
+        should_stop = lambda: False          # noqa: E731 - a default, not logic
+
+    # Pass 1: saves inside a folder the user has already bound to a game.
+    for row in conn.execute(
+            "SELECT g.id, g.title, l.folder_path FROM local l"
+            " JOIN games g ON g.id = l.game_id"
+            " WHERE l.folder_path IS NOT NULL").fetchall():
+        if should_stop():
+            break
+        folder = row["folder_path"]
+        if not os.path.isdir(folder):
+            continue
+        engine = detect_engine(folder) or ""
+        for relative in _ENGINE_SAVE_DIRS.get(engine, _ANY_SAVE_DIRS):
+            path = os.path.join(folder, relative.replace("/", os.sep))
+            if os.path.isdir(path):
+                record(os.path.basename(folder.rstrip("/\\")), path, engine,
+                       "install", row["id"])
+        if on_progress:
+            on_progress(row["title"])
+
+    # Pass 2: saves the engine put somewhere the install folder never sees.
+    for name, path, engine in _system_save_dirs():
+        if should_stop():
+            break
+        record(name, path, engine, "system", match_game(conn, name, index))
+
+    conn.commit()
+    total = sum(item["size"] for item in found)
+    log("存档扫描完成：%d 个目录，共 %s" % (len(found), human_size(total)))
+    return {"count": len(found), "bytes": total}
 
 
 # --- CLI -----------------------------------------------------------------------

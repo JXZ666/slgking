@@ -51,7 +51,7 @@ import slg_update
 import slg_util
 
 APP_VERSION = "0.24.5"
-TEST_APP_VERSION = "0.24.5"
+TEST_APP_VERSION = "0.24.6"
 
 
 def _build_announcement_pages(remote_config, release_notes):
@@ -178,6 +178,30 @@ UI_SCALE_PROFILES = {
 UI_SCALE_LABEL_TO_PROFILE = {
     entry["label"]: key for key, entry in UI_SCALE_PROFILES.items()}
 
+# A second, independent multiplier. The profiles above resize the whole window
+# - covers, padding, row heights - which is what a 4K desktop needs. This one
+# moves the glyphs and nothing else, for the smaller complaint that the layout
+# is already right but the text on it is too small to read.
+PREF_FONT_SCALE = "ui.font_scale"
+FONT_SCALE_PROFILES = {
+    "small": {"label": "小（90%）", "factor": 0.90},
+    "normal": {"label": "标准（100%）", "factor": 1.00},
+    "large": {"label": "大（120%）", "factor": 1.20},
+    "xl": {"label": "特大（140%）", "factor": 1.40},
+}
+FONT_SCALE_LABEL_TO_PROFILE = {
+    entry["label"]: key for key, entry in FONT_SCALE_PROFILES.items()}
+
+_font_scale_profile = "normal"
+# These two caches are what make the setting work at all. A widget refers to a
+# font by name once it has been configured with one, so re-configuring the
+# shared object is what reaches everything already on screen; and holding the
+# reference is also what stops tkinter's Font.__del__ from deleting the
+# underlying named font out from under those widgets.
+_FONT_CACHE = {}
+_TKFONT_CACHE = {}
+_font_cache_root = None
+
 
 def normalize_ui_scale_profile(profile):
     """Return a known UI scale profile, defaulting safely to system DPI."""
@@ -220,6 +244,57 @@ def ui_scale_multipliers(profile, system_window_dpi, system_widget_dpi):
 def load_ui_scale_profile(conn):
     return normalize_ui_scale_profile(
         slg_db.get_pref(conn, PREF_UI_SCALE, "auto"))
+
+
+def normalize_font_scale(profile):
+    profile = str(profile or "normal").strip().lower()
+    return profile if profile in FONT_SCALE_PROFILES else "normal"
+
+
+def font_scale_factor():
+    return float(FONT_SCALE_PROFILES[_font_scale_profile]["factor"])
+
+
+def load_font_scale(conn):
+    return normalize_font_scale(
+        slg_db.get_pref(conn, PREF_FONT_SCALE, "normal"))
+
+
+def _scaled_font_size(size, extra=1.0):
+    return max(1, round(size * font_scale_factor() * extra))
+
+
+def _drop_fonts_from_dead_root():
+    """Empty both caches when the Tk interpreter they were built on is gone.
+
+    A font object belongs to the interpreter that created it: configuring one
+    whose root has been destroyed raises TclError. The app starts a single
+    root and never notices, but a test that builds a second App does - and it
+    fails on the very first widget, which is a confusing place to land.
+    """
+    global _font_cache_root
+    root = getattr(tk, "_default_root", None)
+    if root is not _font_cache_root:
+        _FONT_CACHE.clear()
+        _TKFONT_CACHE.clear()
+        _font_cache_root = root
+
+
+def set_font_scale(profile):
+    """Switch the glyph multiplier and re-size every font already handed out.
+
+    Nothing is rebuilt. customtkinter widgets registered a callback on the font
+    they were given (CTkFont.add_size_configure_callback), and a canvas item or
+    a plain tk.Label follows the named font it was configured with, so one
+    configure() per cached font reaches all of them at once.
+    """
+    global _font_scale_profile
+    _font_scale_profile = normalize_font_scale(profile)
+    _drop_fonts_from_dead_root()
+    for (size, _weight), font in _FONT_CACHE.items():
+        font.configure(size=_scaled_font_size(size))
+    for (size, _weight, extra), font in _TKFONT_CACHE.items():
+        font.configure(size=_scaled_font_size(size, extra))
 
 
 def clamp_scaled_size(width, height, scale, screen_width, screen_height,
@@ -420,19 +495,44 @@ def _resolve_ui_family():
 
 
 def ui_font(size, weight="normal"):
-    """The one place a font for a widget is built."""
-    return ctk.CTkFont(family=_resolve_ui_family(), size=size, weight=weight)
+    """The one place a font for a widget is built.
 
-
-def ui_tkfont(size, weight="normal"):
-    """A plain tkinter font, for canvas text.
-
-    Canvas items take a font rather than a widget, so they cannot use the
-    CTkFont above. Going through the same resolution anyway: it is the only
-    place that knows which installed family has CJK glyphs, and splash text in
-    a font of its own would be the one place that showed it.
+    Cached rather than freshly built so set_font_scale() has something to
+    reach: the widget keeps the font object it was configured with, and a
+    customtkinter widget registers a callback on it, so re-configuring the
+    shared object updates every widget built from it.
     """
-    return tkfont.Font(family=_resolve_ui_family(), size=size, weight=weight)
+    _drop_fonts_from_dead_root()
+    key = (size, weight)
+    font = _FONT_CACHE.get(key)
+    if font is None:
+        font = ctk.CTkFont(family=_resolve_ui_family(),
+                           size=_scaled_font_size(size), weight=weight)
+        _FONT_CACHE[key] = font
+    return font
+
+
+def ui_tkfont(size, weight="normal", dpi_scale=1.0):
+    """A plain tkinter font, for canvas text and for a plain tk.Label.
+
+    Canvas items take a font rather than a widget, and a plain tk.Label is
+    never asked to scale itself, so neither gets customtkinter's automatic
+    treatment - the multiplier is baked in here instead. Going through the
+    same family resolution anyway: it is the only place that knows which
+    installed family has CJK glyphs.
+
+    `dpi_scale` is the caller's own widget scaling. It exists for the card
+    list, whose three labels have to follow the monitor DPI by hand.
+    """
+    _drop_fonts_from_dead_root()
+    key = (size, weight, round(dpi_scale, 4))
+    font = _TKFONT_CACHE.get(key)
+    if font is None:
+        font = tkfont.Font(family=_resolve_ui_family(),
+                           size=_scaled_font_size(size, dpi_scale),
+                           weight=weight)
+        _TKFONT_CACHE[key] = font
+    return font
 
 
 def _mix(color_a, color_b, t):
@@ -1368,6 +1468,10 @@ class App(ctk.CTk):
         self.theme_mode = slg_db.get_pref(self.conn, PREF_THEME, "system") or "system"
         if self.theme_mode not in _THEME_LABELS:   # hand-edited db, not worth a crash
             self.theme_mode = "system"
+        # Both multipliers are resolved before the first widget is built: a font
+        # size chosen after the fact would have to re-lay-out every frame.
+        self.font_scale_profile = load_font_scale(self.conn)
+        set_font_scale(self.font_scale_profile)
         self.ui_scale_profile = load_ui_scale_profile(self.conn)
         self._apply_ui_scale_profile(
             self.ui_scale_profile, persist=False, resize_main=False)
@@ -1998,6 +2102,15 @@ class App(ctk.CTk):
         self.list = ctk.CTkScrollableFrame(body, fg_color="transparent")
         self.list.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
         self.list.grid_columnconfigure(0, weight=1)
+
+        # Card navigation is bound to the window, not to the cards - see
+        # _card_key_owns_keystroke for why. Bound here rather than in __init__
+        # because _build is what makes self.list exist.
+        for sequence in ("<Up>", "<Down>", "<Prior>", "<Next>", "<Return>"):
+            self.bind(sequence, self._on_card_key)
+        if not getattr(self, "_dpi_hook_registered", False):
+            self._dpi_hook_registered = True
+            ctk.ScalingTracker.add_widget(self._on_dpi_scaling_changed, self)
 
         # The pager is a sibling of the list, not a child, so it stays pinned to
         # the bottom of the column. Packed inside the list it would sit after
@@ -2881,6 +2994,107 @@ class App(ctk.CTk):
     def _next_page(self):
         self._goto_page(self.page + 1)
 
+    def _card_key_owns_keystroke(self):
+        """True when the keystroke belongs to a text box, not to the card list.
+
+        The card bindings live on the window rather than on the cards, because
+        giving eighty tk.Labels a tab stop each would put eighty worthless
+        stops between the search box and the detail panel - which is why there
+        is no takefocus anywhere in this file. The price is that these bindings
+        also see keys aimed at the search box and the pager's page box, and an
+        Entry wants its arrows and its Return for itself.
+        """
+        try:
+            focused = self.focus_get()
+        except (KeyError, tk.TclError):
+            return True
+        return isinstance(focused, (tk.Entry, tk.Text))
+
+    def _move_selection(self, delta):
+        """Move the card selection by one row, turning the page at either end."""
+        page = self._page_slice()
+        if not page:
+            return "break"
+        index = next((i for i, g in enumerate(page)
+                      if self.selected is not None
+                      and g["id"] == self.selected["id"]), None)
+        if index is None:
+            # Nothing selected yet: the first press picks the end nearest the
+            # key, so Down enters at the top and Up enters at the bottom.
+            target = 0 if delta > 0 else len(page) - 1
+        else:
+            target = index + delta
+        if target < 0 or target >= len(page):
+            before = self.page
+            self._goto_page(self.page + (1 if delta > 0 else -1))
+            if self.page == before:
+                return "break"          # already on the first or last page
+            page = self._page_slice()
+            if not page:
+                return "break"
+            target = 0 if delta > 0 else len(page) - 1
+        self.select(page[target])
+        self._scroll_card_into_view(page[target]["id"])
+        return "break"
+
+    def _activate_selected_card(self):
+        """Enter does exactly what a click does - open the detail panel.
+
+        Deliberately not "launch the game": the mouse never launched anything
+        from this list, and a keystroke that starts a process is the one
+        mistake here that cannot be undone with another keystroke.
+        """
+        page = self._page_slice()
+        if not page:
+            return "break"
+        gid = self.selected["id"] if self.selected is not None else None
+        game = next((g for g in page if g["id"] == gid), None)
+        self.select(game if game is not None else page[0])
+        return "break"
+
+    def _scroll_card_into_view(self, gid):
+        """Bring the selected row into the viewport after a keyboard move.
+
+        CTkScrollableFrame has no per-widget scrolling, so the row's y inside
+        the scroll region is converted to a canvas fraction. Deferred through
+        after_idle because a page turn repaints the cards first.
+        """
+        def apply():
+            canvas = getattr(self.list, "_parent_canvas", None)
+            if canvas is None:
+                return
+            slot = next((s for row_gid, s in zip(self._pool_gid, self._card_pool)
+                         if row_gid == gid), None)
+            if slot is None:
+                return
+            try:
+                region = canvas.bbox("all")
+                if not region or region[3] <= 0:
+                    return
+                top = slot["frame"].winfo_y()
+                canvas.yview_moveto(max(0.0, min(1.0, top / region[3])))
+            except Exception:  # noqa: BLE001 - scrolling must never crash
+                pass
+        self.after_idle(apply)
+
+    def _on_card_key(self, event):
+        if self._card_key_owns_keystroke():
+            return None
+        keysym = event.keysym
+        if keysym == "Up":
+            return self._move_selection(-1)
+        if keysym == "Down":
+            return self._move_selection(1)
+        if keysym == "Prior":
+            self._prev_page()
+            return "break"
+        if keysym == "Next":
+            self._next_page()
+            return "break"
+        if keysym in ("Return", "KP_Enter"):
+            return self._activate_selected_card()
+        return None
+
     def _jump_to_typed(self):
         """Read the page box and go there. Anything that is not a number is
         ignored outright - _goto_page would clamp a garbage parse to page 1,
@@ -3023,6 +3237,13 @@ class App(ctk.CTk):
         they were built for, so a closure holding `game` would open the previous
         occupant of that slot.
         """
+        # Clicking a card is also how a keyboard user gets back out of the
+        # search box: focus parked in an Entry swallows the arrow keys, so the
+        # list has to take focus back or the arrows stay dead after a search.
+        try:
+            self.list.focus_set()
+        except tk.TclError:
+            pass
         gid = self._widget_gid.get(card)
         if gid is None:
             return
@@ -3030,9 +3251,25 @@ class App(ctk.CTk):
         if game is not None:
             self.select(game)
 
+    def _card_text_fonts(self, card):
+        """The three card fonts, at this card's own widget scaling.
+
+        ui_tkfont bakes in the font-size setting; `dpi` is the half that
+        customtkinter would have applied for us had these been CTkLabels
+        rather than the plain tk.Labels the cold-build note below explains.
+        """
+        dpi = card._apply_widget_scaling(1.0)
+        return (ui_tkfont(15, "bold", dpi_scale=dpi),
+                ui_tkfont(12, dpi_scale=dpi),
+                ui_tkfont(12, dpi_scale=dpi))
+
     def _new_card(self, game, tags):
         """Build one card's widgets. Everything that does not change with the
         game - geometry, fonts, wrap width - is set here and never again.
+
+        "Never again" holds except for the three fonts and the wrap width,
+        which _refresh_card_text_scaling re-fits if the font size or the
+        monitor DPI changes while the card is on screen.
 
         The three text lines are plain tk.Labels, not CTkLabels. A CTkLabel is a
         Frame plus a Canvas plus a Label, so eighty cards meant 240 extra widgets
@@ -3053,20 +3290,24 @@ class App(ctk.CTk):
         img = ctk.CTkLabel(card, text="")
         img.grid(row=0, column=0, rowspan=3, padx=10, pady=8)
 
-        # tk.Label takes a raw pixel wraplength where CTkLabel scaled it for us.
+        # tk.Label takes raw pixels where CTkLabel scaled for us, so the wrap
+        # width and the three fonts both have to be scaled by hand. Leaving the
+        # fonts unscaled was why the card text stayed the same physical size on
+        # every monitor: CTkFont holds a pixel size and never scales itself.
         wrap = card._apply_widget_scaling(CARD_WRAP)
+        title_font, meta_font, tagline_font = self._card_text_fonts(card)
 
         title = tk.Label(card, text="", bg=CARD, fg=TEXT, anchor="w",
-                         font=ui_font(size=15, weight="bold"))
+                         font=title_font)
         title.grid(row=0, column=1, sticky="ew", pady=(10, 0))
 
         meta = tk.Label(card, text="", bg=CARD, fg=MUTED, anchor="w",
-                        font=ui_font(size=12))
+                        font=meta_font)
         meta.grid(row=1, column=1, sticky="ew")
 
         tagline = tk.Label(card, text="", bg=CARD, fg=MUTED, anchor="w",
                            wraplength=wrap, justify="left",
-                           font=ui_font(size=12))
+                           font=tagline_font)
         tagline.grid(row=2, column=1, sticky="ew", pady=(0, 10))
 
         # The three text lines are bound too, and that is not belt and braces:
@@ -5598,6 +5839,7 @@ class App(ctk.CTk):
                 self.after_idle(self._resize_main_for_ui_scale)
                 self.after_idle(self._resize_settings_for_ui_scale)
                 self.after_idle(self._refresh_detail_overview_wrap)
+                self.after_idle(self._refresh_card_text_scaling)
             except tk.TclError:
                 pass
 
@@ -5646,6 +5888,38 @@ class App(ctk.CTk):
             self._detail_overview_resized(type("ConfigureEvent", (), {"width": width})())
         except (AttributeError, tk.TclError):
             return
+
+    def _refresh_card_text_scaling(self):
+        """Re-fit the card text after the font size or the monitor DPI changed.
+
+        The three card labels are plain tk.Labels, so neither the font-size
+        setting nor customtkinter's DPI tracking recalculates them: DPI
+        tracking only ever rescales CTk widgets. The tagline's wrap width was
+        measured against the old scaling too, so it is re-measured here rather
+        than being left to wrap at a width the card no longer has.
+        """
+        for slot in getattr(self, "_card_pool", []):
+            frame = slot["frame"]
+            try:
+                if not frame.winfo_exists():
+                    continue
+                title_font, meta_font, tagline_font = self._card_text_fonts(frame)
+                slot["title"].configure(font=title_font)
+                slot["meta"].configure(font=meta_font)
+                slot["tagline"].configure(
+                    font=tagline_font,
+                    wraplength=frame._apply_widget_scaling(CARD_WRAP))
+            except tk.TclError:
+                continue
+
+    def _on_dpi_scaling_changed(self, _widget_scaling, _window_scaling):
+        """Re-fit the hand-scaled text when the window changes monitor.
+
+        customtkinter calls this for every registered widget when the detected
+        monitor DPI changes, but it only rescales CTk widgets. The card's three
+        tk.Labels and the tagline's pixel wrap width are ours to redo.
+        """
+        self._refresh_card_text_scaling()
 
     def _center_on_parent(self, win, parent=None):
         """Park a dialog over the middle of its parent window.
@@ -11472,6 +11746,9 @@ class App(ctk.CTk):
             ("扫描本地目录…",
              scan_blurb,
              self.do_scan, self.pick_scan_root, "scan_local_library"),
+            ("扫描本地存档…",
+             "看看每个游戏在本机留了多少存档、占多大，可一键打开所在文件夹。",
+             self.do_scan_saves, self.open_save_inventory, "scan_local_saves"),
             ("同步与维护…",
              "同步目录数据，或补齐封面与热度信息。",
              self.open_maintenance, None, "sync_maintenance"),
@@ -11559,6 +11836,7 @@ class App(ctk.CTk):
             "check_updates", "collection_manager", "backup_restore",
             "translation_tools", "tag_translations", "preference_weights",
             "translation_settings", "scan_local_library", "sync_maintenance",
+            "scan_local_saves",
         }
         if event not in allowed_events:
             return
@@ -11995,6 +12273,21 @@ class App(ctk.CTk):
             "只调整本软件窗口和控件，不会修改 Windows 显示分辨率。"
             "分辨率档位是界面缩放预设；「自动」沿用系统 DPI。")
 
+        font_card = setting_card(appearance, "字体大小")
+        font_menu = ctk.CTkOptionMenu(
+            font_card,
+            values=[entry["label"] for entry in FONT_SCALE_PROFILES.values()],
+            height=34, corner_radius=8,
+            fg_color=CHIP, button_color=CHIP, button_hover_color=CARD_HOVER,
+            text_color=TEXT, font=ui_font(size=12),
+            command=self._pick_font_scale)
+        font_menu.pack(fill="x", padx=10, pady=(0, 0))
+        font_menu.set(FONT_SCALE_PROFILES[self.font_scale_profile]["label"])
+        info_note(
+            font_card,
+            "只放大文字，窗口大小和封面尺寸不变。"
+            "整体都小就调上面的界面尺寸，只有字看不清就用这一项。")
+
         alerts = pages["alerts"]
         page_heading(alerts, "提醒与声音")
         sound_card = setting_card(alerts, "每日抽奖音效")
@@ -12053,6 +12346,20 @@ class App(ctk.CTk):
     def _pick_ui_scale_profile(self, label):
         profile = UI_SCALE_LABEL_TO_PROFILE.get(label, "auto")
         self._apply_ui_scale_profile(profile)
+
+    def _pick_font_scale(self, label):
+        """Apply a font size and re-fit the text that is already on screen.
+
+        set_font_scale reaches every CTk widget because they all share the
+        cached fonts; the card labels are the plain ones that have to be
+        repainted by hand.
+        """
+        profile = FONT_SCALE_LABEL_TO_PROFILE.get(label, "normal")
+        self.font_scale_profile = profile
+        if getattr(self, "conn", None) is not None:
+            slg_db.set_pref(self.conn, PREF_FONT_SCALE, profile)
+        set_font_scale(profile)
+        self._refresh_card_text_scaling()
 
     def open_data_sources(self):
         """Show the public catalogue references in one place."""
@@ -13840,6 +14147,108 @@ class App(ctk.CTk):
         except Exception as exc:  # noqa: BLE001
             self.queue.put(("done", self._fail("扫描", exc)))
 
+    def do_scan_saves(self):
+        """Inventory the save folders on this machine.
+
+        Deliberately not folded into 扫描本地目录: that scan reconciles the
+        catalogue against folders the user chose, this one only reads what the
+        games already wrote. Kept manual for the same reason - it walks the
+        whole LocalLow tree, which is not something to run on every launch.
+        """
+        if self.busy:
+            return
+        self._run_job("扫描本地存档…", self._saves_worker)
+
+    def _saves_worker(self):
+        import slg_scan
+        try:
+            with slg_db.session() as conn:
+                result = slg_scan.scan_saves(
+                    conn, log=self._log,
+                    on_progress=lambda title: self.queue.put(
+                        ("progress", "查看 %s" % title)),
+                    should_stop=self._stop.is_set)
+            self.queue.put(("saves_done",
+                            "存档扫描完成：%d 个目录，共 %s"
+                            % (result["count"],
+                               slg_scan.human_size(result["bytes"]))))
+            # Opened after the finish message, and only on success: a failed
+            # scan should say so, not pop up a stale inventory.
+            self.queue.put(("saves_inventory", None))
+        except Exception as exc:  # noqa: BLE001
+            self.queue.put(("saves_done", self._fail("扫描存档", exc)))
+
+    def open_save_inventory(self):
+        """Show what the last save scan found. Read-only on purpose.
+
+        There is no delete or restore here: a save folder is the one thing in
+        this app the user cannot get back from the catalogue, so the first
+        version of this window only reports and opens the folder.
+        """
+        window = self._new_dialog("本地存档", "780x560")
+        body = ctk.CTkFrame(window, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=14, pady=14)
+        self._render_save_inventory(body)
+
+    def _render_save_inventory(self, body):
+        import slg_scan
+
+        for child in body.winfo_children():
+            child.destroy()
+        rows = slg_db.list_local_saves(self.conn)
+        if not rows:
+            ctk.CTkLabel(
+                body, text="还没有扫描过本地存档。\n"
+                           "点左侧「更多工具…」→「扫描本地存档…」建立台账。",
+                text_color=MUTED, justify="left",
+                font=ui_font(size=13)).pack(pady=48)
+            return
+
+        total = sum(int(row["total_size"] or 0) for row in rows)
+        ctk.CTkLabel(
+            body, text="%d 个存档目录 · 共 %s"
+                       % (len(rows), slg_scan.human_size(total)),
+            text_color=MUTED, anchor="w",
+            font=ui_font(size=12)).pack(fill="x", pady=(0, 8))
+
+        frame = ctk.CTkScrollableFrame(body, fg_color="transparent")
+        frame.pack(fill="both", expand=True)
+        for row in rows:
+            card = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=8)
+            card.pack(fill="x", pady=3)
+            card.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(
+                card, text=row["title"] or row["path"], text_color=TEXT,
+                anchor="w", font=ui_font(size=13, weight="bold")).grid(
+                    row=0, column=0, sticky="ew", padx=12, pady=(8, 0))
+            ctk.CTkLabel(
+                card, text="%d 个存档 · %s · 最后修改 %s"
+                           % (int(row["save_count"] or 0),
+                              slg_scan.human_size(int(row["total_size"] or 0)),
+                              row["last_modified"] or "—"),
+                text_color=MUTED, anchor="w",
+                font=ui_font(size=11)).grid(
+                    row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+            ctk.CTkButton(
+                card, text="打开目录", width=88, height=28, corner_radius=6,
+                fg_color=CHIP, hover_color=CARD_HOVER, text_color=TEXT,
+                font=ui_font(size=12),
+                command=lambda p=row["path"]: self._open_save_folder(p)).grid(
+                    row=0, column=1, rowspan=2, padx=(0, 10), pady=10)
+
+    def _open_save_folder(self, path):
+        """Hand a save folder to the OS file manager. Read-only."""
+        try:
+            if os.path.isdir(path):
+                os.startfile(path)
+            else:
+                messagebox.showinfo("目录不存在",
+                                    "这个存档目录已经不在了：\n%s" % path, parent=self)
+        except (OSError, AttributeError) as exc:  # noqa: BLE001
+            # AttributeError: os.startfile is Windows-only and is simply absent
+            # elsewhere. A missing file manager must not take the window down.
+            messagebox.showwarning("打不开目录", str(exc), parent=self)
+
     def do_updates(self):
         import slg_scan
         report = slg_scan.check_updates(self.conn)
@@ -13938,6 +14347,12 @@ class App(ctk.CTk):
             self._maybe_refresh()
         elif kind == "done":
             self._end_job(payload)
+        elif kind == "saves_done":
+            self._end_job(payload)
+        elif kind == "saves_inventory":
+            # _new_dialog replaces a same-titled window, so re-scanning while
+            # the inventory is open rebuilds it with the fresh rows.
+            self.open_save_inventory()
         elif kind == "covers_done":
             # Separate from "done" only for the refill: covers move a column,
             # not a row, so the list has to be rebuilt rather than re-synced.

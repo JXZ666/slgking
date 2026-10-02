@@ -99,6 +99,27 @@ CREATE TABLE IF NOT EXISTS local (
     exe_path        TEXT
 );
 
+-- Save directories found by the save scan, one row each. Keyed by path: a game
+-- can keep saves in several places at once (next to its exe and under
+-- %APPDATA%), and the path is the only thing that still identifies a row after
+-- the next scan. game_slug is nullable on purpose - half the point of a scan is
+-- to report saves for a folder the catalogue never matched.
+--
+-- Unlike `local`, this is deliberately not in _BACKUP_TABLES. An install path
+-- at least tells you what the user owns; a save path is meaningless on another
+-- machine and a rescan rebuilds the table from scratch.
+CREATE TABLE IF NOT EXISTS local_saves (
+    path          TEXT PRIMARY KEY,
+    game_slug     TEXT,
+    display_title TEXT,
+    engine        TEXT,
+    source_kind   TEXT,
+    save_count    INTEGER NOT NULL DEFAULT 0,
+    total_size    INTEGER NOT NULL DEFAULT 0,
+    last_modified TEXT,
+    scanned_at    TEXT
+);
+
 CREATE TABLE IF NOT EXISTS state (
     game_id   INTEGER PRIMARY KEY REFERENCES games(id) ON DELETE CASCADE,
     status    TEXT,
@@ -879,6 +900,47 @@ def add_alias(conn, game_id, alias, source="user"):
     conn.execute(
         "INSERT OR IGNORE INTO game_aliases (game_id, alias, source)"
         " VALUES (?,?,?)", (game_id, alias, source))
+
+
+def set_local_save(conn, path, game_slug=None, display_title=None, engine=None,
+                   source_kind=None, save_count=0, total_size=0,
+                   last_modified=None, scanned_at=None):
+    """Record one save directory, replacing whatever the last scan put there."""
+    conn.execute(
+        "INSERT INTO local_saves (path, game_slug, display_title, engine,"
+        " source_kind, save_count, total_size, last_modified, scanned_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(path) DO UPDATE SET"
+        " game_slug=excluded.game_slug,"
+        " display_title=excluded.display_title,"
+        " engine=excluded.engine,"
+        " source_kind=excluded.source_kind,"
+        " save_count=excluded.save_count,"
+        " total_size=excluded.total_size,"
+        " last_modified=excluded.last_modified,"
+        " scanned_at=excluded.scanned_at",
+        (path, game_slug, display_title, engine, source_kind,
+         int(save_count), int(total_size), last_modified, scanned_at))
+
+
+def list_local_saves(conn):
+    """Every scanned save directory, largest first.
+
+    The catalogue's own title wins over the scan's label so a row reads the
+    same as the card it belongs to; the scan's label is the fallback for a
+    folder that never matched a game.
+    """
+    return conn.execute(
+        "SELECT s.path, s.game_slug, s.engine, s.source_kind, s.save_count,"
+        " s.total_size, s.last_modified, s.scanned_at,"
+        " COALESCE(NULLIF(g.title, ''), s.display_title, s.path) AS title"
+        " FROM local_saves s LEFT JOIN games g ON g.slug = s.game_slug"
+        " ORDER BY s.total_size DESC, s.path").fetchall()
+
+
+def clear_local_saves(conn):
+    """Drop every row. A scan rebuilds the table from scratch."""
+    conn.execute("DELETE FROM local_saves")
 
 
 def promote_game(conn, game_id, on=True):
