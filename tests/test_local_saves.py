@@ -192,6 +192,143 @@ class SaveScan(unittest.TestCase):
         self.assertEqual(result["count"], 0)
         self.assertEqual(slg_db.list_local_saves(self.conn), [])
 
+    def test_removed_and_empty_directories_do_not_leave_stale_rows(self):
+        folder = self._install("Bound-v1.0", saves=1)
+        self._bind(folder)
+        slg_scan.scan_saves(self.conn, log=lambda _m: None)
+        os.remove(os.path.join(folder, "game", "saves", "slot0.save"))
+        result = slg_scan.scan_saves(self.conn, log=lambda _m: None)
+        self.assertEqual(result["count"], 0)
+        self.assertEqual(slg_db.list_local_saves(self.conn), [])
+        slg_db.set_local_save(self.conn, os.path.join(folder, "gone"), total_size=33)
+        result = slg_scan.scan_saves(self.conn, log=lambda _m: None)
+        self.assertEqual(result["bytes"], 0)
+        self.assertEqual(slg_db.list_local_saves(self.conn), [])
+
+    def test_moved_save_directory_replaces_previous_path(self):
+        folder = self._install("Bound-v1.0", saves=1)
+        self._bind(folder)
+        slg_scan.scan_saves(self.conn, log=lambda _m: None)
+        os.rename(os.path.join(folder, "game", "saves"), os.path.join(folder, "saves"))
+        result = slg_scan.scan_saves(self.conn, log=lambda _m: None)
+        rows = slg_db.list_local_saves(self.conn)
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(rows[0]["path"], os.path.join(folder, "saves"))
+
+    def test_deep_file_cancellation_keeps_previous_complete_inventory(self):
+        folder = self._install("Bound-v1.0", saves=1)
+        self._bind(folder)
+        slg_db.set_local_save(self.conn, "previous", total_size=99)
+        self.conn.commit()
+        _touch(os.path.join(folder, "game", "saves", "deep", "nested", "stop.save"), 40)
+        stopped = [False]
+        real_stat = os.stat
+
+        def cancelling_stat(path, *args, **kwargs):
+            value = real_stat(path, *args, **kwargs)
+            if str(path).endswith("stop.save"):
+                stopped[0] = True
+            return value
+
+        messages = []
+        with mock.patch.object(slg_scan.os, "stat", side_effect=cancelling_stat):
+            result = slg_scan.scan_saves(self.conn, log=messages.append,
+                                         should_stop=lambda: stopped[0])
+        self.assertTrue(result["cancelled"])
+        self.assertEqual(result["bytes"], 99)
+        self.assertEqual(slg_db.list_local_saves(self.conn)[0]["path"], "previous")
+        self.assertFalse(any("完成" in message for message in messages))
+
+    def test_cancel_during_system_enumeration_keeps_inventory(self):
+        _touch(os.path.join(self.appdata, "RenPy", "StopGame", "s.save"), 10)
+        slg_db.set_local_save(self.conn, "previous", total_size=99)
+        stopped = [False]
+        real_listdir = os.listdir
+
+        def cancelling_listing(path):
+            result = real_listdir(path)
+            if str(path).endswith("RenPy"):
+                stopped[0] = True
+            return result
+
+        with mock.patch.object(slg_scan.os, "listdir", side_effect=cancelling_listing):
+            result = slg_scan.scan_saves(self.conn, log=lambda _m: None,
+                                         should_stop=lambda: stopped[0])
+        self.assertTrue(result["cancelled"])
+        self.assertEqual(slg_db.list_local_saves(self.conn)[0]["path"], "previous")
+
+    def test_unreadable_directory_retains_old_row_and_updates_successful_scope(self):
+        folder = self._install("Bound-v1.0", saves=1)
+        self._bind(folder)
+        save_path = os.path.join(folder, "game", "saves")
+        slg_db.set_local_save(self.conn, save_path, total_size=77, save_count=2)
+        product = os.path.join(self.profile, "AppData", "LocalLow", "Co", "Product")
+        _touch(os.path.join(product, "cache.log"), 30)
+        real_stats = slg_scan._dir_stats
+
+        def denied(path, should_stop=None):
+            if path == save_path:
+                raise PermissionError("access denied")
+            return real_stats(path, should_stop)
+
+        with mock.patch.object(slg_scan, "_dir_stats", side_effect=denied):
+            result = slg_scan.scan_saves(self.conn, log=lambda _m: None)
+        self.assertFalse(result["cancelled"])
+        self.assertEqual(result["preserved_count"], 1)
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertEqual(result["bytes"], 107)
+        self.assertEqual(result["count"], len(slg_db.list_local_saves(self.conn)))
+        self.assertEqual(result["game_data_count"], 1)
+
+    def test_unreadable_system_parent_retains_rows_within_scope_only(self):
+        renpy = os.path.join(self.appdata, "RenPy")
+        old_path = os.path.join(renpy, "OldGame")
+        slg_db.set_local_save(self.conn, old_path, total_size=77)
+        slg_db.set_local_save(self.conn, os.path.join(self.tree, "gone"), total_size=66)
+        real_listing = os.listdir
+
+        def denied(path):
+            if path == renpy:
+                raise PermissionError("access denied")
+            return real_listing(path)
+
+        with mock.patch.object(slg_scan.os, "listdir", side_effect=denied):
+            result = slg_scan.scan_saves(self.conn, log=lambda _m: None)
+        self.assertEqual(result["preserved_count"], 1)
+        self.assertEqual(result["bytes"], 77)
+        self.assertEqual(slg_db.list_local_saves(self.conn)[0]["path"], old_path)
+
+    def test_database_write_failure_restores_previous_inventory(self):
+        folder = self._install("Bound-v1.0", saves=1)
+        self._bind(folder)
+        slg_db.set_local_save(self.conn, "previous", total_size=99)
+        self.conn.commit()
+        with mock.patch.object(slg_db, "set_local_save", side_effect=RuntimeError("write failed")):
+            with self.assertRaisesRegex(RuntimeError, "write failed"):
+                slg_scan.scan_saves(self.conn, log=lambda _m: None)
+        self.assertEqual(slg_db.list_local_saves(self.conn)[0]["path"], "previous")
+
+    def test_unexpected_collection_error_does_not_publish_partial_rows(self):
+        folder = self._install("Bound-v1.0", saves=1)
+        self._bind(folder)
+        slg_db.set_local_save(self.conn, "previous", total_size=99)
+        with mock.patch.object(slg_scan, "_system_save_dirs", side_effect=RuntimeError("unexpected")):
+            with self.assertRaisesRegex(RuntimeError, "unexpected"):
+                slg_scan.scan_saves(self.conn, log=lambda _m: None)
+        self.assertEqual(slg_db.list_local_saves(self.conn)[0]["path"], "previous")
+
+    def test_unity_product_counts_game_data_including_cache(self):
+        product = os.path.join(self.profile, "AppData", "LocalLow", "Co", "Product")
+        _touch(os.path.join(product, "save.dat"), 20)
+        _touch(os.path.join(product, "Cache", "log.txt"), 30)
+        result = slg_scan.scan_saves(self.conn, log=lambda _m: None)
+        self.assertEqual(result["game_data_count"], 1)
+        self.assertEqual(result["bytes"], 50)
+        row = slg_db.list_local_saves(self.conn)[0]
+        self.assertEqual(row["source_kind"], "system")
+        self.assertEqual(row["engine"], "Unity")
+        self.assertEqual(row["save_count"], 2)
+
 
 class HumanSize(unittest.TestCase):
     def test_units(self):

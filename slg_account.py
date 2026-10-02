@@ -539,9 +539,16 @@ def _read_session(path):
     try:
         with open(path, encoding="utf-8") as inp:
             data = json.load(inp)
-        account_id = str(data["account_id"])
-        return {"account_id": data["account_id"],
-                "device_token": _dpapi(base64.b64decode(data["token"]), False).decode("utf-8")}
+        if not isinstance(data, dict):
+            raise ValueError("invalid session shape")
+        account_id, token = data.get("account_id"), data.get("token")
+        if (not isinstance(account_id, str) or not account_id.strip()
+                or not isinstance(token, str) or not token):
+            raise ValueError("invalid session fields")
+        device_token = _dpapi(base64.b64decode(token, validate=True), False).decode("utf-8")
+        if not device_token.strip():
+            raise ValueError("empty device session")
+        return {"account_id": account_id, "device_token": device_token}
     except FileNotFoundError:
         return None
     except (ValueError, KeyError, OSError, UnicodeError, binascii.Error) as exc:

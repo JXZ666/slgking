@@ -27,6 +27,7 @@ import traceback
 import uuid
 import webbrowser
 from datetime import date, datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
 from tkinter import filedialog, messagebox
 from urllib.parse import urlsplit
 
@@ -42,6 +43,8 @@ import slg_comments
 import slg_account
 import slg_db
 import slg_engines
+from slg_game_categories import CATEGORIES, format_categories
+from slg_motion import MotionScheduler, TimeBudget
 from slg_game_labels import format_game_label
 import slg_remote
 import slg_scrape
@@ -51,7 +54,7 @@ import slg_update
 import slg_util
 
 APP_VERSION = "0.24.5"
-TEST_APP_VERSION = "0.24.6"
+TEST_APP_VERSION = "0.25.0"
 
 
 def _build_announcement_pages(remote_config, release_notes):
@@ -687,7 +690,7 @@ _image_cache = {}
 
 def load_cover(game, width=COVER_W, height=COVER_H):
     """Cover thumbnail, or a neutral placeholder when it has not downloaded yet."""
-    key = (game["slug"], width, height)
+    key = (game["slug"], game.get("cover_file"), width, height)
     if key in _image_cache:
         return _image_cache[key]
     path = None
@@ -860,8 +863,12 @@ def is_test_build():
 def release_notes_text():
     """Select the release wording by build channel, even when versions match."""
     channel = "测试版" if is_test_build() else "稳定版"
+    test_notes = ("本地测试：新增 Galgame、SLG、RPG、ACT、模拟经营、休闲/解谜、其他多选分类，支持编辑、筛选和备份。\n"
+                  "卡片与列表分批加载，封面后台解码；新增减少动效设置。\n"
+                  "改进存档重扫和取消，修复过期记录与损坏会话恢复。\n\n") if is_test_build() else ""
     return (
         "%s %s\n\n" % (display_app_version(), channel)
+        + test_notes
         + "首次使用需要确认年龄并阅读软件说明。\n"
         "工具与设置入口重新整理，公告和版本说明分别显示。\n"
         "兑换码与邀请码合并到同一窗口，可查看邀请码和邀请进度。\n"
@@ -1158,6 +1165,7 @@ class _Splash(ctk.CTkToplevel):
 
     def __init__(self, master):
         super().__init__(master)
+        self._motion = MotionScheduler(self)
         self.overrideredirect(True)
         self.geometry("420x260")
         self.configure(fg_color=BG)
@@ -1195,7 +1203,7 @@ class _Splash(ctk.CTkToplevel):
         self._title_chars = []
         self._make_fonts()
         self.canvas.bind("<Configure>", self._on_configure)
-        self.after(40, self._tick)
+        self._motion.call_later(40, self._tick)
 
     def _make_fonts(self):
         """Build the canvas fonts at the display's scaling.
@@ -1388,26 +1396,22 @@ class _Splash(ctk.CTkToplevel):
         except tk.TclError:
             return
         self._advance()
-        self.after(40, self._tick)
+        self._motion.call_later(40, self._tick)
 
     def step(self, text, progress):
-        """Label the current stage and move the bar to `progress` (0..1).
-
-        The window is built synchronously from here, so the event loop is
-        blocked and after() callbacks never fire: the frames have to be pumped
-        from this loop, which is why it calls update() itself.
-        """
+        """Set stage targets; the scheduled animation advances without reentry."""
         self._status_text = text
         self._target = progress
-        for _ in range(10):
-            self._advance()
-            self.update()
-            time.sleep(0.012)
+        self._advance()
+
 
 
 class App(ctk.CTk):
     def __init__(self, notify=True):
         super().__init__()
+        # CTkImage caches PhotoImages tied to one Tcl interpreter. A new app
+        # must not reuse images from a destroyed root (including smoke tests).
+        _image_cache.clear()
         self.protocol("WM_DELETE_WINDOW", self._request_close)
         # Before anything else: a callback that raises must leave a trace.
         self.report_callback_exception = self._report_callback_exception
@@ -1470,6 +1474,7 @@ class App(ctk.CTk):
             self.theme_mode = "system"
         # Both multipliers are resolved before the first widget is built: a font
         # size chosen after the fact would have to re-lay-out every frame.
+        self.reduced_motion = slg_db.get_pref(self.conn, "ui.reduced_motion", "0") == "1"
         self.font_scale_profile = load_font_scale(self.conn)
         set_font_scale(self.font_scale_profile)
         self.ui_scale_profile = load_ui_scale_profile(self.conn)
@@ -1484,8 +1489,9 @@ class App(ctk.CTk):
             self._splash = _Splash(self)
             self._splash.step("正在加载数据库…", 0.2)
             self.update_idletasks()
-            self.update()
         self.include, self.exclude = [], []
+        self.category_ids = []
+        self.category_uncategorized = False
         self.search = ""
         self.view = None
         self._wishlist_updates = []
@@ -1502,6 +1508,8 @@ class App(ctk.CTk):
         # pages), and they would all change meaning if it held one page.
         self.page = 1
         self.queue = queue.Queue()
+        self._cover_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cover")
+        self._cover_waiters = {}
         self.busy = False
         self._job_label = ""
         self._cards = {}          # game id -> its card frame, for repainting
@@ -1717,6 +1725,9 @@ class App(ctk.CTk):
         if splash is None:
             self._show_main_window()
             return
+        if self.reduced_motion:
+            self._show_main_window(splash)
+            return
         try:
             self.attributes("-alpha", 0.0)
             self.deiconify()
@@ -1823,6 +1834,12 @@ class App(ctk.CTk):
         self.refresh()
 
     def _teardown_ui(self):
+        self._card_render_generation = getattr(self, "_card_render_generation", 0) + 1
+        job = getattr(self, "_card_render_job", None)
+        if job:
+            self.after_cancel(job)
+        self._card_render_job = None
+        self._card_render_pending = False
         for child in self.winfo_children():
             # An open dialog is a child of the root as well, so destroying
             # everything closed the help document, the settings dialog and the
@@ -2521,7 +2538,8 @@ class App(ctk.CTk):
         # The chips are a function of the filters and nothing else, so a refresh
         # for an unrelated reason (a sync tick, a status write) rebuilding them
         # was pure flicker.
-        signature = (tuple(self.include), tuple(self.exclude))
+        signature = (tuple(self.include), tuple(self.exclude), self.origin,
+                     tuple(self.category_ids), self.category_uncategorized)
         if signature == self._filter_sig:
             return
         self._filter_sig = signature
@@ -2570,7 +2588,41 @@ class App(ctk.CTk):
                               text_color=ACCENT, hover_color=CHIP,
                               font=ui_font(size=12),
                               command=self.clear_filters))
+        if self.origin == "user":
+            names = [label for cid, label in CATEGORIES if cid in self.category_ids]
+            if self.category_uncategorized:
+                names.append("未分类")
+            add(ctk.CTkButton(bar, text="分类：" + (" / ".join(names) or "全部"),
+                height=26, corner_radius=13, fg_color=CHIP, text_color=TEXT,
+                hover_color=CARD_HOVER, font=ui_font(size=12),
+                command=self.open_category_filter))
         self._queue_filterbar_layout()
+
+    def _category_checklist(self, parent, selected=()):
+        flow = FlowFrame(parent, fg_color="transparent", gap_x=8, gap_y=6)
+        flow.pack(fill="x", pady=(4, 8))
+        variables = {cid: ctk.BooleanVar(value=cid in selected) for cid, _ in CATEGORIES}
+        flow.set_items([self._tag_checkbox(flow, label, variables[cid])
+                        for cid, label in CATEGORIES])
+        return variables
+
+    def open_category_filter(self):
+        win = self._new_dialog("本地游戏分类", "420x300")
+        body = ctk.CTkFrame(win, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=18, pady=18)
+        ctk.CTkLabel(body, text="多项分类满足任一项；不选表示全部", text_color=MUTED,
+                     font=ui_font(size=12)).pack(anchor="w")
+        variables = self._category_checklist(body, self.category_ids)
+        uncategorized = ctk.BooleanVar(value=self.category_uncategorized)
+        self._tag_checkbox(body, "未分类", uncategorized).pack(anchor="w", pady=6)
+        def apply():
+            self.category_ids = [cid for cid, var in variables.items() if var.get()]
+            self.category_uncategorized = bool(uncategorized.get())
+            self.page = 1
+            win.destroy()
+            self.refresh()
+        ctk.CTkButton(body, text="应用", command=apply, fg_color=ACCENT,
+                     text_color=ON_ACCENT).pack(fill="x", pady=10)
 
     # --- state changes --------------------------------------------------------
 
@@ -2726,7 +2778,9 @@ class App(ctk.CTk):
             statuses=[self.view] if self.view else None,
             downloaded_only=False, collection_id=self.collection_id,
             origin=self.origin, sort=self.sort, desc=self.sort_desc,
-            translation_ids=translation_ids)
+            translation_ids=translation_ids,
+            category_ids=self.category_ids if self.origin == "user" else (),
+            uncategorized=self.category_uncategorized if self.origin == "user" else False)
         self._refresh_wishlist_notice()
         # A filter or a sort handler sets page 1 already; this is for the other
         # way the set can shrink - the tick after a sync emptied the tail, or a
@@ -2937,26 +2991,51 @@ class App(ctk.CTk):
         narrowing filter cheap: the games that survive keep their index, so most
         of the list is left completely alone.
         """
+        self._card_render_generation = getattr(self, "_card_render_generation", 0) + 1
+        generation = self._card_render_generation
+        old_job = getattr(self, "_card_render_job", None)
+        if old_job:
+            try:
+                self.after_cancel(old_job)
+            except tk.TclError:
+                pass
+        self._card_render_job = None
+        self._card_render_pending = True
         tags = slg_db.game_tags_bulk(self.conn, [g["id"] for g in games])
         dirty, self._pool_dirty = self._pool_dirty, False
-        for i, game in enumerate(games):
-            gid = game["id"]
-            if i < len(self._card_pool):
-                slot, was_hidden = self._card_pool[i], self._pool_gid[i] is None
-                if dirty or self._pool_gid[i] != gid:
-                    self._fill_card(slot, game, tags.get(gid, ()))
-                    self._pool_gid[i] = gid
-                if was_hidden:
-                    slot["frame"].pack(fill="x", pady=2)
-            else:
-                slot = self._new_card(game, tags.get(gid, ()))
-                self._card_pool.append(slot)
-                self._pool_gid.append(gid)
         for i in range(len(games), len(self._card_pool)):
             if self._pool_gid[i] is not None:
                 self._card_pool[i]["frame"].pack_forget()
                 self._pool_gid[i] = None
-        self._reset_card_index()
+        index = [0]
+        def batch():
+            if generation != self._card_render_generation:
+                return
+            budget = TimeBudget(milliseconds=6, max_items=80)
+            while index[0] < len(games) and budget.available:
+                i = index[0]
+                game = games[i]
+                gid = game["id"]
+                if i < len(self._card_pool):
+                    slot, was_hidden = self._card_pool[i], self._pool_gid[i] is None
+                    if dirty or self._pool_gid[i] != gid:
+                        self._fill_card(slot, game, tags.get(gid, ()))
+                        self._pool_gid[i] = gid
+                    if was_hidden:
+                        slot["frame"].pack(fill="x", pady=2)
+                else:
+                    slot = self._new_card(game, tags.get(gid, ()))
+                    self._card_pool.append(slot)
+                    self._pool_gid.append(gid)
+                index[0] += 1
+                budget.consumed()
+            self._reset_card_index()
+            if index[0] < len(games):
+                self._card_render_job = self.after(1, batch)
+            else:
+                self._card_render_job = None
+                self._card_render_pending = False
+        batch()
 
     def _page_count(self):
         # PAGE_SIZE is read here rather than bound as a default argument: a
@@ -2980,7 +3059,9 @@ class App(ctk.CTk):
         if self.page == before:
             self._render_pager()
             return
-        self.refresh()
+        self._sync_cards(self._page_slice())
+        self._rendered_ids = [g["id"] for g in self._page_slice()]
+        self._render_pager()
         # Not preserve_scroll: the canvas keeps its yview across a card swap,
         # so without this the new page opens wherever the old one was scrolled
         # to. _restore_scroll defers through after_idle, which is what it needs
@@ -3215,7 +3296,8 @@ class App(ctk.CTk):
         # disappears when the user switches collections on the same game.
         return (game["id"], game["status"], game["my_rating"],
                 game["cover_file"], self.collection_id,
-                game.get("origin"), game.get("promoted"))
+                game.get("origin"), game.get("promoted"),
+                tuple(game.get("categories", ())))
 
     def _render_detail_if_stale(self):
         if self._panel_mode == "profile":
@@ -3330,13 +3412,54 @@ class App(ctk.CTk):
         """
         selected = self.selected is not None and game["id"] == self.selected["id"]
         self._paint_slot(slot, selected)
-        slot["img"].configure(image=load_cover(game))
+        self._bind_cover(slot["img"], game)
         title = display_game_label(game)
         slot["title"].configure(text=title)
         slot["meta"].configure(text=meta_text(game),
                                fg=ACCENT if game["complete"] else MUTED)
         slot["tagline"].configure(text="  ".join(
             display_tag(t) for t in card_tags(tags)))
+
+    def _bind_cover(self, widget, game, width=COVER_W, height=COVER_H):
+        key = (game["slug"], game.get("cover_file"), width, height)
+        widget._slg_cover_key = key
+        if key in _image_cache:
+            widget.configure(image=_image_cache[key])
+            return
+        widget.configure(image=load_cover({"slug": "__empty__", "cover_file": None}, width, height))
+        name = game.get("cover_file")
+        if not name or name.startswith("pending:"):
+            return
+        # Readers only decode PIL images. CTkImage creation/binding stays on Tk.
+        path = os.path.join(slg_db.covers_dir(), name)
+        generation = getattr(self, "_card_render_generation", 0)
+        if key in self._cover_waiters:
+            self._cover_waiters[key].append((widget, generation))
+            return
+        self._cover_waiters[key] = [(widget, generation)]
+        def decode():
+            try:
+                with Image.open(path) as source:
+                    image = source.convert("RGB")
+                    image.thumbnail((width * 2, height * 2), Image.LANCZOS)
+            except Exception:  # a malformed image must still release pending readers
+                image = None
+            self.queue.put(("cover_decoded", (key, image)))
+        self._cover_executor.submit(decode)
+
+    def _cover_decoded(self, key, image):
+        waiters = self._cover_waiters.pop(key, ())
+        if image is None:
+            return
+        ctk_image = ctk.CTkImage(light_image=image, size=key[-2:])
+        _image_cache[key] = ctk_image
+        for widget, generation in waiters:
+            try:
+                if widget.winfo_exists() and getattr(widget, "_slg_cover_key", None) == key:
+                    # A reused card carries a new key; obsolete results never repaint it.
+                    widget.configure(image=ctk_image)
+            except tk.TclError:
+                pass
 
     def _paint_slot(self, slot, selected):
         """Colour a card for its selected state.
@@ -3683,11 +3806,14 @@ class App(ctk.CTk):
 
     def _fill_detail(self, game):
         p = self._detail_parts
-        p["cover"].configure(image=load_cover(game, DETAIL_W, DETAIL_H))
+        self._bind_cover(p["cover"], game, DETAIL_W, DETAIL_H)
         p["title"].configure(text=self._title_to_show(game))
         p["sub"].configure(text="v%s · %s" % (game["version"] or "?",
                                               game["developer"] or "未知作者"))
         p["title_note"].configure(text="")
+        if game.get("origin") == "user":
+            p["sub"].configure(text=p["sub"].cget("text") + "\n分类：" +
+                               format_categories(game.get("categories", ())))
         is_user = game.get("origin") == "user"
         public_sources = self._external_game_sources(game) if not is_user else []
         if public_sources:
@@ -4232,8 +4358,9 @@ class App(ctk.CTk):
 
         summary = ctk.CTkFrame(d, fg_color=CARD, corner_radius=10)
         summary.pack(fill="x", padx=16, pady=(0, 10))
-        ctk.CTkLabel(summary, text="", image=load_cover(game, 64, 84)).pack(
-            side="left", padx=12, pady=9)
+        summary_cover = ctk.CTkLabel(summary, text="")
+        summary_cover.pack(side="left", padx=12, pady=9)
+        self._bind_cover(summary_cover, game, 64, 84)
         meta = ctk.CTkFrame(summary, fg_color="transparent")
         meta.pack(side="left", fill="x", expand=True, padx=(0, 12), pady=8)
         ctk.CTkLabel(meta, text=self._title_to_show(game), text_color=TEXT,
@@ -5734,6 +5861,27 @@ class App(ctk.CTk):
             self._center_on_parent(win, parent)
         return win
 
+    def destroy(self):
+        job = getattr(self, "_card_render_job", None)
+        if job:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._card_render_pending = False
+        self._card_render_generation = getattr(self, "_card_render_generation", 0) + 1
+        executor = getattr(self, "_cover_executor", None)
+        if executor:
+            executor.shutdown(wait=False, cancel_futures=True)
+        # All timers in this interpreter belong to the root being destroyed.
+        # Cancel before deleting Tcl commands, including toolkit polling timers.
+        try:
+            for handle in self.tk.call("after", "info"):
+                self.after_cancel(handle)
+        except tk.TclError:
+            pass
+        super().destroy()
+
     def _request_close(self):
         """Give a visible one-time credential dialog its final save check."""
         if getattr(self, "_rotate_pending", False):
@@ -6048,7 +6196,7 @@ class App(ctk.CTk):
         c.tag_raise(sweep, text_item)
         c.tag_raise(text_item)
 
-        if not animate or rarity in ("普通", "稀有"):
+        if not animate or self.reduced_motion or rarity in ("普通", "稀有"):
             return c
 
         state = {"alive": True, "mapped": False, "after": None,
@@ -6092,6 +6240,12 @@ class App(ctk.CTk):
                     return
             except tk.TclError:
                 state["alive"] = False
+                return
+
+            if self.reduced_motion:
+                reset_visuals()
+                state["frame"] = 0
+                schedule(6200)
                 return
 
             frame = state["frame"]
@@ -6296,6 +6450,10 @@ class App(ctk.CTk):
         second particle system for the same effect would be two things to keep
         in step.
         """
+        previous = getattr(canvas, "_slg_confetti_scheduler", None)
+        if previous:
+            previous.cancel_all()
+            canvas.delete("slg_confetti")
         ramp = ramp or ("#e84393", "#e06a3f", "#e0a800", "#3fae5a", "#2f9bd0",
                         "#8b5cf6")
         parts = []
@@ -6308,18 +6466,33 @@ class App(ctk.CTk):
             parts.append(p)
             rects.append(canvas.create_rectangle(
                 p["x"], p["y"], p["x"] + size, p["y"] + size,
-                fill=p["color"], outline=""))
+                fill=p["color"], outline="", tags="slg_confetti"))
         text_item = None
         if label:
             text_item = canvas.create_text(w // 2, h // 2 - 8, text="+0 积分",
-                                          fill=ACCENT, font=ui_tkfont(22, "bold"))
-        start = time.time()
+                                          fill=ACCENT, font=ui_tkfont(22, "bold"), tags="slg_confetti")
+        start = time.perf_counter()
+        scheduler = MotionScheduler(canvas)
+        canvas._slg_confetti_scheduler = scheduler
+        finished = [False]
+        def finish():
+            scheduler.cancel_all()
+            for item in rects:
+                canvas.delete(item)
+            if text_item is not None:
+                canvas.itemconfig(text_item, text=label % gained, fill=ACCENT)
+            finished[0] = True
 
         def tick():
             try:
                 if not canvas.winfo_exists():
                     return
             except tk.TclError:
+                return
+            if self.reduced_motion or time.perf_counter() - start >= 1.5:
+                finish()
+                return
+            if not canvas.winfo_ismapped():
                 return
             for i, p in enumerate(parts):
                 p["y"] += p["vy"]
@@ -6330,14 +6503,22 @@ class App(ctk.CTk):
                 canvas.coords(rects[i], p["x"], p["y"],
                               p["x"] + 5, p["y"] + 5)
             if text_item is not None:
-                progress = min(1.0, (time.time() - start) / 0.6)
+                progress = min(1.0, (time.perf_counter() - start) / 0.6)
                 shown = int(gained * progress)
                 pulse = 1 - abs(2 * (progress % 0.5) / 0.5 - 1) if progress < 1 else 0
                 color = _mix(ACCENT, "#ffffff", 0.35 * pulse) if pulse else ACCENT
                 canvas.itemconfig(text_item, text=label % shown, fill=color)
-            canvas.after(30, tick)
+            scheduler.call_later(30, tick)
 
-        canvas.after(30, tick)
+        canvas.bind("<Unmap>", lambda e: scheduler.cancel_all(), add="+")
+        def resume(e):
+            if e.widget is canvas and not finished[0] and not scheduler.pending_count:
+                scheduler.call_later(30, tick)
+        canvas.bind("<Map>", resume, add="+")
+        if self.reduced_motion:
+            finish()
+        else:
+            scheduler.call_later(30, tick)
 
     def _edit_nickname(self):
         if not self._require_personal_access("修改个人资料"):
@@ -10230,6 +10411,9 @@ class App(ctk.CTk):
             x, y = (int(v) for v in pos.split("+"))
         except (ValueError, tk.TclError):
             return
+        if self.reduced_motion:
+            return
+        scheduler = MotionScheduler(win)
         offsets = ((amp, -amp), (-amp, amp), (amp, -amp), (-amp, amp), (0, 0))
 
         def step(i=0):
@@ -10242,7 +10426,7 @@ class App(ctk.CTk):
                 win.geometry("%s+%d+%d" % (size, x + dx, y + dy))
             except tk.TclError:
                 return
-            win.after(35, lambda: step(i + 1))
+            scheduler.call_later(35, lambda: step(i + 1))
 
         step()
 
@@ -10253,6 +10437,10 @@ class App(ctk.CTk):
         the whole time. This replaces the old full-window stipple flash, whose
         opaque canvas is what made the result read as a black screen.
         """
+        if self.reduced_motion:
+            label.configure(text=text, text_color=ACCENT if grand else TEXT)
+            return
+        scheduler = MotionScheduler(label)
         color = ACCENT if grand else TEXT
         glitch = "01#><*"
         frames = 10
@@ -10272,7 +10460,7 @@ class App(ctk.CTk):
                     for ch in text), text_color=_mix(color, "#ffffff", 0.5))
             else:
                 label.configure(text=text, text_color=color)
-            label.after(50, lambda: step(i + 1))
+            scheduler.call_later(50, lambda: step(i + 1))
 
         step()
 
@@ -10434,6 +10622,7 @@ class App(ctk.CTk):
                      justify="left").pack(padx=16, pady=(10, 12))
         self._fit_dialog(win, 520)
         sound = self._lottery_sound_on()
+        animation = MotionScheduler(win)
         spinning = False
         stopping = False
         settled = [0]
@@ -10462,19 +10651,20 @@ class App(ctk.CTk):
             if not _alive(r):
                 return
             r["canvas"].itemconfigure(r["payline"], outline=color)
-            r["canvas"].after(
+            animation.call_later(
                 180, lambda: _alive(r) and r["canvas"].itemconfigure(
                     r["payline"], outline=_mix(CARD, ACCENT, 0.5)))
 
         def _spin_tick(r):
             if not _alive(r) or not spinning:
                 return
-            # Ramp up over the first ~20 ticks instead of starting at full tilt:
-            # a reel that is already at top speed on its first frame reads as
-            # the strip appearing, not as it beginning to turn.
-            r["speed"] = min(0.34, r["speed"] + 0.06)
-            _advance(r, r["speed"])
-            r["canvas"].after(16, lambda: _spin_tick(r))
+            now = time.perf_counter()
+            delta = min(0.1, max(0.0, now - r.get("last_tick", now)))
+            r["last_tick"] = now
+            if r["canvas"].winfo_ismapped() and not self.reduced_motion:
+                r["speed"] = min(0.34, r["speed"] + delta * 3.75)
+                _advance(r, r["speed"] * delta / 0.016)
+            animation.call_later(16 if not self.reduced_motion else 80, lambda: _spin_tick(r))
 
         def start_spin(outcome, confirmed_cloud=False):
             nonlocal prize, grand, jackpot, finals, label, spinning, stopping
@@ -10525,6 +10715,7 @@ class App(ctk.CTk):
             stopping = False
             lever.configure(text="\u505c\u6b62", state="normal")
             for reel in reels:
+                reel["last_tick"] = time.perf_counter()
                 _spin_tick(reel)
 
         def complete_draw(prize=None, error=None):
@@ -10579,6 +10770,8 @@ class App(ctk.CTk):
 
             0.01% 的奖只有一次演出机会，不能跟 1% 的幸运星长得一样 —— 至臻头衔
             那条帧间连续色相环拿来用在这里，慢到看得出是流光。"""
+            if self.reduced_motion:
+                return
             frames = 60
 
             def step(i=0):
@@ -10591,12 +10784,14 @@ class App(ctk.CTk):
                     rim.configure(fg_color=ACCENT)
                     return
                 rim.configure(fg_color=_rainbow(i / float(frames)))
-                rim.after(40, lambda: step(i + 1))
+                animation.call_later(40, lambda: step(i + 1))
 
             step()
 
         def _pulse_paylines(beats=6):
             """A gold heartbeat on all three paylines after a title win."""
+            if self.reduced_motion:
+                return
             gold, rest = "#ffd76a", _mix(CARD, ACCENT, 0.5)
 
             def step(i=0):
@@ -10606,13 +10801,22 @@ class App(ctk.CTk):
                     r["canvas"].itemconfigure(
                         r["payline"], outline=gold if i % 2 else rest)
                 if i < beats:
-                    reels[0]["canvas"].after(140, lambda: step(i + 1))
+                    animation.call_later(140, lambda: step(i + 1))
 
             step()
 
         def _settle_tick(r):
             if not _alive(r):
                 return
+            now = time.perf_counter()
+            while r["i"] < len(r["schedule"]) and now >= r["settle_due"]:
+                delay, step = r["schedule"][r["i"]]
+                r["i"] += 1
+                _advance(r, step)
+                r["settle_due"] += delay / 1000.0
+            if sound and int(r["travel"]) > r["crossed"]:
+                r["crossed"] = int(r["travel"])
+                _play_tone(1500, 14)
             if r["i"] >= len(r["schedule"]):
                 self._shake_window(win)
                 _flash_payline(r)
@@ -10620,13 +10824,8 @@ class App(ctk.CTk):
                 if settled[0] == 3:
                     _reveal()
                 return
-            delay, step = r["schedule"][r["i"]]
-            r["i"] += 1
-            _advance(r, step)
-            if sound and int(r["travel"]) > r["crossed"]:
-                r["crossed"] = int(r["travel"])
-                _play_tone(1500, 14)
-            r["canvas"].after(delay, lambda: _settle_tick(r))
+            animation.call_later(max(1, int((r["settle_due"] - now) * 1000)),
+                                 lambda: _settle_tick(r))
 
         def stop_all():
             # Land each reel on its planted final symbol: the deceleration runs
@@ -10635,10 +10834,12 @@ class App(ctk.CTk):
             for idx, r in enumerate(reels):
                 phase = r["travel"] % slots
                 dist = slots + ((-phase) % slots)
-                r["schedule"] = lottery_spin_schedule(slots=dist)
+                r["schedule"] = ([(0, dist)] if self.reduced_motion
+                                 else lottery_spin_schedule(slots=dist))
                 r["i"] = 0
                 r["crossed"] = 0
-                r["canvas"].after(idx * 420, lambda r=r: _settle_tick(r))
+                r["settle_due"] = time.perf_counter() + idx * 0.420
+                animation.call_later(idx * 420, lambda r=r: _settle_tick(r))
 
         def toggle():
             nonlocal spinning, stopping
@@ -10883,6 +11084,14 @@ class App(ctk.CTk):
             if not state["alive"] or not state["mapped"]:
                 return
             try:
+                root = widget.winfo_toplevel()
+                app = root
+                while getattr(app, "master", None) is not None:
+                    app = app.master
+                if getattr(app, "reduced_motion", False):
+                    reset()
+                    schedule(rest_ms)
+                    return
                 if not widget.winfo_exists() or not widget.winfo_ismapped():
                     state["mapped"] = False
                     reset()
@@ -12288,6 +12497,16 @@ class App(ctk.CTk):
             "只放大文字，窗口大小和封面尺寸不变。"
             "整体都小就调上面的界面尺寸，只有字看不清就用这一项。")
 
+        motion_card = setting_card(appearance, "交互动效")
+        motion_var = ctk.BooleanVar(value=self.reduced_motion)
+        def set_motion():
+            self.reduced_motion = bool(motion_var.get())
+            slg_db.set_pref(self.conn, "ui.reduced_motion", "1" if self.reduced_motion else "0")
+        ctk.CTkCheckBox(motion_card, text="减少动效", variable=motion_var,
+                       command=set_motion, font=ui_font(size=12), text_color=TEXT,
+                       fg_color=ACCENT).pack(anchor="w", padx=10, pady=8)
+        info_note(motion_card, "停止持续装饰、彩带和摇窗，保留等待提示和最终结果。")
+
         alerts = pages["alerts"]
         page_heading(alerts, "提醒与声音")
         sound_card = setting_card(alerts, "每日抽奖音效")
@@ -12712,11 +12931,23 @@ class App(ctk.CTk):
         flow.pack(fill="x")
         vars_ = {}
         widgets = []
-        for name in sorted(slg_db.all_tags(self.conn), key=display_tag):
-            var = ctk.BooleanVar(value=(name in current))
-            vars_[name] = var
-            widgets.append(self._tag_checkbox(flow, display_tag(name), var))
-        flow.set_items(widgets)
+        names = sorted(slg_db.all_tags(self.conn), key=display_tag)
+        vars_.update({name: ctk.BooleanVar(value=name in current) for name in names})
+        scheduler = MotionScheduler(flow)
+        index = [0]
+        def batch():
+            budget = TimeBudget(milliseconds=6, max_items=20)
+            while index[0] < len(names) and budget.available:
+                name = names[index[0]]
+                widget = self._tag_checkbox(flow, display_tag(name), vars_[name])
+                widgets.append(widget)
+                flow._items.append(widget)
+                index[0] += 1
+                budget.consumed()
+            flow._layout()
+            if index[0] < len(names):
+                scheduler.call_later(1, batch)
+        batch()
         return flow, vars_
 
     def _tag_new_entry(self, parent, flow, vars_):
@@ -12813,6 +13044,12 @@ class App(ctk.CTk):
                 engine_e.insert(0, game["engine"])
             if game.get("version"):
                 ver_e.insert(0, game["version"])
+
+        ctk.CTkLabel(body, text="游戏分类（可多选，与引擎和内容标签分开）",
+                     text_color=MUTED, font=ui_font(size=11), anchor="w").pack(
+                         fill="x", pady=(8, 2))
+        category_vars = self._category_checklist(
+            body, slg_db.game_categories(self.conn, game["id"]) if editing else ())
 
         ctk.CTkLabel(body, text="简介", text_color=MUTED,
                      font=ui_font(size=11), anchor="w").pack(fill="x", pady=(8, 2))
@@ -12934,7 +13171,8 @@ class App(ctk.CTk):
                         overview=ov_e.get("1.0", "end-1c").strip() or None,
                         cover_file=cover_file, tags=chosen,
                         folder_path=folder["path"] or None,
-                        promoted=want_promote)
+                        promoted=want_promote,
+                        categories=[cid for cid, v in category_vars.items() if v.get()])
                 else:
                     slg_db.add_user_game(
                         conn, title,
@@ -12944,7 +13182,8 @@ class App(ctk.CTk):
                         overview=ov_e.get("1.0", "end-1c").strip() or None,
                         cover_file=cover_file, tags=chosen,
                         folder_path=folder["path"] or None,
-                        promoted=want_promote)
+                        promoted=want_promote,
+                        categories=[cid for cid, v in category_vars.items() if v.get()])
             win.destroy()
             self.refresh()
 
@@ -14168,12 +14407,14 @@ class App(ctk.CTk):
                     on_progress=lambda title: self.queue.put(
                         ("progress", "查看 %s" % title)),
                     should_stop=self._stop.is_set)
-            self.queue.put(("saves_done",
-                            "存档扫描完成：%d 个目录，共 %s"
-                            % (result["count"],
-                               slg_scan.human_size(result["bytes"]))))
-            # Opened after the finish message, and only on success: a failed
-            # scan should say so, not pop up a stale inventory.
+            if result.get("cancelled"):
+                self.queue.put(("saves_done", "已取消，保留上次完整台账"))
+                return
+            message = "扫描完成：%d 个目录，共 %s" % (
+                result["count"], slg_scan.human_size(result["bytes"]))
+            if result.get("errors"):
+                message += "；%d 个范围无法读取，保留对应旧记录" % len(result["errors"])
+            self.queue.put(("saves_done", message))
             self.queue.put(("saves_inventory", None))
         except Exception as exc:  # noqa: BLE001
             self.queue.put(("saves_done", self._fail("扫描存档", exc)))
@@ -14206,14 +14447,14 @@ class App(ctk.CTk):
 
         total = sum(int(row["total_size"] or 0) for row in rows)
         ctk.CTkLabel(
-            body, text="%d 个存档目录 · 共 %s"
+            body, text="%d 个存档 / 游戏数据目录 · 共 %s"
                        % (len(rows), slg_scan.human_size(total)),
             text_color=MUTED, anchor="w",
             font=ui_font(size=12)).pack(fill="x", pady=(0, 8))
 
         frame = ctk.CTkScrollableFrame(body, fg_color="transparent")
         frame.pack(fill="both", expand=True)
-        for row in rows:
+        def make_row(row):
             card = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=8)
             card.pack(fill="x", pady=3)
             card.grid_columnconfigure(0, weight=1)
@@ -14222,7 +14463,9 @@ class App(ctk.CTk):
                 anchor="w", font=ui_font(size=13, weight="bold")).grid(
                     row=0, column=0, sticky="ew", padx=12, pady=(8, 0))
             ctk.CTkLabel(
-                card, text="%d 个存档 · %s · 最后修改 %s"
+                card, text=("游戏数据目录（可能含缓存和日志） · %d 个文件 · %s · 最后修改 %s"
+                           if row["engine"] == "Unity" and row["source_kind"] == "system"
+                           else "%d 个存档 · %s · 最后修改 %s")
                            % (int(row["save_count"] or 0),
                               slg_scan.human_size(int(row["total_size"] or 0)),
                               row["last_modified"] or "—"),
@@ -14235,6 +14478,18 @@ class App(ctk.CTk):
                 font=ui_font(size=12),
                 command=lambda p=row["path"]: self._open_save_folder(p)).grid(
                     row=0, column=1, rowspan=2, padx=(0, 10), pady=10)
+
+        scheduler = MotionScheduler(frame)
+        index = [0]
+        def batch():
+            budget = TimeBudget(milliseconds=6, max_items=10)
+            while index[0] < len(rows) and budget.available:
+                make_row(rows[index[0]])
+                index[0] += 1
+                budget.consumed()
+            if index[0] < len(rows):
+                scheduler.call_later(1, batch)
+        batch()
 
     def _open_save_folder(self, path):
         """Hand a save folder to the OS file manager. Read-only."""
@@ -14310,33 +14565,41 @@ class App(ctk.CTk):
         # Bounded per tick: a job that queues a thousand progress lines used to
         # be drained in one go, and every click that landed mid-drain waited for
         # the whole backlog. The remainder is a millisecond away.
-        pending = DRAIN_PER_TICK
+        budget = TimeBudget(milliseconds=6, max_items=DRAIN_PER_TICK)
+        latest_progress = None
+        def dispatch(message):
+            try:
+                self._dispatch(message[0], message[1])
+            except Exception:  # a failed handler must not kill the pump
+                traceback.print_exc()
         try:
-            while pending > 0:
+            while budget.available:
                 try:
                     message = self.queue.get_nowait()
                 except queue.Empty:
                     break
-                pending -= 1
-                # Malformed messages are dropped rather than unpacked: one bad
-                # put() must not cost the user every future update.
+                budget.consumed()
                 if not isinstance(message, tuple) or len(message) != 2:
                     continue
-                try:
-                    self._dispatch(message[0], message[1])
-                except Exception:  # noqa: BLE001 - a dead handler is not a dead pump
-                    traceback.print_exc()
+                if message[0] == "progress":
+                    latest_progress = message
+                    continue
+                if latest_progress is not None:
+                    dispatch(latest_progress)
+                    latest_progress = None
+                dispatch(message)
+            if latest_progress is not None:
+                dispatch(latest_progress)
         finally:
             try:
-                # Nothing left in the queue means the usual idle poll; a
-                # truncated pass comes straight back for the rest.
-                delay = 1 if pending == 0 else 150
-                self.after(delay, self._drain)
+                self.after(1 if not self.queue.empty() else 50, self._drain)
             except tk.TclError:
-                pass  # the window is on its way out
+                pass
 
     def _dispatch(self, kind, payload):
-        if kind == "log":
+        if kind == "cover_decoded":
+            self._cover_decoded(*payload)
+        elif kind == "log":
             self._set_progress(payload)
         elif kind == "progress":
             if isinstance(payload, tuple) and len(payload) == 3:

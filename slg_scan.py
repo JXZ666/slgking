@@ -379,20 +379,27 @@ def human_size(size):
             return "%.1f %s" % (value, unit)
 
 
-def _dir_stats(path):
-    """(file count, total bytes, newest mtime) for a save folder.
+class _SaveScanCancelled(Exception):
+    """Internal control flow: never publish a partial inventory."""
 
-    Recursive and error-tolerant in the same spirit as _listdir: a save the
-    game currently holds open must not abort the walk and lose the whole run.
-    The stamp is None rather than an epoch date when nothing was readable.
-    """
+
+def _save_checkpoint(should_stop):
+    if should_stop and should_stop():
+        raise _SaveScanCancelled()
+
+
+def _dir_stats(path, should_stop=None):
+    """Read an entire directory; an unreadable range must retain its old row."""
     count, total, newest = 0, 0, 0.0
-    for base, _dirs, files in os.walk(path):
+
+    def failed(error):
+        raise error
+
+    for base, _dirs, files in os.walk(path, onerror=failed):
+        _save_checkpoint(should_stop)
         for name in files:
-            try:
-                stat = os.stat(os.path.join(base, name))
-            except OSError:
-                continue
+            _save_checkpoint(should_stop)
+            stat = os.stat(os.path.join(base, name))
             count += 1
             total += stat.st_size
             newest = max(newest, stat.st_mtime)
@@ -402,39 +409,41 @@ def _dir_stats(path):
 
 
 def _local_low_roots():
-    """The Unity save root, when this machine has one."""
+    """Return the configured Unity data range, even when currently absent."""
     profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
-    path = os.path.join(profile, "AppData", "LocalLow")
-    return [path] if os.path.isdir(path) else []
+    return [os.path.join(profile, "AppData", "LocalLow")]
 
 
-def _system_save_dirs():
-    """Yield (name hint, save directory, engine) for saves kept outside the game.
+def _system_save_dirs(should_stop=None, listing=None, is_dir=None):
+    """Yield existing engine directories, with cancellable enumeration.
 
-    Unity and some RPG Maker builds write to LocalLow/<company>/<product> and
-    %APPDATA%/RenPy/<name> instead of next to the exe. Sweeping those is the
-    half of the scan that can name a game the user never bound to a folder.
+    Unity product directories contain game data, including caches and logs;
+    they must not be described as containing only save files.
     """
-    found = []
+    listing = listing or _listdir
+    is_dir = is_dir or os.path.isdir
     appdata = os.environ.get("APPDATA")
     if appdata:
         renpy = os.path.join(appdata, "RenPy")
-        for name in sorted(_listdir(renpy)):
+        for name in sorted(listing(renpy)):
+            _save_checkpoint(should_stop)
             if name.lower() in _RENPY_HOUSEKEEPING:
                 continue
             path = os.path.join(renpy, name)
-            if os.path.isdir(path):
-                found.append((name, path, "Ren'Py"))
+            if is_dir(path):
+                yield name, path, "Ren'Py"
     for base in _local_low_roots():
-        for company in sorted(_listdir(base)):
+        _save_checkpoint(should_stop)
+        for company in sorted(listing(base)):
+            _save_checkpoint(should_stop)
             company_dir = os.path.join(base, company)
-            if not os.path.isdir(company_dir):
+            if not is_dir(company_dir):
                 continue
-            for product in sorted(_listdir(company_dir)):
+            for product in sorted(listing(company_dir)):
+                _save_checkpoint(should_stop)
                 path = os.path.join(company_dir, product)
-                if os.path.isdir(path):
-                    found.append((product, path, "Unity"))
-    return found
+                if is_dir(path):
+                    yield product, path, "Unity"
 
 
 def _slug_for(conn, game_id):
@@ -447,69 +456,126 @@ def _slug_for(conn, game_id):
 
 def scan_saves(conn, roots=None, on_progress=None, log=print,
                should_stop=None):
-    """Inventory the save files on this machine. Read-only.
+    """Read engine data, then atomically replace the inventory on success.
 
-    Two passes. Every folder the user has bound gets probed for the
-    directories its engine would write saves into, and then the system
-    locations get swept for saves belonging to a game that was never bound at
-    all. Nothing here deletes, moves or writes a save - the table it fills is
-    a report, and the only way to lose a row is to scan again.
-
-    `roots` is accepted for signature parity with scan() and is not used: a
-    save directory is found by engine, not by walking a user-chosen root.
+    Never modify game files. Cancellation retains the previous complete report;
+    unreadable ranges retain their previous rows. ``roots`` remains unused.
     """
+    import stat as stat_module
+    import uuid
+
     index = _title_index(conn)
     titles = _title_index_titles(index)
     stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    seen, found = set(), []
+    previous = [dict(row) for row in conn.execute("SELECT * FROM local_saves")]
+    seen, found, failed_ranges, errors = set(), [], [], []
+
+    def key(path):
+        return os.path.normcase(os.path.abspath(path))
+
+    def failed(path, error):
+        failed_ranges.append(key(path))
+        errors.append({"path": path, "message": str(error)})
+
+    def listing(path):
+        _save_checkpoint(should_stop)
+        try:
+            return os.listdir(path)
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            failed(path, exc)
+            return []
+
+    def is_dir(path):
+        _save_checkpoint(should_stop)
+        try:
+            return stat_module.S_ISDIR(os.stat(path).st_mode)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            failed(path, exc)
+            return False
 
     def record(folder_name, path, engine, source_kind, game_id):
-        key = os.path.normcase(os.path.abspath(path))
-        if key in seen:
+        path_key = key(path)
+        if path_key in seen:
             return
-        seen.add(key)
-        count, size, modified = _dir_stats(path)
-        if not count:
-            return          # an empty saves folder is not worth a row
-        slg_db.set_local_save(
-            conn, path, game_slug=_slug_for(conn, game_id),
-            display_title=titles.get(game_id) or folder_title(folder_name),
-            engine=engine, source_kind=source_kind, save_count=count,
-            total_size=size, last_modified=modified, scanned_at=stamp)
-        found.append({"path": path, "count": count, "size": size})
+        seen.add(path_key)
+        try:
+            count, size, modified = _dir_stats(path, should_stop)
+        except OSError as exc:
+            failed(path, exc)
+            return
+        if count:
+            found.append(dict(
+                path=path, game_slug=_slug_for(conn, game_id),
+                display_title=titles.get(game_id) or folder_title(folder_name),
+                engine=engine, source_kind=source_kind, save_count=count,
+                total_size=size, last_modified=modified, scanned_at=stamp))
 
-    if should_stop is None:
-        should_stop = lambda: False          # noqa: E731 - a default, not logic
+    def summary(rows, cancelled=False, preserved_count=0):
+        return {"count": len(rows),
+                "bytes": sum(int(row["total_size"] or 0) for row in rows),
+                "cancelled": cancelled, "errors": errors,
+                "preserved_count": preserved_count,
+                "game_data_count": sum(row["engine"] == "Unity"
+                                       and row["source_kind"] == "system"
+                                       for row in rows)}
 
-    # Pass 1: saves inside a folder the user has already bound to a game.
-    for row in conn.execute(
-            "SELECT g.id, g.title, l.folder_path FROM local l"
-            " JOIN games g ON g.id = l.game_id"
-            " WHERE l.folder_path IS NOT NULL").fetchall():
-        if should_stop():
-            break
-        folder = row["folder_path"]
-        if not os.path.isdir(folder):
-            continue
-        engine = detect_engine(folder) or ""
-        for relative in _ENGINE_SAVE_DIRS.get(engine, _ANY_SAVE_DIRS):
-            path = os.path.join(folder, relative.replace("/", os.sep))
-            if os.path.isdir(path):
-                record(os.path.basename(folder.rstrip("/\\")), path, engine,
-                       "install", row["id"])
-        if on_progress:
-            on_progress(row["title"])
+    try:
+        _save_checkpoint(should_stop)
+        for row in conn.execute(
+                "SELECT g.id, g.title, l.folder_path FROM local l"
+                " JOIN games g ON g.id = l.game_id"
+                " WHERE l.folder_path IS NOT NULL").fetchall():
+            _save_checkpoint(should_stop)
+            folder = row["folder_path"]
+            if not is_dir(folder):
+                continue
+            # Detect permission failures before detect_engine's tolerant listing.
+            listing(folder)
+            if key(folder) in failed_ranges:
+                continue
+            engine = detect_engine(folder) or ""
+            for relative in _ENGINE_SAVE_DIRS.get(engine, _ANY_SAVE_DIRS):
+                path = os.path.join(folder, relative.replace("/", os.sep))
+                if is_dir(path):
+                    record(os.path.basename(folder.rstrip("/\\")), path, engine,
+                           "install", row["id"])
+            if on_progress:
+                on_progress(row["title"])
+        for name, path, engine in _system_save_dirs(should_stop, listing, is_dir):
+            _save_checkpoint(should_stop)
+            record(name, path, engine, "system", match_game(conn, name, index))
+        _save_checkpoint(should_stop)
+    except _SaveScanCancelled:
+        log("存档扫描已停止，保留上次完整台账")
+        return summary(previous, cancelled=True)
 
-    # Pass 2: saves the engine put somewhere the install folder never sees.
-    for name, path, engine in _system_save_dirs():
-        if should_stop():
-            break
-        record(name, path, engine, "system", match_game(conn, name, index))
-
-    conn.commit()
-    total = sum(item["size"] for item in found)
-    log("存档扫描完成：%d 个目录，共 %s" % (len(found), human_size(total)))
-    return {"count": len(found), "bytes": total}
+    found_keys = {key(row["path"]) for row in found}
+    retained = [row for row in previous
+                if key(row["path"]) not in found_keys
+                and any(key(row["path"]) == base
+                        or key(row["path"]).startswith(base + os.sep)
+                        for base in failed_ranges)]
+    rows = found + retained
+    savepoint = "save_inventory_" + uuid.uuid4().hex
+    conn.execute("SAVEPOINT " + savepoint)
+    try:
+        slg_db.clear_local_saves(conn)
+        for row in rows:
+            slg_db.set_local_save(conn, **row)
+        conn.execute("RELEASE SAVEPOINT " + savepoint)
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT " + savepoint)
+        conn.execute("RELEASE SAVEPOINT " + savepoint)
+        raise
+    result = summary(rows, preserved_count=len(retained))
+    log("存档扫描完成：%d 个目录，共 %s%s" % (
+        result["count"], human_size(result["bytes"]),
+        "；%d 个范围未能读取，保留旧记录" % len(errors) if errors else ""))
+    return result
 
 
 # --- CLI -----------------------------------------------------------------------

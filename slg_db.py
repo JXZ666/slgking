@@ -21,6 +21,8 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
 
+from slg_game_categories import normalize_categories
+
 STATUSES = ("want", "downloaded")
 STATUS_LABELS = {"want": "想玩", "downloaded": "已下载"}
 
@@ -74,6 +76,19 @@ CREATE TABLE IF NOT EXISTS tags (
     id   INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE
 );
+
+CREATE TABLE IF NOT EXISTS user_game_categories (
+    game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+    category TEXT NOT NULL,
+    PRIMARY KEY (game_id, category)
+);
+
+CREATE TRIGGER IF NOT EXISTS user_game_categories_user_only
+BEFORE INSERT ON user_game_categories
+WHEN (SELECT origin FROM games WHERE id = NEW.game_id) != 'user'
+BEGIN
+    SELECT RAISE(ABORT, 'categories require a user game');
+END;
 
 CREATE TABLE IF NOT EXISTS game_tags (
     game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
@@ -811,7 +826,7 @@ def import_cover(src_path):
 
 def add_user_game(conn, title, developer=None, engine=None, version=None,
                   overview=None, cover_file=None, tags=(), folder_path=None,
-                  promoted=0):
+                  promoted=0, categories=()):
     """Insert a game the user added themselves. Returns its id.
 
     The scraper's upsert_game is COALESCE-on-update because two writers share a
@@ -820,6 +835,7 @@ def add_user_game(conn, title, developer=None, engine=None, version=None,
     - and never collides with the dikgames slugs the scraper keys on, which is
     also what keeps a later site sync from ever touching this row.
     """
+    categories = normalize_categories(categories)
     now = _now()
     slug = "user-" + uuid.uuid4().hex[:8]
     cur = conn.execute(
@@ -834,19 +850,24 @@ def add_user_game(conn, title, developer=None, engine=None, version=None,
             "INSERT INTO local (game_id, folder_path)"
             " VALUES (?,?)", (game_id, folder_path))
     set_tags(conn, game_id, tags, clear=True)
+    set_game_categories(conn, game_id, categories)
     return game_id
 
 
 def update_user_game(conn, game_id, title, developer=None, engine=None,
                      version=None, overview=None, cover_file=None,
-                     tags=(), folder_path=None, promoted=0):
+                     tags=(), folder_path=None, promoted=0, categories=None):
     """Rewrite a game the user added themselves.
 
     The user is the only writer of their own rows, so this is a plain UPDATE,
     not the scraper's COALESCE merge. cover_file=None means "keep the current
     cover", folder_path=None means "keep the current folder"; the edit dialog
     passes them through only when the user actually changed them.
+    categories=None preserves them, while an empty iterable clears them.
     """
+    if categories is not None:
+        categories = normalize_categories(categories)
+        _require_user_game(conn, game_id)
     conn.execute(
         "UPDATE games SET title=?, version=?, developer=?, engine=?,"
         " overview=?, promoted=? WHERE id=?",
@@ -858,6 +879,42 @@ def update_user_game(conn, game_id, title, developer=None, engine=None,
     if folder_path:
         set_local_folder(conn, game_id, folder_path)
     set_tags(conn, game_id, tags, clear=True)
+    if categories is not None:
+        set_game_categories(conn, game_id, categories)
+
+
+def _require_user_game(conn, game_id):
+    row = conn.execute("SELECT origin FROM games WHERE id=?", (game_id,)).fetchone()
+    if row is None or row["origin"] != "user":
+        raise ValueError("只有自建游戏可以设置分类。")
+
+
+def set_game_categories(conn, game_id, categories):
+    """Replace only a user game's fixed categories; empty clears them."""
+    categories = normalize_categories(categories)
+    _require_user_game(conn, game_id)
+    conn.execute("DELETE FROM user_game_categories WHERE game_id=?", (game_id,))
+    conn.executemany(
+        "INSERT INTO user_game_categories(game_id,category) VALUES (?,?)",
+        [(game_id, category) for category in categories])
+
+
+def game_categories_bulk(conn, game_ids):
+    """Fetch categories for an entire result set without per-card queries."""
+    ids = tuple(dict.fromkeys(game_ids))
+    result = {game_id: [] for game_id in ids}
+    if ids:
+        for row in conn.execute(
+                "SELECT game_id,category FROM user_game_categories"
+                " WHERE game_id IN (SELECT CAST(value AS INTEGER) FROM json_each(?))",
+                (json.dumps(ids),)):
+            result[row["game_id"]].append(row["category"])
+    return {game_id: normalize_categories(categories)
+            for game_id, categories in result.items()}
+
+
+def game_categories(conn, game_id):
+    return game_categories_bulk(conn, (game_id,))[game_id]
 
 
 def delete_game(conn, game_id):
@@ -1053,17 +1110,21 @@ def upsert_detail(conn, game_id, rating=None, version=None, developer=None,
 def find_games(conn, include=(), exclude=(), search=None, statuses=None,
                downloaded_only=False, collection_id=None,
                origin="main", sort="score", desc=True,
-               translation_ids=None):
+               translation_ids=None, category_ids=(), uncategorized=False):
     """Games matching a tag intersection (include) minus a tag union (exclude).
 
     include is an AND: every tag listed must be present. exclude is a NOT:
     any one of them is enough to drop the row.
+    On the user view, category_ids are an OR; uncategorized additionally
+    includes games with no category. Other views ignore these local filters.
+    Returns dictionaries with a categories tuple fetched in one batch.
 
     origin controls which games the result may contain:
       'main' - the catalogue plus user games the user promoted into it.
       'user' - only games the user added themselves (the sidebar's own view).
       None   - no origin filter (maintenance paths that need every row).
     """
+    category_ids = normalize_categories(category_ids)
     where, params = [], []
     # Safe catalogue redirects preserve the old row for recovery, but expose
     # only its canonical card in normal library queries. Conflicting redirects
@@ -1075,6 +1136,18 @@ def find_games(conn, include=(), exclude=(), search=None, statuses=None,
         where.append("(g.origin = 'site' OR g.promoted = 1)")
     elif origin == "user":
         where.append("g.origin = 'user'")
+        category_where = []
+        if category_ids:
+            qmarks = ",".join("?" * len(category_ids))
+            category_where.append(
+                "g.id IN (SELECT uc.game_id FROM user_game_categories uc"
+                " WHERE uc.category IN (%s))" % qmarks)
+            params.extend(category_ids)
+        if uncategorized:
+            category_where.append(
+                "NOT EXISTS (SELECT 1 FROM user_game_categories uc WHERE uc.game_id=g.id)")
+        if category_where:
+            where.append("(" + " OR ".join(category_where) + ")")
 
     if include:
         qmarks = ",".join("?" * len(include))
@@ -1163,10 +1236,26 @@ def find_games(conn, include=(), exclude=(), search=None, statuses=None,
         # (col IS NULL) leads so unrated rows sink in both directions. 985
         # rows have no rating, and plain ASC would open the list with all of
         # them; score is COALESCEd, so its guard is free.
-        order = "(%s IS NULL), %s %s, g.title COLLATE NOCASE" % (
-            column, column, direction)
+        if column == "score":
+            # Every score term is COALESCE'd, so its value cannot be NULL.
+            # A redundant NULL guard makes SQLite evaluate the correlated
+            # tag/affinity sums again for every game while sorting.
+            order = "score %s, g.title COLLATE NOCASE" % direction
+        else:
+            order = "(%s IS NULL), %s %s, g.title COLLATE NOCASE" % (
+                column, column, direction)
     sql += " ORDER BY " + order
-    return conn.execute(sql, params).fetchall()
+    cursor = conn.execute(sql, params)
+    # sqlite3.Row's name lookup scans its column names. dict(row) performs
+    # that scan for every field; pairing positional values with one shared
+    # column list avoids quadratic work across thousands of game records.
+    columns = tuple(column[0] for column in cursor.description)
+    rows = [dict(zip(columns, row)) for row in cursor]
+    categories = game_categories_bulk(
+        conn, [row["id"] for row in rows if row["origin"] == "user"])
+    for row in rows:
+        row["categories"] = categories.get(row["id"], ())
+    return rows
 
 
 def game_tags(conn, game_id):
@@ -1954,6 +2043,10 @@ def export_user_data(conn):
         " JOIN games g ON g.id = gt.game_id"
         " JOIN tags t ON t.id = gt.tag_id"
         " WHERE g.origin = 'user' ORDER BY g.slug, t.name")]
+    out["user_game_categories"] = [dict(r) for r in conn.execute(
+        "SELECT g.slug, uc.category FROM user_game_categories uc"
+        " JOIN games g ON g.id=uc.game_id"
+        " WHERE g.origin='user' ORDER BY g.slug, uc.category")]
     out["user_local"] = [dict(r) for r in conn.execute(
         "SELECT g.slug, l.folder_path, l.folder_version, l.exe_path"
         " FROM local l JOIN games g ON g.id = l.game_id"
@@ -1975,6 +2068,7 @@ _BACKUP_FIELDS = {
     "owned_titles": {"title_id", "acquired_at", "source", "seal"},
     "user_games": set(_USER_GAME_COLS) | {"id"},
     "user_game_tags": {"slug", "name"},
+    "user_game_categories": {"slug", "category"},
     "user_local": {"slug", "folder_path", "folder_version", "exe_path"},
     "user_game_aliases": {"slug", "alias", "source"},
 }
@@ -1990,6 +2084,7 @@ _BACKUP_REQUIRED_FIELDS = {
     "owned_titles": {"title_id", "acquired_at", "source"},
     "user_games": {"slug", "url", "title", "first_seen"},
     "user_game_tags": {"slug", "name"},
+    "user_game_categories": {"slug", "category"},
     "user_local": {"slug"},
     "user_game_aliases": {"slug", "alias"},
 }
@@ -2007,6 +2102,7 @@ _BACKUP_STRING_FIELDS = {
                    "last_updated", "overview", "cover_file", "first_seen",
                    "last_synced", "lastmod", "origin"},
     "user_game_tags": {"slug", "name"},
+    "user_game_categories": {"slug", "category"},
     "user_local": {"slug", "folder_path", "folder_version", "exe_path"},
     "user_game_aliases": {"slug", "alias", "source"},
 }
@@ -2092,6 +2188,8 @@ def validate_user_data(data):
                 value = record[field]
                 if value is None or (isinstance(value, str) and not value.strip()):
                     raise ValueError("备份中的 %s.%s 不能为空。" % (location, field))
+            if section == "user_game_categories":
+                normalize_categories((record["category"],))
             if section == "user_local" and any(
                     record.get(key) for key in ("folder_path", "exe_path")):
                 local_path_count += 1
@@ -2180,6 +2278,7 @@ def _import_game_rows(conn, table, records):
 
 
 def _import_user_games(conn, data):
+    restored_ids = set()
     for rec in data.get("user_games", []):
         slug = rec.get("slug")
         if not slug:
@@ -2195,6 +2294,21 @@ def _import_user_games(conn, data):
             sets = ",".join("%s = ?" % c for c in _USER_GAME_COLS)
             conn.execute("UPDATE games SET %s WHERE id = ?" % sets,
                          values + (row["id"],))
+
+        # Categories describe the restored snapshot of each user game. Old
+        # backups have no section and therefore restore these games as
+        # unclassified, without clearing other local user games.
+        restored_id = _game_id_by_slug(conn, slug)
+        _require_user_game(conn, restored_id)
+        restored_ids.add(restored_id)
+        conn.execute("DELETE FROM user_game_categories WHERE game_id=?", (restored_id,))
+
+    for rec in data.get("user_game_categories", []):
+        game_id = _game_id_by_slug(conn, rec["slug"])
+        if game_id in restored_ids:
+            conn.execute(
+                "INSERT OR IGNORE INTO user_game_categories(game_id,category) VALUES (?,?)",
+                (game_id, rec["category"]))
 
     for rec in data.get("user_game_tags", []):
         game_id = _game_id_by_slug(conn, rec.get("slug"))

@@ -14,7 +14,8 @@ import slg_gui  # noqa: E402
 
 class ReleaseChannelNotesTests(unittest.TestCase):
     def test_stable_and_test_notes_use_channel_when_versions_match(self):
-        with mock.patch.object(slg_gui.sys, "frozen", True, create=True):
+        with mock.patch.object(slg_gui.sys, "frozen", True, create=True), \
+                mock.patch.object(slg_gui, "TEST_APP_VERSION", slg_gui.APP_VERSION):
             for executable, channel in (("slgking.exe", "稳定版"),
                                         ("slgking_test.exe", "测试版")):
                 with self.subTest(executable=executable), \
@@ -22,6 +23,15 @@ class ReleaseChannelNotesTests(unittest.TestCase):
                     notes = slg_gui.release_notes_text()
                     self.assertTrue(notes.startswith("0.24.5 " + channel))
                     self.assertNotIn("管理员身份", notes)
+
+    def test_actual_channels_keep_stable_and_test_versions_separate(self):
+        with mock.patch.object(slg_gui.sys, "frozen", True, create=True):
+            for executable, version in (("slgking.exe", "0.24.5"),
+                                        ("slgking_test.exe", "0.25.0")):
+                with self.subTest(executable=executable), mock.patch.object(
+                        slg_gui.sys, "executable", executable):
+                    self.assertTrue(slg_gui.release_notes_text().startswith(version + " "))
+                    self.assertNotIn("网页版", slg_gui.release_notes_text())
 
 
 class AnnouncementPageModelTests(unittest.TestCase):

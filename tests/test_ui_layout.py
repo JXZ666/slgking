@@ -618,6 +618,24 @@ class SidebarFit(unittest.TestCase):
             cls.app._apply_theme("light")
         cls.app.update()
 
+    def setUp(self):
+        # The class shares a Windows root. Closing/focusing modal dialogs can
+        # leave its mapping and focus behind the next test's assumptions.
+        self.app.deiconify()
+        self.app.lift()
+        self.app.focus_force()
+        self.app.update()
+        self._wait_for_cards()
+
+    def _wait_for_cards(self):
+        deadline = time.monotonic() + 3
+        while getattr(self.app, "_card_render_pending", False) and time.monotonic() < deadline:
+            self.app.update()
+            time.sleep(0.005)
+        self.assertFalse(getattr(self.app, "_card_render_pending", False),
+                         "Card rendering did not finish")
+        self.app.update_idletasks()
+
     @classmethod
     def tearDownClass(cls):
         cls._offline_comments.stop()
@@ -625,6 +643,7 @@ class SidebarFit(unittest.TestCase):
         cls._usable_session.stop()
         cls._personal_access.stop()
         cls.app.destroy()
+        cls.app.conn.close()
         for patch in cls._offline:
             patch.stop()
 
@@ -667,7 +686,7 @@ class SidebarFit(unittest.TestCase):
             # Mapping is the window manager's job and lands a moment after the
             # geometry pass that asked for it, so this waits rather than
             # asserting on whatever the first look happens to see.
-            while time.time() < deadline and hit.winfo_height() <= 1:
+            while time.time() < deadline and (hit.winfo_height() <= 1 or not hit.winfo_ismapped()):
                 self.app.update()
                 time.sleep(0.01)
             self.assertTrue(hit.winfo_ismapped(), "%s没被映射" % what)
@@ -682,7 +701,7 @@ class SidebarFit(unittest.TestCase):
     def test_the_version_stamp_is_visible(self):
         # The point of the stamp is telling a stale exe apart from a fresh one,
         # so it is useless if the layout can hide it.
-        self._assert_has_height("v" + slg_gui.APP_VERSION, "版本戳")
+        self._assert_has_height("v" + slg_gui.display_app_version(), "版本戳")
 
     def test_the_vpn_notice_is_visible_at_the_minimum_size(self):
         self._assert_has_height("建议开启梯子", "梯子提示")
@@ -1845,6 +1864,7 @@ class SidebarFit(unittest.TestCase):
                         mock.patch.object(self.app, "_render_detail_if_stale"):
                     self.app.page = 2
                     self.app.refresh()
+                    self._wait_for_cards()
                     page = self.app._page_slice()
                     self.assertEqual(len(page), slg_gui.PAGE_SIZE)
                     self.assertEqual(len(self.app._card_pool), slg_gui.PAGE_SIZE)
@@ -2023,7 +2043,7 @@ class SidebarFit(unittest.TestCase):
         dead.assert_called_once()
         # The message behind the dead handler still landed, in the same pass.
         sink.assert_called_once_with("sentinel")
-        after.assert_called_once_with(150, self.app._drain)
+        after.assert_called_once_with(50, self.app._drain)
         # Swallowed is not the same as handled: it is still reported.
         reported.assert_called_once()
 
