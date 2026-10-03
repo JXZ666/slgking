@@ -53,7 +53,7 @@ import slg_translate
 import slg_update
 import slg_util
 
-APP_VERSION = "0.24.5"
+APP_VERSION = "0.25.0"
 TEST_APP_VERSION = "0.25.0"
 
 
@@ -863,13 +863,15 @@ def is_test_build():
 def release_notes_text():
     """Select the release wording by build channel, even when versions match."""
     channel = "测试版" if is_test_build() else "稳定版"
-    test_notes = ("本地测试：新增 Galgame、SLG、RPG、ACT、模拟经营、休闲/解谜、其他多选分类，支持编辑、筛选和备份。\n"
-                  "卡片与列表分批加载，封面后台解码；新增减少动效设置。\n"
-                  "改进存档重扫和取消，修复过期记录与损坏会话恢复。\n\n") if is_test_build() else ""
     return (
         "%s %s\n\n" % (display_app_version(), channel)
-        + test_notes
-        + "首次使用需要确认年龄并阅读软件说明。\n"
+        + "网页端支持中文标签检索、共享账号和可折叠个人中心；游戏评论与自由论坛分开，公开内容自动审核。\n"
+        "本机评分、收藏、游戏路径、私人记录和自建游戏分类不会随账号同步。\n"
+        "自建游戏新增 Galgame、SLG、RPG、ACT、模拟经营、休闲/解谜、其他多选分类，支持编辑、筛选和备份。\n"
+        "卡片与列表分批加载，封面后台解码；新增减少动效设置。\n"
+        "改进存档重扫和取消，修复过期记录与损坏会话恢复。\n"
+        "保留字体大小设置与键盘导航，补齐中文标签译名。\n\n"
+        "首次使用需要确认年龄并阅读软件说明。\n"
         "工具与设置入口重新整理，公告和版本说明分别显示。\n"
         "兑换码与邀请码合并到同一窗口，可查看邀请码和邀请进度。\n"
         "个性装扮窗口集中展示已拥有头衔和装扮收集进度。\n"
@@ -1456,7 +1458,8 @@ class App(ctk.CTk):
         # notify is off for the packaging smoke test and the test harness, which
         # both expect an empty library; a real session imports the shipped tag
         # seed once so users without a translation API still see Chinese tags.
-        if notify and not slg_db.get_pref(self.conn, PREF_SEED_TAGS_IMPORTED):
+        if notify and (not slg_db.get_pref(self.conn, PREF_SEED_TAGS_IMPORTED)
+                       or slg_db.get_pref(self.conn, "tag_seed.version") != APP_VERSION):
             seed = asset_path("tag_zh.json")
             if os.path.exists(seed):
                 slg_db.import_seed_tag_translations(self.conn, seed)
@@ -1465,6 +1468,7 @@ class App(ctk.CTk):
                 # skipped the import for good and left the user on English tag
                 # names with no way back short of editing the db.
                 slg_db.set_pref(self.conn, PREF_SEED_TAGS_IMPORTED, "1")
+                slg_db.set_pref(self.conn, "tag_seed.version", APP_VERSION)
         load_tag_translations(self.conn)
         load_title_translations(self.conn)
         # Resolved before the first widget exists, so the opening frame is
