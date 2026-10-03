@@ -1,8 +1,8 @@
 # SLG黄游之王 · SLGking
 
-把游戏检索、按性癖偏好排序、玩家评论和本地游戏管理放在一起的 Windows 桌面工具，面向 18 周岁以上用户。
+面向 18 周岁以上用户的游戏目录与社区：网页端方便检索游戏、查看评论和自由讨论，Windows 客户端帮助管理本地游戏库，并按个人评分与偏好推荐作品。
 
-[访问官网](https://slg-king.com/)　·　[下载最新稳定版](https://github.com/JXZ666/slgking/releases/latest)　·　[更新日志](CHANGELOG.md)　·　[GitHub 仓库](https://github.com/JXZ666/slgking)
+[打开网页端](https://slg-king.com/m/#/)　·　[访问官网](https://slg-king.com/)　·　[下载最新稳定版](https://github.com/JXZ666/slgking/releases/latest)　·　[更新日志](CHANGELOG.md)　·　[GitHub 仓库](https://github.com/JXZ666/slgking)
 
 > 本项目只整理游戏资料并帮助管理本地游戏库，不托管游戏文件，也不提供游戏下载。游戏文件请通过其作者或发行方提供的渠道获取。
 
@@ -12,22 +12,20 @@
 
 ## 这款软件能做什么
 
-- 找游戏：搜索游戏名，用标签筛选，再按「站内评分」「热度」「最近更新」等方式排序。选择「按xp推荐」时，列表会参考你给游戏的评分和它们共有的标签、开发者与引擎，优先显示更符合你性癖偏好的作品。
-- 看评论、写评论：在游戏详情中打开「写评论&查看评论区」，分页浏览其他玩家公开发布的评论，按最新或热门排序，也可以点赞、点踩和举报。你自己的评论可以保存在本机，也可以选择公开发表。
-- 整理游戏：标记「想玩」或「已下载」，建立收藏夹，扫描本地游戏目录、记录安装版本并查看更新提醒。也可以添加目录里没有的游戏，并为本地游戏选择启动程序。
+- 找游戏：网页和客户端都能搜索游戏名、按中文标签筛选，按评分、热度或最近更新排序。客户端的「按xp推荐」会参考本机评分及游戏共有的标签、开发者与引擎，优先显示更符合个人偏好的作品。
+- 看评论、参与讨论：游戏评论针对具体作品，与客户端共享；网页论坛供大家自由讨论，可选择关联游戏。登录后可以发表评论、点赞、点踩和举报；客户端还可以保存仅自己可见的本机私人评论。
+- 整理游戏：Windows 客户端支持「想玩」或「已下载」标记、收藏夹、本地目录扫描、安装版本记录和更新提醒。也可以添加目录里没有的游戏，并为本地游戏选择启动程序。
 
 <img src="assets/screenshots/v023-comments.png" alt="SLGking 游戏评论区界面" width="900">
 
 图：在游戏评论区翻页阅读公开评论，或发表自己的评论。
 
-游戏目录资料来自 [dikgames.com](https://dikgames.com) 和 [F95zone.to.it](https://f95zone.to.it)，由项目服务器整理后供客户端同步。官网用于项目介绍、下载和更新信息；游戏检索、评论与游戏库管理在桌面软件中使用。
+游戏目录资料来自 [dikgames.com](https://dikgames.com) 和 [F95zone.to.it](https://f95zone.to.it)，由项目服务器整理，供网页检索和客户端同步。官网提供项目介绍、网页入口、客户端下载和更新信息。
 
 ## 快速开始
 
-1. 从[稳定版发布页](https://github.com/JXZ666/slgking/releases/latest)下载 `slgking.exe` 并运行；发布页显示当前公开版号。
-2. 首次打开后，点击「更新游戏数据」获取目录和封面。更新完成后，搜索、标签筛选和本机游戏资料浏览可以离线使用。
-3. 未登录也可以搜索、筛选游戏目录和查看公开评论。要留下评分、使用收藏夹、签到、积分商城或发表评论，先到「个人」页面创建或登录云端账号。
-4. 登录后给熟悉的游戏评分，再在顶栏选择「按xp推荐」；评分越多，排序越能体现你的口味。打开游戏详情中的「写评论&查看评论区」可翻页查看评论或发表自己的评论。
+1. **网页端：** 用手机或电脑浏览器[打开网页端](https://slg-king.com/m/#/)，无需安装即可搜索目录、选择中文标签、查看详情和公开评论。到「我的」登录已有客户端账号或创建账号，可使用可折叠个人中心、签到、任务以及评论和论坛。已有账号请直接登录，避免重复注册。
+2. **Windows 客户端：** 从[稳定版发布页](https://github.com/JXZ666/slgking/releases/latest)下载 `slgking.exe` 并运行。首次打开后点击「更新游戏数据」获取目录和封面，之后已缓存的资料可离线检索。登录云端账号后，可以管理本机收藏和评分、扫描目录、保存私人记录；给熟悉的游戏评分，再选「按xp推荐」积累个人偏好。
 
 程序数据保存在 exe 以外的位置，替换软件文件不会删除已有资料。登录后可在「更多工具…」中使用「备份与恢复…」迁移个人资料；也可以退出软件后复制整个 `%LOCALAPPDATA%\slgking` 文件夹。账号登录密钥和恢复码不包含在个人资料备份中。
 
@@ -35,7 +33,7 @@
 
 普通账号不使用邮箱注册。每次「创建账号」都会生成一份新身份；换设备时请用「登录」，不要重复创建，否则新旧账号的积分和评论不会合并。创建账号后，软件会显示一串登录密钥和一串恢复码；请分别妥善保存，它们不会再次显示。新设备登录需要两串密钥；已信任设备在连续 7 天未登录后，也需要恢复码。密钥丢失后无法找回，账号也无法通过邮箱重置。
 
-登录后，昵称、云端积分、头衔、签到记录、头像框、名片框和公开评论可以在其他设备使用。游戏评分、想玩/已下载状态、收藏夹、本机扫描到的目录和私人评论只留在当前电脑，不会随账号同步。首次创建或登录时，程序会尝试将通过本机存档校验的旧积分与头衔迁入账号一次。
+网页端与 Windows 客户端共用云端账号，昵称、云端积分、头衔、签到记录、头像框、名片框和公开评论可以在其他设备登录使用。网页论坛独立于游戏评论，论坛内容不计入公开游戏评论奖励。本机游戏评分、想玩/已下载状态、收藏夹、游戏路径、自建游戏分类和私人记录只留在当前电脑，不会随账号自动同步；换电脑需要自行备份迁移。客户端首次创建或登录时，会尝试将通过本机存档校验的旧积分与头衔迁入账号一次。
 
 未登录用户可以浏览目录、同步目录并查看公开评论；评分、个人资料、收藏管理、签到、积分商城和发表评论需要登录。每日签到和当天的群兑换码各可获得 10 积分；符合奖励规则的公开评论审核通过后可获得 20 积分，评论奖励有账号和游戏频率限制。积分商城还提供每日与每周任务；公开评论任务在评论审核通过后按首次公开日期计进度。公开评论可能展示你的昵称、已装备头衔和名片装饰。私人评论限 500 字，仅保存在本机。其他补偿活动仅在公告显示时开放。
 
@@ -80,4 +78,4 @@
 
 ### English
 
-SLGking is a Windows desktop catalogue and local library manager for adults aged 18+. It helps you find games by tags, sort them using preferences learned from your local ratings, read and publish community comments, and organize games already on your device. It does not host or distribute game files. Visit the [official website](https://slg-king.com/) or get the latest stable release from [GitHub](https://github.com/JXZ666/slgking/releases/latest).
+SLGking is a game catalogue and community for adults aged 18+. [Open the web app](https://slg-king.com/m/#/) to search by tags, read game reviews, and join the independent discussion forum without installation. The Windows client also manages games already on your computer and recommends titles using local ratings. Both share cloud accounts and public game reviews; local ratings, collections, game paths, private notes, and custom game categories do not automatically sync. It does not host or distribute game files. Visit the [official website](https://slg-king.com/) or get the Windows client from [GitHub](https://github.com/JXZ666/slgking/releases/latest).
