@@ -1,0 +1,13 @@
+slgking Android 移植（android/ 工程、slg_android_api.py、slg_android_bootstrap.py、
+tools/smoke_android_api.py）由 zeratulzhou 贡献，以 MIT License 授权（见 LICENSE），
+可并入 GPL-3.0 的 slgking 仓库：合并分发的整体遵循仓库 GPL-3.0，本部分保留 MIT
+声明与本署名。
+
+致谢建议（任选其一即可）：
+- README 贡献/致谢列表加一行：「安卓客户端（Kotlin/Compose + Chaquopy 移植）由
+  zeratulzhou 贡献（MIT）」
+- 或保留 android/NOTICE 与 android/LICENSE 原样随仓库分发。
+
+边界说明：本工程在构建期打包仓库根的上游 slg_*.py（GPL-3.0，作者 JXZ666），
+这部分的权利归属与许可以仓库根 LICENSE 为准；android/ 目录内的所有 Kotlin/
+Gradle/资源文件为 MIT 部分。
