@@ -257,6 +257,39 @@ class SessionStorageTests(unittest.TestCase):
                 slg_account.forget_session()
                 self.assertIsNone(slg_account.session())
 
+    def test_malformed_session_shape_uses_recoverable_account_error(self):
+        samples = [[], None, 123, "text", {},
+                   {"account_id": [], "token": "ZHVtbXk="},
+                   {"account_id": True, "token": "ZHVtbXk="},
+                   {"account_id": " ", "token": "ZHVtbXk="},
+                   {"account_id": "acct", "token": []},
+                   {"account_id": "acct", "token": ""},
+                   {"account_id": "acct", "token": "!!!"}]
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "session.json")
+            for sample in samples:
+                with self.subTest(sample_type=type(sample).__name__):
+                    with open(path, "w", encoding="utf-8") as out:
+                        json.dump(sample, out)
+                    with mock.patch.object(slg_account, "_dpapi") as decrypt:
+                        with self.assertRaisesRegex(slg_account.AccountError,
+                                                    "设备凭证无法读取.*重新登录"):
+                            slg_account._read_session(path)
+                    decrypt.assert_not_called()
+
+    def test_empty_decrypted_session_is_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "session.json")
+            with open(path, "w", encoding="utf-8") as out:
+                json.dump({"account_id": "acct", "token": "ZHVtbXk="}, out)
+            with mock.patch.object(slg_account, "_dpapi", return_value=b""):
+                with self.assertRaises(slg_account.AccountError):
+                    slg_account._read_session(path)
+
+    def test_missing_session_stays_a_guest(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.assertIsNone(slg_account._read_session(os.path.join(root, "missing.json")))
+
     def test_new_account_returns_keys_even_if_local_save_fails(self):
         credentials = {"account_id": "acct", "login_key": "login",
                        "recovery_code": "recovery", "device_token": "session"}

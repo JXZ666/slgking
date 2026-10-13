@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""SLG黄游之王 - dikgames 游戏库管理。
+"""黄油之王 - 游戏目录与本地游戏库管理。
 
   double-click the exe -> a window
-  slgking --sync       -> refresh the catalogue from dikgames and exit
+  slgking scan         -> preview local game identification
 
 The window title and the desktop shortcut are Chinese; everything internal
 (exe name, module names, the repo) stays ASCII on purpose. A Chinese module
@@ -14,6 +14,9 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import slg_crash  # noqa: E402
+slg_crash.install_hooks(channel="test" if "_test" in os.path.basename(sys.executable).lower() else "stable")
 
 import argparse  # noqa: E402
 import slg_util  # noqa: E402
@@ -66,7 +69,7 @@ def main(argv=None):
     _attach_console()
     parser = argparse.ArgumentParser(
         prog="slgking",
-        description="SLG黄游之王 - dikgames 游戏库管理")
+        description="黄油之王 - 游戏目录与本地游戏库管理")
     parser.add_argument("--smoke", action="store_true",
                         help="open the window, render once, exit (build check)")
     parser.add_argument("--version", action="store_true",
@@ -84,6 +87,7 @@ def main(argv=None):
 
     if args.version:
         import slg_gui
+        slg_crash.set_context(version=slg_gui.display_app_version())
         print("%s %s" % (slg_gui.APP_TITLE, slg_gui.build_stamp()))
         return 0
 
@@ -107,6 +111,7 @@ def main(argv=None):
         return code
 
     import slg_gui
+    slg_crash.set_context(version=slg_gui.display_app_version())
     code = slg_gui.main(smoke=args.smoke)
     _pause_on_error(code or 0)
     return code or 0

@@ -14,12 +14,19 @@ import re
 import secrets
 import shutil
 import sqlite3
+import slg_hidden_games
+import slg_library_metadata
+import slg_local_library
+import slg_dlsite_client
 import threading
 import time
 import uuid
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
+
+from slg_game_categories import normalize_categories
+from slg_catalogues import normalize_catalogue
 
 STATUSES = ("want", "downloaded")
 STATUS_LABELS = {"want": "想玩", "downloaded": "已下载"}
@@ -75,6 +82,30 @@ CREATE TABLE IF NOT EXISTS tags (
     name TEXT NOT NULL UNIQUE
 );
 
+CREATE TABLE IF NOT EXISTS game_catalogs (
+    game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+    catalog_id TEXT NOT NULL CHECK(catalog_id IN ('western_slg','dlsite')),
+    PRIMARY KEY(game_id,catalog_id)
+);
+CREATE INDEX IF NOT EXISTS idx_game_catalogs_catalog ON game_catalogs(catalog_id,game_id);
+CREATE TABLE IF NOT EXISTS game_metadata (
+    game_id INTEGER PRIMARY KEY REFERENCES games(id) ON DELETE CASCADE,
+    metadata_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_game_categories (
+    game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+    category TEXT NOT NULL,
+    PRIMARY KEY (game_id, category)
+);
+
+CREATE TRIGGER IF NOT EXISTS user_game_categories_user_only
+BEFORE INSERT ON user_game_categories
+WHEN (SELECT origin FROM games WHERE id = NEW.game_id) != 'user'
+BEGIN
+    SELECT RAISE(ABORT, 'categories require a user game');
+END;
+
 CREATE TABLE IF NOT EXISTS game_tags (
     game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
     tag_id  INTEGER NOT NULL REFERENCES tags(id)  ON DELETE CASCADE,
@@ -97,6 +128,27 @@ CREATE TABLE IF NOT EXISTS local (
     folder_path     TEXT,
     folder_version  TEXT,
     exe_path        TEXT
+);
+
+-- Save directories found by the save scan, one row each. Keyed by path: a game
+-- can keep saves in several places at once (next to its exe and under
+-- %APPDATA%), and the path is the only thing that still identifies a row after
+-- the next scan. game_slug is nullable on purpose - half the point of a scan is
+-- to report saves for a folder the catalogue never matched.
+--
+-- Unlike `local`, this is deliberately not in _BACKUP_TABLES. An install path
+-- at least tells you what the user owns; a save path is meaningless on another
+-- machine and a rescan rebuilds the table from scratch.
+CREATE TABLE IF NOT EXISTS local_saves (
+    path          TEXT PRIMARY KEY,
+    game_slug     TEXT,
+    display_title TEXT,
+    engine        TEXT,
+    source_kind   TEXT,
+    save_count    INTEGER NOT NULL DEFAULT 0,
+    total_size    INTEGER NOT NULL DEFAULT 0,
+    last_modified TEXT,
+    scanned_at    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS state (
@@ -387,6 +439,15 @@ def connect(path=None):
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA)
     _migrate(conn)
+    slg_local_library.ensure_schema(conn)
+    slg_hidden_games.ensure_schema(conn)
+    slg_library_metadata.ensure_schema(conn)
+    conn.execute(
+        "INSERT OR IGNORE INTO game_catalogs(game_id,catalog_id)"
+        " SELECT id,CASE WHEN slug LIKE 'dlsite-rj%' THEN 'dlsite' ELSE 'western_slg' END"
+        " FROM games WHERE origin='site' AND NOT EXISTS"
+        " (SELECT 1 FROM game_catalogs gc WHERE gc.game_id=games.id)")
+    conn.commit()
     return conn
 
 
@@ -532,6 +593,7 @@ def _source_host(source_id):
         "dikgames": "dikgames.com",
         "f95zone": "f95zone.to.it",
         "zyoudao": "zyoudao.net",
+        "dlsite": "www.dlsite.com",
     }.get(str(source_id or "").casefold())
 
 
@@ -546,6 +608,12 @@ def _safe_source_url(source_id, value):
         return None
     host = (parsed.hostname or "").casefold().rstrip(".")
     expected = _source_host(source_id)
+    if source_id == "dlsite":
+        if (parsed.scheme != "https" or host != expected or parsed.username
+                or parsed.password or port not in (None, 443)
+                or not re.fullmatch(r"/[a-z]+/work/=/product_id/RJ\d+\.html", parsed.path)):
+            return None
+        return parsed._replace(query="", fragment="").geturl()
     if expected and host == "www." + expected:
         host = expected
         parsed = parsed._replace(netloc=host)
@@ -573,8 +641,12 @@ def upsert_game_source(conn, source_id, external_id, game_id, source_url=None,
     """Store bounded per-source metadata without overwriting canonical fields."""
     source_id = _source_text(source_id, 32)
     external_id = _source_text(external_id, 128)
-    if source_id not in ("dikgames", "f95zone", "zyoudao") or not external_id:
+    if source_id not in ("dikgames", "f95zone", "zyoudao", "dlsite") or not external_id:
         raise ValueError("unknown catalogue source identity")
+    if source_id == "dlsite" and (
+            not re.fullmatch(r"RJ\d+", external_id) or not _safe_source_url(source_id, source_url)
+            or ("/" + external_id + ".html") not in str(source_url)):
+        raise ValueError("DLsite 来源必须使用官方商品身份和详情 URL。")
     if conn.execute("SELECT 1 FROM games WHERE id = ?", (game_id,)).fetchone() is None:
         raise ValueError("source mapping references a missing game")
     labels = [str(tag).strip()[:48] for tag in (tags or ()) if str(tag).strip()]
@@ -650,10 +722,10 @@ def list_game_sources(conn, game_id, public_only=True):
         "SELECT source_id, source_url FROM game_sources WHERE game_id=?"
         " ORDER BY CASE source_id WHEN 'dikgames' THEN 0"
         " WHEN 'f95zone' THEN 1 ELSE 2 END", (game_id,)).fetchall()
-    allowed = ({"dikgames", "f95zone"} if public_only else
-               {"dikgames", "f95zone", "zyoudao"})
-    labels = {"dikgames": "Dikgames", "f95zone": "F95zone.to.it",
-              "zyoudao": "Zyoudao"}
+    allowed = ({"dikgames", "f95zone", "dlsite"} if public_only else
+               {"dikgames", "f95zone", "zyoudao", "dlsite"})
+    labels = {"dikgames": "Dikgames", "f95zone": "F95zone镜像（f95zone.to.it）",
+              "zyoudao": "Zyoudao", "dlsite": "DLsite"}
     result, seen = [], set()
     for row in rows:
         source_id = row["source_id"]
@@ -678,10 +750,70 @@ def list_game_sources(conn, game_id, public_only=True):
 
 # --- catalogue -----------------------------------------------------------------
 
+def set_game_catalogue(conn, game_id, catalog_id):
+    normalize_catalogue(catalog_id, allow_all=False)
+    row = conn.execute("SELECT origin FROM games WHERE id=?", (game_id,)).fetchone()
+    if not row or row["origin"] != "site":
+        raise ValueError("只有站点游戏可以归入公共目录。")
+    conn.execute("INSERT OR IGNORE INTO game_catalogs VALUES (?,?)", (game_id, catalog_id))
+
+
+def game_catalogues_bulk(conn, game_ids):
+    result = {gid: [] for gid in game_ids}
+    if result:
+        for row in conn.execute(
+                "SELECT game_id,catalog_id FROM game_catalogs WHERE game_id IN"
+                " (SELECT CAST(value AS INTEGER) FROM json_each(?)) ORDER BY catalog_id",
+                (json.dumps(list(result)),)):
+            result[row["game_id"]].append(row["catalog_id"])
+    return {gid: tuple(values) for gid, values in result.items()}
+
+
+_DLSITE_FIELDS = {"rating_value", "rating_count", "rating_scale_max", "work_type",
+                  "release_date", "updated_date", "languages", "age_rating"}
+
+
+def set_dlsite_metadata(conn, game_id, metadata):
+    if not isinstance(metadata, dict) or set(metadata) - _DLSITE_FIELDS:
+        raise ValueError("DLsite 来源元数据格式无效。")
+    for key in ("rating_value", "rating_count", "rating_scale_max"):
+        value = metadata.get(key)
+        if value is not None and (type(value) not in (int, float)
+                                  or not math.isfinite(value) or value < 0):
+            raise ValueError("DLsite 评分元数据格式无效。")
+    if metadata.get("rating_count") is not None and type(metadata["rating_count"]) is not int:
+        raise ValueError("DLsite 评分人数格式无效。")
+    for key in _DLSITE_FIELDS - {"rating_value", "rating_count", "rating_scale_max", "languages"}:
+        if metadata.get(key) is not None and not isinstance(metadata[key], str):
+            raise ValueError("DLsite 来源元数据格式无效。")
+    languages = metadata.get("languages", [])
+    if not isinstance(languages, list) or any(not isinstance(value, str) for value in languages):
+        raise ValueError("DLsite 语言信息格式无效。")
+    row = conn.execute("SELECT origin,slug FROM games WHERE id=?", (game_id,)).fetchone()
+    if not row or row["origin"] != "site" or not re.fullmatch(r"dlsite-rj\d+", row["slug"]):
+        raise ValueError("DLsite 元数据必须关联 DLsite 商品。")
+    set_game_catalogue(conn, game_id, "dlsite")
+    conn.execute("INSERT OR REPLACE INTO game_metadata VALUES (?,?)",
+                 (game_id, json.dumps(metadata, ensure_ascii=False, allow_nan=False)))
+
+
+def get_game_metadata_bulk(conn, game_ids):
+    result = {gid: {} for gid in game_ids}
+    if result:
+        for row in conn.execute(
+                "SELECT game_id,metadata_json FROM game_metadata WHERE game_id IN"
+                " (SELECT CAST(value AS INTEGER) FROM json_each(?))", (json.dumps(list(result)),)):
+            result[row["game_id"]] = json.loads(row["metadata_json"])
+    return result
+
 def upsert_game(conn, slug, url, title, version=None, developer=None,
                 engine=None, rating=None, last_updated=None, tags=(),
                 complete=0, lastmod=None):
     """Insert or refresh one scraped game. Returns (game_id, created)."""
+    if slug.startswith("dlsite-rj"):
+        if not re.fullmatch(r"dlsite-rj\d+", slug):
+            raise ValueError("DLsite 商品身份无效。")
+        rating = None
     now = _now()
     row = conn.execute("SELECT id FROM games WHERE slug = ?", (slug,)).fetchone()
     if row is None:
@@ -716,6 +848,12 @@ def upsert_game(conn, slug, url, title, version=None, developer=None,
             (url, title, version, developer, engine,
              rating, last_updated, int(bool(complete)), now, lastmod, game_id))
     set_tags(conn, game_id, tags)
+    set_game_catalogue(conn, game_id, "dlsite" if slug.startswith("dlsite-rj") else "western_slg")
+    if slug.startswith("dlsite-rj"):
+        conn.execute("UPDATE games SET rating=NULL,heat=NULL WHERE id=?", (game_id,))
+        if _safe_source_url("dlsite", url):
+            upsert_game_source(conn, "dlsite", slug.removeprefix("dlsite-").upper(), game_id,
+                               source_url=url, source_title=title, developer=developer)
     if _safe_source_url("dikgames", url):
         upsert_game_source(
             conn, "dikgames", slug, game_id, source_url=url,
@@ -782,15 +920,12 @@ def import_cover(src_path):
     there under a name the row can point at. A fresh random name avoids stepping
     on a scraped cover and dodges any path weirdness in the source filename.
     """
-    ext = os.path.splitext(src_path)[1].lower() or ".jpg"
-    name = "user_" + uuid.uuid4().hex[:12] + ext
-    shutil.copyfile(src_path, os.path.join(covers_dir(), name))
-    return name
+    return slg_local_library.import_cover(src_path)
 
 
 def add_user_game(conn, title, developer=None, engine=None, version=None,
                   overview=None, cover_file=None, tags=(), folder_path=None,
-                  promoted=0):
+                  promoted=0, categories=()):
     """Insert a game the user added themselves. Returns its id.
 
     The scraper's upsert_game is COALESCE-on-update because two writers share a
@@ -799,6 +934,7 @@ def add_user_game(conn, title, developer=None, engine=None, version=None,
     - and never collides with the dikgames slugs the scraper keys on, which is
     also what keeps a later site sync from ever touching this row.
     """
+    categories = normalize_categories(categories)
     now = _now()
     slug = "user-" + uuid.uuid4().hex[:8]
     cur = conn.execute(
@@ -809,23 +945,26 @@ def add_user_game(conn, title, developer=None, engine=None, version=None,
          overview, cover_file, now, now, int(bool(promoted))))
     game_id = cur.lastrowid
     if folder_path:
-        conn.execute(
-            "INSERT INTO local (game_id, folder_path)"
-            " VALUES (?,?)", (game_id, folder_path))
+        set_local_folder(conn, game_id, folder_path)
     set_tags(conn, game_id, tags, clear=True)
+    set_game_categories(conn, game_id, categories)
     return game_id
 
 
 def update_user_game(conn, game_id, title, developer=None, engine=None,
                      version=None, overview=None, cover_file=None,
-                     tags=(), folder_path=None, promoted=0):
+                     tags=(), folder_path=None, promoted=0, categories=None):
     """Rewrite a game the user added themselves.
 
     The user is the only writer of their own rows, so this is a plain UPDATE,
     not the scraper's COALESCE merge. cover_file=None means "keep the current
     cover", folder_path=None means "keep the current folder"; the edit dialog
     passes them through only when the user actually changed them.
+    categories=None preserves them, while an empty iterable clears them.
     """
+    if categories is not None:
+        categories = normalize_categories(categories)
+        _require_user_game(conn, game_id)
     conn.execute(
         "UPDATE games SET title=?, version=?, developer=?, engine=?,"
         " overview=?, promoted=? WHERE id=?",
@@ -837,6 +976,42 @@ def update_user_game(conn, game_id, title, developer=None, engine=None,
     if folder_path:
         set_local_folder(conn, game_id, folder_path)
     set_tags(conn, game_id, tags, clear=True)
+    if categories is not None:
+        set_game_categories(conn, game_id, categories)
+
+
+def _require_user_game(conn, game_id):
+    row = conn.execute("SELECT origin FROM games WHERE id=?", (game_id,)).fetchone()
+    if row is None or row["origin"] != "user":
+        raise ValueError("只有自建游戏可以设置分类。")
+
+
+def set_game_categories(conn, game_id, categories):
+    """Replace only a user game's fixed categories; empty clears them."""
+    categories = normalize_categories(categories)
+    _require_user_game(conn, game_id)
+    conn.execute("DELETE FROM user_game_categories WHERE game_id=?", (game_id,))
+    conn.executemany(
+        "INSERT INTO user_game_categories(game_id,category) VALUES (?,?)",
+        [(game_id, category) for category in categories])
+
+
+def game_categories_bulk(conn, game_ids):
+    """Fetch categories for an entire result set without per-card queries."""
+    ids = tuple(dict.fromkeys(game_ids))
+    result = {game_id: [] for game_id in ids}
+    if ids:
+        for row in conn.execute(
+                "SELECT game_id,category FROM user_game_categories"
+                " WHERE game_id IN (SELECT CAST(value AS INTEGER) FROM json_each(?))",
+                (json.dumps(ids),)):
+            result[row["game_id"]].append(row["category"])
+    return {game_id: normalize_categories(categories)
+            for game_id, categories in result.items()}
+
+
+def game_categories(conn, game_id):
+    return game_categories_bulk(conn, (game_id,))[game_id]
 
 
 def delete_game(conn, game_id):
@@ -855,6 +1030,24 @@ def set_local_folder(conn, game_id, folder_path, folder_version=None):
     Used when the user binds an unmatched folder by hand, where there is no
     Ren'Py probe or size measurement - just the path and the version in its name.
     """
+    old = conn.execute("SELECT folder_path,exe_path FROM local WHERE game_id=?", (game_id,)).fetchone()
+    def canonical(path):
+        return os.path.normcase(os.path.realpath(os.path.abspath(path)))
+    if old and old["folder_path"] and folder_path:
+        changed = canonical(old["folder_path"]) != canonical(folder_path)
+    else:
+        changed = bool(old and old["folder_path"] != folder_path)
+    if changed and old["exe_path"]:
+        # An exe-only registration must not survive binding an unrelated folder.
+        # Resolve links as well as case and '..'; textual prefixes are unsafe.
+        keep = False
+        if folder_path and os.path.isfile(old["exe_path"]):
+            try:
+                keep = os.path.commonpath((canonical(folder_path), canonical(old["exe_path"]))) == canonical(folder_path)
+            except ValueError:  # different Windows drives
+                pass
+        if not keep:
+            conn.execute("UPDATE local SET exe_path=NULL WHERE game_id=?", (game_id,))
     conn.execute(
         "INSERT INTO local (game_id, folder_path, folder_version)"
         " VALUES (?,?,?)"
@@ -862,6 +1055,10 @@ def set_local_folder(conn, game_id, folder_path, folder_version=None):
         " folder_path=excluded.folder_path,"
         " folder_version=excluded.folder_version",
         (game_id, folder_path, folder_version))
+    if folder_path and os.path.isdir(folder_path):
+        conn.execute("INSERT INTO state(game_id,status) VALUES (?,'downloaded')"
+                     " ON CONFLICT(game_id) DO UPDATE SET status=excluded.status"
+                     " WHERE state.status IS NULL OR state.status=''", (game_id,))
 
 
 def set_local_exe(conn, game_id, exe_path):
@@ -879,6 +1076,47 @@ def add_alias(conn, game_id, alias, source="user"):
     conn.execute(
         "INSERT OR IGNORE INTO game_aliases (game_id, alias, source)"
         " VALUES (?,?,?)", (game_id, alias, source))
+
+
+def set_local_save(conn, path, game_slug=None, display_title=None, engine=None,
+                   source_kind=None, save_count=0, total_size=0,
+                   last_modified=None, scanned_at=None):
+    """Record one save directory, replacing whatever the last scan put there."""
+    conn.execute(
+        "INSERT INTO local_saves (path, game_slug, display_title, engine,"
+        " source_kind, save_count, total_size, last_modified, scanned_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(path) DO UPDATE SET"
+        " game_slug=excluded.game_slug,"
+        " display_title=excluded.display_title,"
+        " engine=excluded.engine,"
+        " source_kind=excluded.source_kind,"
+        " save_count=excluded.save_count,"
+        " total_size=excluded.total_size,"
+        " last_modified=excluded.last_modified,"
+        " scanned_at=excluded.scanned_at",
+        (path, game_slug, display_title, engine, source_kind,
+         int(save_count), int(total_size), last_modified, scanned_at))
+
+
+def list_local_saves(conn):
+    """Every scanned save directory, largest first.
+
+    The catalogue's own title wins over the scan's label so a row reads the
+    same as the card it belongs to; the scan's label is the fallback for a
+    folder that never matched a game.
+    """
+    return conn.execute(
+        "SELECT s.path, s.game_slug, s.engine, s.source_kind, s.save_count,"
+        " s.total_size, s.last_modified, s.scanned_at,"
+        " COALESCE(NULLIF(g.title, ''), s.display_title, s.path) AS title"
+        " FROM local_saves s LEFT JOIN games g ON g.slug = s.game_slug"
+        " ORDER BY s.total_size DESC, s.path").fetchall()
+
+
+def clear_local_saves(conn):
+    """Drop every row. A scan rebuilds the table from scratch."""
+    conn.execute("DELETE FROM local_saves")
 
 
 def promote_game(conn, game_id, on=True):
@@ -940,7 +1178,7 @@ def backfill_heat(conn, log=print, on_progress=None):
     over exactly those rows, so it finishes in seconds.
     """
     rows = conn.execute(
-        "SELECT id FROM games WHERE heat IS NULL"
+        "SELECT id FROM games WHERE heat IS NULL AND slug NOT LIKE 'dlsite-rj%'"
         " AND (rating IS NOT NULL OR site_views IS NOT NULL"
         "      OR site_likes IS NOT NULL OR site_comments IS NOT NULL)"
         " ORDER BY last_updated DESC").fetchall()
@@ -956,9 +1194,19 @@ def backfill_heat(conn, log=print, on_progress=None):
     return done
 
 
+def migrate_legacy_heat(conn):
+    """One-time local compatibility pass; never invent missing source metrics."""
+    key = "migration.heat.0270"
+    if get_pref(conn, key) == "1":
+        return 0
+    done = backfill_heat(conn, log=lambda _: None)
+    set_pref(conn, key, "1")
+    return done
+
+
 def upsert_detail(conn, game_id, rating=None, version=None, developer=None,
                   overview=None, site_views=None, site_likes=None,
-                  site_comments=None):
+                  site_comments=None, commit=True):
     """Merge what only the detail page knows.
 
     Never clobbers a value with NULL, and never walks the version backwards.
@@ -982,7 +1230,8 @@ def upsert_detail(conn, game_id, rating=None, version=None, developer=None,
     if sets:
         params.append(game_id)
         conn.execute("UPDATE games SET %s WHERE id = ?" % ", ".join(sets), params)
-        conn.commit()
+        if commit:
+            conn.commit()
         _recompute_heat(conn, game_id)
 
 
@@ -991,17 +1240,29 @@ def upsert_detail(conn, game_id, rating=None, version=None, developer=None,
 def find_games(conn, include=(), exclude=(), search=None, statuses=None,
                downloaded_only=False, collection_id=None,
                origin="main", sort="score", desc=True,
-               translation_ids=None):
+               translation_ids=None, category_ids=(), uncategorized=False, catalog_id=None,
+               with_scores=True, catalogue_cache=None,
+               dlsite_languages=(), dlsite_work_types=(), hidden_mode="exclude"):
     """Games matching a tag intersection (include) minus a tag union (exclude).
 
     include is an AND: every tag listed must be present. exclude is a NOT:
     any one of them is enough to drop the row.
+    On the user view, category_ids are an OR; uncategorized additionally
+    includes games with no category. Other views ignore these local filters.
+    Returns dictionaries with a categories tuple fetched in one batch.
 
     origin controls which games the result may contain:
       'main' - the catalogue plus user games the user promoted into it.
       'user' - only games the user added themselves (the sidebar's own view).
       None   - no origin filter (maintenance paths that need every row).
     """
+    if hidden_mode not in ("exclude", "only", "all"):
+        raise ValueError("Unknown hidden mode")
+    category_ids = normalize_categories(category_ids)
+    if catalog_id is not None:
+        normalize_catalogue(catalog_id)
+    if sort == "source_rating" and catalog_id != "dlsite":
+        raise ValueError("来源评分只支持 DLsite 目录内排序。")
     where, params = [], []
     # Safe catalogue redirects preserve the old row for recovery, but expose
     # only its canonical card in normal library queries. Conflicting redirects
@@ -1009,10 +1270,34 @@ def find_games(conn, include=(), exclude=(), search=None, statuses=None,
     where.append("NOT EXISTS (SELECT 1 FROM catalog_redirects cr"
                  " WHERE cr.old_slug = g.slug AND cr.active = 1)")
 
+    if hidden_mode != "all":
+        where.append(slg_hidden_games.visibility_sql(conn, hidden=hidden_mode == "only"))
+
     if origin == "main":
         where.append("(g.origin = 'site' OR g.promoted = 1)")
+    elif origin == "local":
+        where.append(slg_local_library.LOCAL_LIBRARY_SQL)
     elif origin == "user":
         where.append("g.origin = 'user'")
+        category_where = []
+        if category_ids:
+            qmarks = ",".join("?" * len(category_ids))
+            category_where.append(
+                "g.id IN (SELECT uc.game_id FROM user_game_categories uc"
+                " WHERE uc.category IN (%s))" % qmarks)
+            params.extend(category_ids)
+        if uncategorized:
+            category_where.append(
+                "NOT EXISTS (SELECT 1 FROM user_game_categories uc WHERE uc.game_id=g.id)")
+        if category_where:
+            where.append("(" + " OR ".join(category_where) + ")")
+
+    if origin not in ("user", "local") and catalog_id not in (None, "all"):
+        membership = "g.id IN (SELECT game_id FROM game_catalogs WHERE catalog_id=?)"
+        if catalog_id == "western_slg":
+            membership = "(" + membership + " OR (g.origin='user' AND g.promoted=1))"
+        where.append(membership)
+        params.append(catalog_id)
 
     if include:
         qmarks = ",".join("?" * len(include))
@@ -1052,7 +1337,17 @@ def find_games(conn, include=(), exclude=(), search=None, statuses=None,
                                             for game_id in translation_ids
                                             if _int_or_none(game_id) is not None}))
                           )
+        if catalog_id in ("dlsite", "all") or origin == "local":
+            clause, values = slg_dlsite_client.search_clause(search)
+            search_parts.append(clause)
+            params.extend(values)
         where.append("(" + " OR ".join(search_parts) + ")")
+
+    clauses, values = slg_dlsite_client.filter_clauses(
+        catalog_id if origin not in ("user", "local") else None,
+        dlsite_languages, dlsite_work_types)
+    where.extend(clauses)
+    params.extend(values)
 
     if statuses:
         qmarks = ",".join("?" * len(statuses))
@@ -1070,11 +1365,11 @@ def find_games(conn, include=(), exclude=(), search=None, statuses=None,
     sql = """
         SELECT g.*, s.status, s.my_rating, l.folder_path, l.folder_version,
                l.exe_path,
-               COALESCE((SELECT AVG(my_rating - 3.0) FROM state
-                         WHERE my_rating IS NOT NULL), 0)
+               COALESCE((SELECT AVG(ss.my_rating - 3.0) FROM state ss JOIN games sg ON sg.id=ss.game_id
+                         WHERE ss.my_rating IS NOT NULL AND ((sg.origin='site' AND sg.slug NOT LIKE 'dlsite-rj%') OR (sg.origin='user' AND sg.promoted=1))), 0)
              + (COALESCE(g.rating, 0)
                 - COALESCE((SELECT AVG(rating) FROM games
-                            WHERE rating IS NOT NULL), 0))
+                            WHERE rating IS NOT NULL AND ((origin='site' AND slug NOT LIKE 'dlsite-rj%') OR (origin='user' AND promoted=1))), 0))
              + COALESCE((SELECT SUM(w.weight) FROM game_tags gt
                          JOIN weights w ON w.tag_id = gt.tag_id
                          WHERE gt.game_id = g.id), 0)
@@ -1086,6 +1381,13 @@ def find_games(conn, include=(), exclude=(), search=None, statuses=None,
         LEFT JOIN state s ON s.game_id = g.id
         LEFT JOIN local l ON l.game_id = g.id
     """
+    if not with_scores and sort in ("title", "updated", "rating", "heat", "source_rating"):
+        # The GUI does not display xp scores outside recommendation sorting.
+        # Skip correlated recommendation aggregates there, while the public
+        # database API keeps its historical complete-score default.
+        start = sql.index("COALESCE((SELECT AVG(ss.my_rating")
+        end = sql.index(" AS score", start)
+        sql = sql[:start] + "NULL" + sql[end:]
     if where:
         sql += " WHERE " + " AND ".join(where)
 
@@ -1101,10 +1403,52 @@ def find_games(conn, include=(), exclude=(), search=None, statuses=None,
         # (col IS NULL) leads so unrated rows sink in both directions. 985
         # rows have no rating, and plain ASC would open the list with all of
         # them; score is COALESCEd, so its guard is free.
-        order = "(%s IS NULL), %s %s, g.title COLLATE NOCASE" % (
-            column, column, direction)
+        if column == "score":
+            # Every score term is COALESCE'd, so its value cannot be NULL.
+            # A redundant NULL guard makes SQLite evaluate the correlated
+            # tag/affinity sums again for every game while sorting.
+            order = "score %s, g.title COLLATE NOCASE" % direction
+        else:
+            order = "(%s IS NULL), %s %s, g.title COLLATE NOCASE" % (
+                column, column, direction)
     sql += " ORDER BY " + order
-    return conn.execute(sql, params).fetchall()
+    cursor = conn.execute(sql, params)
+    # sqlite3.Row's name lookup scans its column names. dict(row) performs
+    # that scan for every field; pairing positional values with one shared
+    # column list avoids quadratic work across thousands of game records.
+    columns = tuple(column[0] for column in cursor.description)
+    rows = [dict(zip(columns, row)) for row in cursor]
+    categories = game_categories_bulk(
+        conn, [row["id"] for row in rows if row["origin"] == "user"])
+    site_ids = [row["id"] for row in rows if row["origin"] == "site"]
+    if catalogue_cache is None:
+        facts = {}
+    else:
+        stamp = (conn, conn.total_changes, conn.execute("PRAGMA data_version").fetchone()[0])
+        if catalogue_cache.get("stamp") != stamp:
+            catalogue_cache.clear()
+            catalogue_cache.update(stamp=stamp, facts={})
+        facts = catalogue_cache["facts"]
+    unknown = [gid for gid in site_ids if gid not in facts]
+    catalogue_ids = game_catalogues_bulk(conn, unknown)
+    metadata = get_game_metadata_bulk(conn, [gid for gid in unknown
+                                           if "dlsite" in catalogue_ids.get(gid, ())])
+    for gid in unknown:
+        facts[gid] = (catalogue_ids.get(gid, ()), metadata.get(gid, {}))
+    for row in rows:
+        row["categories"] = categories.get(row["id"], ())
+        ids, source_facts = facts.get(row["id"], ((), {}))
+        row["catalog_ids"] = ids
+        row["source_metadata"] = dict(source_facts)
+        if "languages" in source_facts:
+            row["source_metadata"]["languages"] = list(source_facts["languages"])
+    if sort == "source_rating":
+        rows.sort(key=lambda row: row["title"].casefold())
+        rated = [row for row in rows if row["source_metadata"].get("rating_value") is not None]
+        unrated = [row for row in rows if row["source_metadata"].get("rating_value") is None]
+        rated.sort(key=lambda row: row["source_metadata"]["rating_value"], reverse=desc)
+        rows = rated + unrated
+    return slg_local_library.apply_cover_overrides(conn, rows, in_place=True)
 
 
 def game_tags(conn, game_id):
@@ -1136,17 +1480,32 @@ def game_tags_bulk(conn, game_ids):
     return out
 
 
-def tag_counts(conn, limit=None):
+def tag_counts(conn, limit=None, catalog_id=None):
     sql = ("SELECT t.name, COUNT(*) AS n FROM tags t"
            " JOIN game_tags gt ON gt.tag_id = t.id"
-           " GROUP BY t.id ORDER BY n DESC, t.name")
+           " JOIN games g ON g.id=gt.game_id")
+    params = []
+    if catalog_id == "all":
+        sql += " WHERE (g.origin='site' OR (g.origin='user' AND g.promoted=1))"
+    if catalog_id not in (None, "all"):
+        normalize_catalogue(catalog_id)
+        sql += " WHERE (g.id IN (SELECT game_id FROM game_catalogs WHERE catalog_id=?)"
+        if catalog_id == "western_slg":
+            sql += " OR (g.origin='user' AND g.promoted=1)"
+        sql += ")"
+        params.append(catalog_id)
+    if catalog_id is not None:
+        sql += " AND NOT EXISTS (SELECT 1 FROM catalog_redirects cr WHERE cr.old_slug=g.slug AND cr.active=1)"
+    sql += (" AND " if " WHERE " in sql else " WHERE ") + slg_hidden_games.visibility_sql(conn)
+    sql += " GROUP BY t.id ORDER BY n DESC, t.name"
     if limit:
         sql += " LIMIT %d" % int(limit)
-    return conn.execute(sql).fetchall()
+    return conn.execute(sql, params).fetchall()
 
 
 def get_game(conn, game_id):
-    return conn.execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
+    row = conn.execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
+    return slg_local_library.apply_cover_overrides(conn, [dict(row)])[0] if row else None
 
 
 # One filesystem call per stored cover. On a large local catalogue this cold
@@ -1176,7 +1535,7 @@ def missing_cover_files(conn, ttl=_COVER_GAP_TTL):
         now = time.monotonic()
         if _missing_covers is not None and now - _missing_covers[1] < ttl:
             return _missing_covers[0]
-        rows = conn.execute("SELECT cover_file FROM games WHERE origin = 'site'"
+        rows = conn.execute("SELECT cover_file FROM games WHERE origin = 'site' AND slug NOT LIKE 'dlsite-rj%'"
                             " AND cover_file IS NOT NULL AND cover_file NOT LIKE 'pending:%'"
                             ).fetchall()
         directory = covers_dir()
@@ -1192,6 +1551,7 @@ def missing_cover_files(conn, ttl=_COVER_GAP_TTL):
 # sit unread - which is the shape of the bug this counter exists to expose.
 _METRICS_GAP_SQL = (
     "FROM games WHERE url IS NOT NULL AND fetch_failures < 3"
+    " AND origin='site' AND slug NOT LIKE 'dlsite-rj%'"
     " AND (site_views IS NULL OR site_likes IS NULL OR site_comments IS NULL)")
 
 
@@ -1225,13 +1585,13 @@ def data_gaps(conn):
     """
     one = lambda sql: conn.execute(sql).fetchone()[0]  # noqa: E731
     return {
-        "covers": one("SELECT COUNT(*) FROM games WHERE origin = 'site'"
+        "covers": one("SELECT COUNT(*) FROM games WHERE origin = 'site' AND slug NOT LIKE 'dlsite-rj%'"
                       " AND cover_file LIKE 'pending:%'")
         + missing_cover_files(conn),
-        "rating": one("SELECT COUNT(*) FROM games WHERE rating IS NULL"),
-        "overview": one("SELECT COUNT(*) FROM games WHERE origin = 'site'"
+        "rating": one("SELECT COUNT(*) FROM games WHERE rating IS NULL AND slug NOT LIKE 'dlsite-rj%'"),
+        "overview": one("SELECT COUNT(*) FROM games WHERE origin = 'site' AND slug NOT LIKE 'dlsite-rj%'"
                         " AND (overview IS NULL OR TRIM(overview) = '')"),
-        "heat": one("SELECT COUNT(*) FROM games WHERE heat IS NULL"
+        "heat": one("SELECT COUNT(*) FROM games WHERE heat IS NULL AND slug NOT LIKE 'dlsite-rj%'"
                     " AND (rating IS NOT NULL OR site_views IS NOT NULL"
                     "      OR site_likes IS NOT NULL OR site_comments IS NOT NULL)"),
         "metrics": metrics_gap_count(conn),
@@ -1579,7 +1939,7 @@ def _finish_wishlist_write(conn, savepoint, owns_transaction, error=False):
         conn.execute("RELEASE SAVEPOINT " + savepoint)
 
 
-def wishlist_version_changes(conn):
+def wishlist_version_changes(conn, catalog_id=None):
     """Return newer site versions for wanted games that are not installed.
 
     The first observed version is only a baseline, not a notification. A missing
@@ -1587,6 +1947,13 @@ def wishlist_version_changes(conn):
     Pending changes are derived from the saved seen version, so repeated calls
     keep returning them until mark_wishlist_version_seen() advances that value.
     """
+    if catalog_id is not None:
+        normalize_catalogue(catalog_id)
+    catalog_sql = ""
+    params = []
+    if catalog_id not in (None, "all"):
+        catalog_sql = " AND g.id IN (SELECT game_id FROM game_catalogs WHERE catalog_id=?)"
+        params.append(catalog_id)
     savepoint = "wishlist_version_changes"
     owns_transaction = _wishlist_write_scope(conn, savepoint)
     changes = []
@@ -1599,7 +1966,8 @@ def wishlist_version_changes(conn):
             " LEFT JOIN local l ON l.game_id = g.id"
             " LEFT JOIN wishlist_version_seen v ON v.game_id = g.id"
             " WHERE l.game_id IS NULL"
-            " ORDER BY g.title COLLATE NOCASE").fetchall()
+            + " AND " + slg_hidden_games.visibility_sql(conn)
+            + catalog_sql + " ORDER BY g.title COLLATE NOCASE", params).fetchall()
         for row in rows:
             current = str(row["version"] or "").strip() or None
             seen = str(row["seen_version"] or "").strip() or None
@@ -1892,6 +2260,10 @@ def export_user_data(conn):
         " JOIN games g ON g.id = gt.game_id"
         " JOIN tags t ON t.id = gt.tag_id"
         " WHERE g.origin = 'user' ORDER BY g.slug, t.name")]
+    out["user_game_categories"] = [dict(r) for r in conn.execute(
+        "SELECT g.slug, uc.category FROM user_game_categories uc"
+        " JOIN games g ON g.id=uc.game_id"
+        " WHERE g.origin='user' ORDER BY g.slug, uc.category")]
     out["user_local"] = [dict(r) for r in conn.execute(
         "SELECT g.slug, l.folder_path, l.folder_version, l.exe_path"
         " FROM local l JOIN games g ON g.id = l.game_id"
@@ -1899,10 +2271,22 @@ def export_user_data(conn):
     out["user_game_aliases"] = [dict(r) for r in conn.execute(
         "SELECT g.slug, a.alias, a.source FROM game_aliases a"
         " JOIN games g ON g.id = a.game_id WHERE g.origin = 'user'")]
+    out["catalogue_requirements"] = [dict(r) for r in conn.execute(
+        "SELECT DISTINCT g.slug AS game_slug,gc.catalog_id FROM games g"
+        " JOIN game_catalogs gc ON gc.game_id=g.id WHERE g.origin='site' AND"
+        " (g.id IN (SELECT game_id FROM state) OR g.id IN (SELECT game_id FROM collection_items) OR g.id IN (SELECT game_id FROM hidden_games))"
+        " ORDER BY g.slug,gc.catalog_id")]
+    out.update(slg_local_library.export_sections(conn))
+    out.update(slg_hidden_games.export_sections(conn))
+    out.update(slg_library_metadata.export_sections(conn))
     return out
 
 
 _BACKUP_FIELDS = {
+    **slg_library_metadata.BACKUP_FIELDS,
+    **slg_hidden_games.BACKUP_FIELDS,
+    **slg_local_library.BACKUP_FIELDS,
+    "catalogue_requirements": {"game_slug", "catalog_id"},
     "state": {"game_id", "game_slug", "status", "note", "my_rating", "updated_at"},
     "exclusions": {"tag", "source"},
     "collections": {"id", "name", "created_at"},
@@ -1913,11 +2297,17 @@ _BACKUP_FIELDS = {
     "owned_titles": {"title_id", "acquired_at", "source", "seal"},
     "user_games": set(_USER_GAME_COLS) | {"id"},
     "user_game_tags": {"slug", "name"},
+    "user_game_categories": {"slug", "category"},
     "user_local": {"slug", "folder_path", "folder_version", "exe_path"},
     "user_game_aliases": {"slug", "alias", "source"},
 }
 
 _BACKUP_REQUIRED_FIELDS = {
+    **slg_library_metadata.BACKUP_FIELDS,
+    **slg_hidden_games.BACKUP_FIELDS,
+    "cover_overrides": {"slug", "cover_file"},
+    "local_bindings": {"slug"},
+    "catalogue_requirements": {"game_slug", "catalog_id"},
     "state": {"game_slug"},
     "exclusions": {"tag"},
     "collections": {"name"},
@@ -1928,11 +2318,16 @@ _BACKUP_REQUIRED_FIELDS = {
     "owned_titles": {"title_id", "acquired_at", "source"},
     "user_games": {"slug", "url", "title", "first_seen"},
     "user_game_tags": {"slug", "name"},
+    "user_game_categories": {"slug", "category"},
     "user_local": {"slug"},
     "user_game_aliases": {"slug", "alias"},
 }
 
 _BACKUP_STRING_FIELDS = {
+    **slg_library_metadata.BACKUP_FIELDS,
+    **slg_hidden_games.BACKUP_FIELDS,
+    **slg_local_library.BACKUP_FIELDS,
+    "catalogue_requirements": {"game_slug", "catalog_id"},
     "state": {"game_slug", "status", "note", "updated_at"},
     "exclusions": {"tag", "source"},
     "collections": {"name", "created_at"},
@@ -1945,6 +2340,7 @@ _BACKUP_STRING_FIELDS = {
                    "last_updated", "overview", "cover_file", "first_seen",
                    "last_synced", "lastmod", "origin"},
     "user_game_tags": {"slug", "name"},
+    "user_game_categories": {"slug", "category"},
     "user_local": {"slug", "folder_path", "folder_version", "exe_path"},
     "user_game_aliases": {"slug", "alias", "source"},
 }
@@ -1971,6 +2367,9 @@ def validate_user_data(data):
     """
     if not isinstance(data, dict):
         raise ValueError("备份内容必须是 JSON 对象。")
+    slg_local_library.validate_sections(data)
+    slg_hidden_games.validate_sections(data)
+    slg_library_metadata.validate_sections(data)
     unknown_sections = set(data) - set(_BACKUP_FIELDS)
     if unknown_sections:
         raise ValueError("备份包含无法识别的数据项。")
@@ -2030,7 +2429,11 @@ def validate_user_data(data):
                 value = record[field]
                 if value is None or (isinstance(value, str) and not value.strip()):
                     raise ValueError("备份中的 %s.%s 不能为空。" % (location, field))
-            if section == "user_local" and any(
+            if section == "user_game_categories":
+                normalize_categories((record["category"],))
+            if section == "catalogue_requirements":
+                normalize_catalogue(record["catalog_id"], allow_all=False)
+            if section == ("local_bindings" if "local_bindings" in data else "user_local") and any(
                     record.get(key) for key in ("folder_path", "exe_path")):
                 local_path_count += 1
 
@@ -2053,6 +2456,28 @@ def import_user_data(conn, data):
     in this library.
     """
     validate_user_data(data)
+    slg_local_library.validate_sections(data, conn)
+    slg_hidden_games.validate_sections(data, conn)
+    for record in data.get("user_games", []):
+        if record.get("origin", "user") != "user":
+            raise ValueError("自建游戏备份身份无效。")
+        existing = conn.execute("SELECT origin FROM games WHERE slug=?", (record["slug"],)).fetchone()
+        if existing is not None and existing["origin"] != "user":
+            raise ValueError("自建游戏备份不能覆盖公共目录身份。")
+    # Check catalogue dependencies before clearing even one personal table.
+    # Old backups without explicit dependencies keep legacy unknown-slug
+    # behavior, except a missing DLsite reference must never silently vanish.
+    for rec in data.get("catalogue_requirements", []):
+        if conn.execute(
+                "SELECT 1 FROM games g JOIN game_catalogs gc ON gc.game_id=g.id"
+                " WHERE g.slug=? AND g.origin='site' AND gc.catalog_id=?",
+                (rec["game_slug"], rec["catalog_id"])).fetchone() is None:
+            raise ValueError("请先导入备份需要的游戏目录：" + rec["catalog_id"])
+    for section in ("state", "collection_items"):
+        for rec in data.get(section, []):
+            slug = rec.get("game_slug") or ""
+            if slug.startswith("dlsite-rj") and _game_id_by_slug(conn, slug) is None:
+                raise ValueError("请先导入备份需要的 DLsite 游戏目录。")
 
     def load(table, cols, records):
         if not records:
@@ -2085,6 +2510,9 @@ def import_user_data(conn, data):
                 continue
             load(table, cols, data.get(table, []))
         _import_user_games(conn, data)
+        slg_library_metadata.import_sections(conn, data)
+        slg_hidden_games.import_sections(conn, data)
+        restore_warnings = slg_local_library.import_sections(conn, data)
         _import_game_rows(conn, "state", data.get("state", []))
         _import_game_rows(conn, "collection_items", data.get("collection_items", []))
         conn.execute("RELEASE SAVEPOINT " + savepoint)
@@ -2093,6 +2521,7 @@ def import_user_data(conn, data):
         conn.execute("RELEASE SAVEPOINT " + savepoint)
         raise
     invalidate_ledger(conn)
+    return restore_warnings
 
 
 def _import_game_rows(conn, table, records):
@@ -2118,11 +2547,12 @@ def _import_game_rows(conn, table, records):
 
 
 def _import_user_games(conn, data):
+    restored_ids = set()
     for rec in data.get("user_games", []):
         slug = rec.get("slug")
         if not slug:
             continue
-        values = tuple(rec.get(c) for c in _USER_GAME_COLS)
+        values = tuple("user" if c == "origin" else rec.get(c) for c in _USER_GAME_COLS)
         row = conn.execute("SELECT id FROM games WHERE slug = ?", (slug,)).fetchone()
         if row is None:
             qmarks = ",".join("?" * len(_USER_GAME_COLS))
@@ -2133,6 +2563,21 @@ def _import_user_games(conn, data):
             sets = ",".join("%s = ?" % c for c in _USER_GAME_COLS)
             conn.execute("UPDATE games SET %s WHERE id = ?" % sets,
                          values + (row["id"],))
+
+        # Categories describe the restored snapshot of each user game. Old
+        # backups have no section and therefore restore these games as
+        # unclassified, without clearing other local user games.
+        restored_id = _game_id_by_slug(conn, slug)
+        _require_user_game(conn, restored_id)
+        restored_ids.add(restored_id)
+        conn.execute("DELETE FROM user_game_categories WHERE game_id=?", (restored_id,))
+
+    for rec in data.get("user_game_categories", []):
+        game_id = _game_id_by_slug(conn, rec["slug"])
+        if game_id in restored_ids:
+            conn.execute(
+                "INSERT OR IGNORE INTO user_game_categories(game_id,category) VALUES (?,?)",
+                (game_id, rec["category"]))
 
     for rec in data.get("user_game_tags", []):
         game_id = _game_id_by_slug(conn, rec.get("slug"))
@@ -2171,8 +2616,10 @@ def _import_user_games(conn, data):
 # ratings, notes, collections, comments, prefs and translation caches that
 # belong to whoever built the library.
 _PRIVATE_TABLES = (
+    "personal_game_metadata",
+    "hidden_games",
     "state", "collections", "collection_items", "comments", "prefs",
-    "exclusions", "local", "game_aliases", "weights", "affinities",
+    "exclusions", "local", "game_cover_overrides", "game_aliases", "weights", "affinities",
     "sync_log", "translations", "manual_translations",
     "points_log", "signin", "owned_titles", "source_sync_state",
     "wishlist_version_seen", "catalog_redirects", "pending_game_redirects",
@@ -2192,6 +2639,8 @@ def strip_to_site_catalogue(db_path):
     try:
         for table in _PRIVATE_TABLES:
             conn.execute("DROP TABLE IF EXISTS %s" % table)
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='game_cover_overrides'").fetchone():
+            conn.execute("DELETE FROM game_cover_overrides")
         cols = {r[1] for r in conn.execute("PRAGMA table_info(games)")}
         if "origin" in cols:
             conn.execute("DELETE FROM games WHERE origin IS NULL OR origin != 'site'")
@@ -2224,16 +2673,18 @@ def recompute_weights(conn, commit=True):
     """
     conn.execute("DELETE FROM weights")
     conn.execute("DELETE FROM affinities")
-    total_games = conn.execute("SELECT COUNT(*) FROM games").fetchone()[0] or 1
+    scope = "((g.origin='site' AND g.slug NOT LIKE 'dlsite-rj%') OR (g.origin='user' AND g.promoted=1))"
+    total_games = conn.execute("SELECT COUNT(*) FROM games g WHERE " + scope).fetchone()[0] or 1
     doc_freq = {r["tag_id"]: r["n"] for r in conn.execute(
-        "SELECT tag_id, COUNT(*) AS n FROM game_tags GROUP BY tag_id").fetchall()}
+        "SELECT gt.tag_id, COUNT(*) AS n FROM game_tags gt JOIN games g ON g.id=gt.game_id WHERE " + scope + " GROUP BY gt.tag_id").fetchall()}
     rows = conn.execute("""
         SELECT gt.tag_id, SUM(s.my_rating - 3.0) AS total, COUNT(*) AS n
         FROM state s
         JOIN game_tags gt ON gt.game_id = s.game_id
-        WHERE s.my_rating IS NOT NULL
+        JOIN games g ON g.id=s.game_id
+        WHERE s.my_rating IS NOT NULL AND %s
         GROUP BY gt.tag_id
-    """).fetchall()
+    """ % scope).fetchall()
     conn.executemany(
         "INSERT INTO weights (tag_id, weight, sample_count) VALUES (?,?,?)",
         [(r["tag_id"],
@@ -2255,7 +2706,7 @@ def _recompute_affinity(conn, kind):
     rows = conn.execute(
         "SELECT %s AS name, SUM(s.my_rating - 3.0) AS total, COUNT(*) AS n"
         " FROM state s JOIN games g ON g.id = s.game_id"
-        " WHERE s.my_rating IS NOT NULL AND %s IS NOT NULL AND %s != ''"
+        " WHERE s.my_rating IS NOT NULL AND ((g.origin='site' AND g.slug NOT LIKE 'dlsite-rj%%') OR (g.origin='user' AND g.promoted=1)) AND %s IS NOT NULL AND %s != ''"
         " GROUP BY %s" % (kind, kind, kind, kind)).fetchall()
     conn.executemany(
         "INSERT INTO affinities (kind, name, weight, sample_count) VALUES (?,?,?,?)",
@@ -2626,6 +3077,27 @@ def stats(conn):
         "rated": one("SELECT COUNT(*) FROM state WHERE my_rating IS NOT NULL"),
         "last_sync": one("SELECT MAX(ran_at) FROM sync_log"),
     }
+
+
+def catalogue_stats(conn, catalog_id=None):
+    """Cheap directory-scoped counters for the public library footer."""
+    if catalog_id is not None:
+        normalize_catalogue(catalog_id)
+    where = "g.origin='site' OR (g.origin='user' AND g.promoted=1)"
+    params = []
+    if catalog_id not in (None, "all"):
+        where = "g.id IN (SELECT game_id FROM game_catalogs WHERE catalog_id=?)"
+        if catalog_id == "western_slg":
+            where += " OR (g.origin='user' AND g.promoted=1)"
+        params.append(catalog_id)
+    def count(extra=""):
+        return conn.execute("SELECT COUNT(*) FROM games g WHERE (" + where + ")"
+                            " AND NOT EXISTS (SELECT 1 FROM catalog_redirects cr WHERE cr.old_slug=g.slug AND cr.active=1)"
+                            + " AND " + slg_hidden_games.visibility_sql(conn) + extra, params).fetchone()[0]
+    return {"games": count(), "tags": len(tag_counts(conn, catalog_id=catalog_id)),
+            "downloaded": count(" AND g.id IN (SELECT game_id FROM local)"),
+            "rated": count(" AND g.id IN (SELECT game_id FROM state WHERE my_rating IS NOT NULL)"),
+            "last_sync": conn.execute("SELECT MAX(ran_at) FROM sync_log").fetchone()[0]}
 
 
 # --- profile / usage counters --------------------------------------------------

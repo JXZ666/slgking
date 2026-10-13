@@ -24,7 +24,7 @@ def fix_console():
             pass
 
 
-def log_crash(exc, val, tb, path):
+def log_crash(exc, val, tb, path, source="legacy"):
     """Append a traceback to `path`. Returns the text, or "" if nothing stuck.
 
     A windowless build (`console=False`) has `sys.stderr is None`, so tkinter's
@@ -34,13 +34,8 @@ def log_crash(exc, val, tb, path):
     a file is the only thing that survives that, so the next report is a stack
     trace instead of a description.
     """
-    text = "".join(traceback.format_exception(exc, val, tb))
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write("\n===== %s =====\n"
-                     % datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-            fh.write(text)
-    except OSError:
+    import slg_crash
+    actual = slg_crash.record_exception(exc, val, tb, source=source, preferred_path=path)
+    if not actual:
         return ""
-    return text
+    return slg_crash.redact("".join(traceback.format_exception(exc, val, tb)))

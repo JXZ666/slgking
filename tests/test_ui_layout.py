@@ -618,6 +618,24 @@ class SidebarFit(unittest.TestCase):
             cls.app._apply_theme("light")
         cls.app.update()
 
+    def setUp(self):
+        # The class shares a Windows root. Closing/focusing modal dialogs can
+        # leave its mapping and focus behind the next test's assumptions.
+        self.app.deiconify()
+        self.app.lift()
+        self.app.focus_force()
+        self.app.update()
+        self._wait_for_cards()
+
+    def _wait_for_cards(self):
+        deadline = time.monotonic() + 3
+        while getattr(self.app, "_card_render_pending", False) and time.monotonic() < deadline:
+            self.app.update()
+            time.sleep(0.005)
+        self.assertFalse(getattr(self.app, "_card_render_pending", False),
+                         "Card rendering did not finish")
+        self.app.update_idletasks()
+
     @classmethod
     def tearDownClass(cls):
         cls._offline_comments.stop()
@@ -625,6 +643,7 @@ class SidebarFit(unittest.TestCase):
         cls._usable_session.stop()
         cls._personal_access.stop()
         cls.app.destroy()
+        cls.app.conn.close()
         for patch in cls._offline:
             patch.stop()
 
@@ -667,7 +686,7 @@ class SidebarFit(unittest.TestCase):
             # Mapping is the window manager's job and lands a moment after the
             # geometry pass that asked for it, so this waits rather than
             # asserting on whatever the first look happens to see.
-            while time.time() < deadline and hit.winfo_height() <= 1:
+            while time.time() < deadline and (hit.winfo_height() <= 1 or not hit.winfo_ismapped()):
                 self.app.update()
                 time.sleep(0.01)
             self.assertTrue(hit.winfo_ismapped(), "%s没被映射" % what)
@@ -682,7 +701,7 @@ class SidebarFit(unittest.TestCase):
     def test_the_version_stamp_is_visible(self):
         # The point of the stamp is telling a stale exe apart from a fresh one,
         # so it is useless if the layout can hide it.
-        self._assert_has_height("v" + slg_gui.APP_VERSION, "版本戳")
+        self._assert_has_height("v" + slg_gui.display_app_version(), "版本戳")
 
     def test_the_vpn_notice_is_visible_at_the_minimum_size(self):
         self._assert_has_height("建议开启梯子", "梯子提示")
@@ -792,14 +811,14 @@ class SidebarFit(unittest.TestCase):
 
         def walk(widget):
             for child in widget.winfo_children():
-                if type(child).__module__.startswith("customtkinter"):
+                if isinstance(child, ctk.CTkBaseClass):
                     try:
                         text = child.cget("text")
                     except Exception:  # noqa: BLE001 - most widgets have no text
                         text = None
                     if isinstance(text, str):
                         out.append(text)
-                    walk(child)
+                walk(child)
 
         walk(self.app.detail)
         return out
@@ -852,8 +871,10 @@ class SidebarFit(unittest.TestCase):
     def test_quest_claim_posts_once_then_refreshes_server_progress(self):
         actions = []
 
-        def capture(kind, func):
+        request_tokens = {}
+        def capture(kind, func, **kwargs):
             actions.append((kind, func))
+            request_tokens[kind] = kwargs.get("action_token")
 
         daily = {"id": "daily_lottery", "label": "每日抽奖", "period": "daily",
                  "progress": 1, "target": 1, "reward": 5,
@@ -902,7 +923,7 @@ class SidebarFit(unittest.TestCase):
                 claim.assert_called_once_with("daily_lottery")
             self.assertFalse(self.app._quests_data["tasks"][0]["claimed"],
                              "claim click guessed progress before a status refresh")
-            self.app._cloud_action_result(claim_kind, {"claimed": True}, None)
+            self.app._cloud_action_result(claim_kind, {"claimed": True}, None, action_token=request_tokens[claim_kind])
             status_calls = [kind for kind, _fn in actions
                             if kind.startswith("quest_status_")]
             self.assertGreaterEqual(len(status_calls), 2,
@@ -1012,13 +1033,14 @@ class SidebarFit(unittest.TestCase):
         with mock.patch.object(slg_gui.slg_account, "session",
                                return_value={"account_id": "quest-test"}), \
                 mock.patch.object(self.app, "_run_cloud_action",
-                                  side_effect=lambda kind, fn: actions.append(kind)):
+                                  side_effect=lambda kind, fn, **kwargs: actions.append(kind)):
             self.app.open_shop()
             panel = self.app._quest_panel
             self.assertEqual(panel.winfo_manager(), "pack")
             generation = self.app._quest_generation
             self.app._cloud_action_result(
                 "quest_status_%d" % generation, None, "HTTP 404: not found")
+            self.app.update()
             self.assertIs(self.app._quests_supported, False)
             self.assertEqual(panel.winfo_manager(), "")
         self._close_shop()
@@ -1026,7 +1048,7 @@ class SidebarFit(unittest.TestCase):
     def test_logged_out_shop_hides_quests_without_requesting_them(self):
         actions = []
         with mock.patch.object(self.app, "_run_cloud_action",
-                               side_effect=lambda kind, fn: actions.append(kind)):
+                               side_effect=lambda kind, fn, **kwargs: actions.append(kind)):
             self.app.open_shop()
             self.assertEqual(self.app._quest_panel.winfo_manager(), "")
             self.assertFalse(any(kind.startswith("quest_status_")
@@ -1121,6 +1143,8 @@ class SidebarFit(unittest.TestCase):
         return tiles
 
     def _close_shop(self):
+        # Mocked writes have no worker completion; isolate the shared fixture.
+        self.app._shop_wallet_pending = None
         self.app.selected = None
         self.app._panel_mode = None
         self.app._destroy_detail()
@@ -1501,7 +1525,7 @@ class SidebarFit(unittest.TestCase):
                                  "route": "direct"},
                      "manifest": {"status": "ok", "code": "valid_manifest"},
                  },
-                 "share_text": "SLGking 连接诊断（只读）\nTLS：TLS 证书验证失败"},
+                 "share_text": "黄油之王 连接诊断（只读）\nTLS：TLS 证书验证失败"},
                 None)
             self.app.update()
             output = self.app._connectivity_diagnostics_widgets["output"]
@@ -1845,6 +1869,7 @@ class SidebarFit(unittest.TestCase):
                         mock.patch.object(self.app, "_render_detail_if_stale"):
                     self.app.page = 2
                     self.app.refresh()
+                    self._wait_for_cards()
                     page = self.app._page_slice()
                     self.assertEqual(len(page), slg_gui.PAGE_SIZE)
                     self.assertEqual(len(self.app._card_pool), slg_gui.PAGE_SIZE)
@@ -2018,14 +2043,16 @@ class SidebarFit(unittest.TestCase):
                                side_effect=tk.TclError("widget is gone")) as dead, \
                 mock.patch.object(self.app, "_set_settings_status") as sink, \
                 mock.patch.object(self.app, "after") as after, \
-                mock.patch.object(slg_gui.traceback, "print_exc") as reported:
+                mock.patch.object(slg_gui.slg_crash, "record_exception") as reported:
             self.app._drain()
         dead.assert_called_once()
         # The message behind the dead handler still landed, in the same pass.
         sink.assert_called_once_with("sentinel")
-        after.assert_called_once_with(150, self.app._drain)
+        after.assert_called_once_with(50, self.app._drain)
         # Swallowed is not the same as handled: it is still reported.
         reported.assert_called_once()
+        self.assertEqual(reported.call_args.kwargs["source"], "queue_dispatch")
+        self.assertIs(reported.call_args.args[0], tk.TclError)
 
     # --- covers arriving after the cards are already up ----------------------
 
@@ -3042,14 +3069,14 @@ class SidebarFit(unittest.TestCase):
 
         def walk(widget):
             for child in widget.winfo_children():
-                if type(child).__module__.startswith("customtkinter"):
+                if isinstance(child, ctk.CTkBaseClass):
                     try:
                         text = child.cget("text")
                     except Exception:  # noqa: BLE001 - most widgets have no text
                         text = None
                     if isinstance(text, str):
                         lines.append(text)
-                    walk(child)
+                walk(child)
 
         walk(self.app._help_content)
         return lines
@@ -3118,8 +3145,8 @@ class SidebarFit(unittest.TestCase):
         finally:
             self._close("帮助文档")
         no_download = next(i for i, t in enumerate(lines)
-                           if "也不提供下载" in t)
-        free = next(i for i, t in enumerate(lines) if "完全免费" in t)
+                           if "不提供游戏下载" in t)
+        free = next(i for i, t in enumerate(lines) if "本软件免费" in t)
         self.assertLess(no_download, free, "免费声明应该在最后")
         self.assertTrue(any("GitHub" in t for t in lines), lines)
 
@@ -3134,20 +3161,16 @@ class SidebarFit(unittest.TestCase):
         finally:
             self._close("帮助文档")
         for want in ("收藏夹", "个人中心与积分", "每日签到", "头衔",
-                     "商城与每日抽奖", "添加我的游戏", "扫描本地目录",
+                     "商城与每日抽奖", "添加我的游戏", "本地库与扫描路径",
                      "备份与恢复", "更新推送"):
             self.assertIn(want, titles)
 
-    def test_the_sidebar_offers_sync_and_one_more_button(self):
-        # Four buttons in a column - 28/38/34/28 px tall, two muted and one
-        # filled, two left-aligned and one centred - gave a new user no way to
-        # tell which one they wanted. Sync is the routine one and stays out;
-        # the other three are behind 更多….
+    def test_the_sidebar_offers_sync_without_duplicate_maintenance_button(self):
+        # Routine synchronization stays visible. Maintenance has one tools entry.
         self.assertIsNotNone(self.app.sync_btn)
-        self.assertIsNotNone(self.app.maintenance_btn)
+        self.assertIsNone(self.app.maintenance_btn)
         self.assertIsNotNone(self.app.settings_btn)
         self._assert_has_height("更新游戏数据", "同步按钮")
-        self._assert_has_height("更多", "更多按钮")
         for gone in ("covers_btn", "rebuild_btn", "backfill_btn"):
             self.assertFalse(hasattr(self.app, gone), gone)
 
@@ -3171,8 +3194,10 @@ class SidebarFit(unittest.TestCase):
             buttons = self._buttons_in(win)
             texts = [b.cget("text") for b in buttons]
             for label in ("检查更新", "管理收藏夹…", "备份与恢复…",
-                          "扫描本地目录…", "同步与维护…"):
+                          "扫描本地存档…"):
                 self.assertIn(label, texts)
+            self.assertNotIn("同步与维护…", texts)
+            self.assertNotIn("扫描本地目录…", texts)
             advanced = next(
                 b for b in buttons if b.cget("text").startswith("进阶工具"))
             self.assertIn("4 项", advanced.cget("text"))
@@ -3372,23 +3397,16 @@ class SidebarFit(unittest.TestCase):
             self.app.selected = None
             self._finish()
 
-    def test_the_maintenance_dialog_lists_both_chores(self):
+    def test_maintenance_compatibility_routes_to_unified_sync(self):
         try:
-            with mock.patch.object(slg_db, "data_gaps",
-                                   return_value={"covers": 7, "overview": 3,
-                                                 "heat": 5, "metrics": 5}):
+            with mock.patch.object(self.app, "do_sync") as sync:
                 self.app.open_maintenance()
-                win = self._dialog("同步与维护")
-                self.assertIsNotNone(win, "维护弹窗没打开")
-                texts = [b.cget("text") for b in self._buttons_in(win)]
-            for label in ("下载封面", "补齐热度"):
-                self.assertTrue(any(t.startswith(label) for t in texts), texts)
-            # Computed when the dialog opens, so a stale number in a window the
-            # user cannot see is not possible.
-            self.assertIn("下载封面（7）", texts)
-            self.assertIn("补齐热度（5）", texts)
+                sync.assert_called_once_with()
+            self.app.open_tools()
+            for label in ("下载封面", "补齐热度", "同步与维护…"):
+                self.assertEqual(self._find(label), [])
         finally:
-            self._close("同步与维护")
+            self._close("更多工具")
 
     def test_picking_a_tag_leaves_the_picker_open(self):
         # Choosing a tag used to destroy the dialog, so picking four tags meant
@@ -3518,6 +3536,248 @@ class SidebarFit(unittest.TestCase):
             self.app.update_label.pack_forget()
             self.app.update()
 
+
+    # --- font size -----------------------------------------------------------
+
+    def test_ui_font_bakes_the_font_multiplier_in(self):
+        # The multiplier is applied when the font is built, and the font object
+        # is shared, so set_font_scale() reaches every widget already using it.
+        original = slg_gui._font_scale_profile
+        try:
+            slg_gui.set_font_scale("normal")
+            self.assertEqual(slg_gui.ui_font(10).cget("size"), 10)
+            slg_gui.set_font_scale("large")          # 1.20
+            self.assertEqual(slg_gui.ui_font(10).cget("size"), 12)
+            slg_gui.set_font_scale("small")          # 0.90
+            self.assertEqual(slg_gui.ui_font(10).cget("size"), 9)
+        finally:
+            slg_gui.set_font_scale(original)
+
+    def test_ui_tkfont_multiplies_the_setting_by_the_callers_dpi_scale(self):
+        # A plain tk.Label and a canvas item get no help from customtkinter, so
+        # the card list passes its own widget scaling down through dpi_scale.
+        original = slg_gui._font_scale_profile
+        try:
+            slg_gui.set_font_scale("normal")
+            self.assertEqual(
+                slg_gui.ui_tkfont(10, dpi_scale=1.5).cget("size"), 15)
+            slg_gui.set_font_scale("xl")             # 1.40
+            self.assertEqual(
+                slg_gui.ui_tkfont(10, dpi_scale=1.5).cget("size"), 21)
+        finally:
+            slg_gui.set_font_scale(original)
+
+    def test_an_unusable_font_scale_falls_back_to_normal(self):
+        self.assertEqual(slg_gui.normalize_font_scale(None), "normal")
+        self.assertEqual(slg_gui.normalize_font_scale("gigantic"), "normal")
+        self.assertEqual(slg_gui.normalize_font_scale(" XL "), "xl")
+
+    def test_the_font_scale_choices_are_the_four_documented_ones(self):
+        self.assertEqual(list(slg_gui.FONT_SCALE_PROFILES),
+                         ["small", "normal", "large", "xl"])
+        self.assertEqual(slg_gui.FONT_SCALE_PROFILES["normal"]["factor"], 1.0)
+
+    def test_picking_a_font_size_applies_it_and_remembers_it(self):
+        original = self.app.font_scale_profile
+        label = slg_gui.FONT_SCALE_PROFILES["xl"]["label"]
+        try:
+            with mock.patch.object(slg_db, "set_pref") as set_pref:
+                self.app._pick_font_scale(label)
+            set_pref.assert_called_once_with(
+                self.app.conn, slg_gui.PREF_FONT_SCALE, "xl")
+            self.assertEqual(self.app.font_scale_profile, "xl")
+            self.assertEqual(slg_gui._font_scale_profile, "xl")
+            self.assertEqual(slg_gui.ui_font(10).cget("size"), 14)
+        finally:
+            self.app.font_scale_profile = original
+            slg_gui.set_font_scale(original)
+
+    def _card_title_size(self, slot):
+        return slg_gui.tkfont.nametofont(str(slot["title"].cget("font"))).cget("size")
+
+    def test_the_card_text_follows_the_font_size(self):
+        # The three card labels are plain tk.Labels, which is what made them
+        # the one part of the window that ignored every scaling setting. They
+        # only follow a late change through this explicit refresh.
+        original = slg_gui._font_scale_profile
+        self._show_games(self._panel_game(0))
+        try:
+            slot = self.app._card_pool[0]
+            slg_gui.set_font_scale("normal")
+            self.app._refresh_card_text_scaling()
+            before = self._card_title_size(slot)
+            slg_gui.set_font_scale("xl")
+            self.app._refresh_card_text_scaling()
+            self.assertGreater(self._card_title_size(slot), before)
+        finally:
+            slg_gui.set_font_scale(original)
+            self.app._refresh_card_text_scaling()
+
+    # --- keyboard navigation -------------------------------------------------
+
+    def _show_games(self, *games, page_size=None):
+        """Render `games` as the list, at a small page size.
+
+        PAGE_SIZE is patched down rather than the fixture grown to eight, so a
+        page turn is one keystroke away and the fixture still has a second page
+        to turn to.
+        """
+        games = list(games)
+        self.addCleanup(self._finish)
+        patchers = [
+            mock.patch.object(slg_gui, "PAGE_SIZE",
+                              page_size or max(1, len(games))),
+            mock.patch.object(slg_db, "find_games",
+                              side_effect=lambda *a, **k: list(games)),
+            mock.patch.object(self.app, "_render_filterbar"),
+            mock.patch.object(self.app, "_render_stats"),
+            mock.patch.object(self.app, "_render_detail_if_stale"),
+        ]
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.app.page = 1
+        self.app.selected = None
+        self.app.refresh()
+        self.app.update()
+        return games
+
+    def _key(self, keysym):
+        return self.app._on_card_key(mock.Mock(keysym=keysym))
+
+    def test_down_walks_the_selection_down_the_page(self):
+        games = self._show_games(*[self._panel_game(i) for i in range(3)])
+        self.app.focus_set()
+        self._key("Down")
+        self.assertEqual(self.app.selected["id"], games[0]["id"])
+        self._key("Down")
+        self.assertEqual(self.app.selected["id"], games[1]["id"])
+        self._key("Up")
+        self.assertEqual(self.app.selected["id"], games[0]["id"])
+
+    def test_down_on_the_last_card_turns_the_page(self):
+        games = self._show_games(*[self._panel_game(i) for i in range(3)],
+                                 page_size=2)
+        self.app.focus_set()
+        self.app.selected = games[1]
+        self.assertEqual(self._key("Down"), "break")
+        self.assertEqual(self.app.page, 2)
+        self.assertEqual(self.app.selected["id"], games[2]["id"])
+
+    def test_up_on_the_first_card_turns_back_a_page(self):
+        games = self._show_games(*[self._panel_game(i) for i in range(3)],
+                                 page_size=2)
+        self.app.focus_set()
+        self.app._goto_page(2)
+        self.app.selected = games[2]
+        self._key("Up")
+        self.assertEqual(self.app.page, 1)
+        self.assertEqual(self.app.selected["id"], games[1]["id"])
+
+    def test_down_on_the_very_last_card_stays_put(self):
+        games = self._show_games(*[self._panel_game(i) for i in range(2)],
+                                 page_size=2)
+        self.app.focus_set()
+        self.app.selected = games[1]
+        self.assertEqual(self._key("Down"), "break")
+        self.assertEqual(self.app.page, 1)
+        self.assertEqual(self.app.selected["id"], games[1]["id"])
+
+    def test_page_keys_turn_the_page(self):
+        self._show_games(*[self._panel_game(i) for i in range(4)], page_size=2)
+        self.app.focus_set()
+        self._key("Next")
+        self.assertEqual(self.app.page, 2)
+        self._key("Prior")
+        self.assertEqual(self.app.page, 1)
+
+    def test_enter_opens_the_panel_without_moving_the_selection(self):
+        # Enter goes through the same select() a click does, and never starts a
+        # process: a keystroke that launches a game is the one mistake here
+        # that another keystroke cannot undo.
+        games = self._show_games(*[self._panel_game(i) for i in range(3)])
+        self.app.focus_set()
+        self.app.selected = games[1]
+        with mock.patch.object(self.app, "select") as select, \
+                mock.patch.object(slg_gui.subprocess, "Popen") as popen, \
+                mock.patch.object(slg_gui.os, "startfile",
+                                  create=True) as startfile:
+            self.assertEqual(self._key("Return"), "break")
+        select.assert_called_once_with(games[1])
+        popen.assert_not_called()
+        startfile.assert_not_called()
+        self.assertEqual(self.app.selected["id"], games[1]["id"])
+
+    def test_the_arrows_are_left_to_a_text_box_that_has_focus(self):
+        # The bindings live on the window, so without the guard an arrow typed
+        # into the search box would also turn the page behind it.
+        self._show_games(*[self._panel_game(i) for i in range(4)], page_size=2)
+        self.app.search_entry.focus_set()
+        self.app.update()
+        self.assertIsNone(self._key("Down"))
+        self.assertIsNone(self._key("Return"))
+        self.assertEqual(self.app.page, 1)
+        self.assertIsNone(self.app.selected)
+
+    def test_the_key_bindings_are_installed_on_the_window(self):
+        # Bound on the window rather than on the cards: eighty tk.Labels with a
+        # tab stop each would sit worthless between the search box and the
+        # detail panel. Tk normalises the sequence names, hence the Key- form.
+        for sequence in ("<Key-Up>", "<Key-Down>", "<Key-Prior>", "<Key-Next>",
+                         "<Key-Return>"):
+            self.assertIn(sequence, self.app.bind())
+
+    # --- save inventory ------------------------------------------------------
+
+    def test_the_save_inventory_lists_what_the_scan_found(self):
+        with slg_db.session() as conn:
+            slg_db.clear_local_saves(conn)
+            slg_db.set_local_save(conn, r"C:\fake\saves",
+                                  display_title="Inventoried Game",
+                                  save_count=6, total_size=2048,
+                                  last_modified="2026-09-01 10:00:00")
+        self.addCleanup(self._drop_save_inventory_rows)
+        self.app.open_save_inventory()
+        self.app.update()
+        windows = [w for w in self.app.winfo_children()
+                   if isinstance(w, ctk.CTkToplevel) and w.title() == "本地存档"]
+        self.assertEqual(len(windows), 1)
+        texts = self._texts_in(windows[0])
+        self.assertTrue(any("Inventoried Game" in t for t in texts), texts)
+        self.assertTrue(any("6 个存档" in t and "2.0 KB" in t for t in texts),
+                        texts)
+        windows[0].destroy()
+        self.app.update()
+
+    def test_the_save_inventory_says_so_when_nothing_has_been_scanned(self):
+        with slg_db.session() as conn:
+            slg_db.clear_local_saves(conn)
+        self.app.open_save_inventory()
+        self.app.update()
+        windows = [w for w in self.app.winfo_children()
+                   if isinstance(w, ctk.CTkToplevel) and w.title() == "本地存档"]
+        self.assertEqual(len(windows), 1)
+        texts = self._texts_in(windows[0])
+        self.assertTrue(any("还没有扫描过本地存档" in t for t in texts), texts)
+        windows[0].destroy()
+        self.app.update()
+
+    def test_opening_the_inventory_twice_reuses_one_window(self):
+        with slg_db.session() as conn:
+            slg_db.clear_local_saves(conn)
+        self.app.open_save_inventory()
+        self.app.update()
+        self.app.open_save_inventory()
+        self.app.update()
+        windows = [w for w in self.app.winfo_children()
+                   if isinstance(w, ctk.CTkToplevel) and w.title() == "本地存档"]
+        self.assertEqual(len(windows), 1)
+        windows[0].destroy()
+        self.app.update()
+
+    def _drop_save_inventory_rows(self):
+        with slg_db.session() as conn:
+            slg_db.clear_local_saves(conn)
 
     # --- Admin console -------------------------------------------------
 

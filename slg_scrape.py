@@ -781,7 +781,7 @@ def download_covers(conn, limit=None, workers=3, rate=3.0, log=print,
     """
     rows = conn.execute(
         "SELECT id, slug, cover_file FROM games"
-        " WHERE cover_file LIKE 'pending:%'"
+        " WHERE cover_file LIKE 'pending:%' AND origin='site' AND slug NOT LIKE 'dlsite-rj%'"
         + (" LIMIT %d" % int(limit) if limit else "")).fetchall()
     total = len(rows)
     if not total:
@@ -873,7 +873,7 @@ def enrich(conn, fetcher, limit=200, log=print, on_progress=None,
     """
     rows = conn.execute(
         "SELECT id, slug, url FROM games"
-        " WHERE url IS NOT NULL AND fetch_failures < 3"
+        " WHERE url IS NOT NULL AND fetch_failures < 3 AND origin='site' AND slug NOT LIKE 'dlsite-rj%'"
         "       AND (rating IS NULL OR overview IS NULL OR cover_file IS NULL"
         "            OR site_views IS NULL)"
         # A missing cover is the only gap the user can see, so it outranks a

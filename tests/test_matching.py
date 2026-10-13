@@ -104,11 +104,17 @@ class Autofill(unittest.TestCase):
     def test_detect_renpy(self):
         with tempfile.TemporaryDirectory() as root:
             os.makedirs(os.path.join(root, "renpy"))
+            open(os.path.join(root, "renpy", "__init__.py"), "w").close()
+            os.makedirs(os.path.join(root, "game"))
+            open(os.path.join(root, "game", "script.rpyc"), "w").close()
             self.assertEqual(slg_scan.detect_engine(root), "Ren'Py")
 
     def test_detect_unity(self):
         with tempfile.TemporaryDirectory() as root:
             open(os.path.join(root, "UnityPlayer.dll"), "w").close()
+            open(os.path.join(root, "Game.exe"), "w").close()
+            os.makedirs(os.path.join(root, "Game_Data"))
+            open(os.path.join(root, "Game_Data", "globalgamemanagers"), "w").close()
             self.assertEqual(slg_scan.detect_engine(root), "Unity")
 
     def test_detect_rpg_maker(self):
@@ -116,6 +122,10 @@ class Autofill(unittest.TestCase):
             www = os.path.join(root, "www")
             os.makedirs(www)
             open(os.path.join(www, "index.html"), "w").close()
+            os.makedirs(os.path.join(www, "data"))
+            os.makedirs(os.path.join(www, "js"))
+            open(os.path.join(www, "data", "System.json"), "w").close()
+            open(os.path.join(www, "js", "rpg_core.js"), "w").close()
             self.assertEqual(slg_scan.detect_engine(root), "RPG Maker")
 
     def test_detect_unknown(self):

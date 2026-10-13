@@ -143,7 +143,9 @@ class ScanTests(unittest.TestCase):
         conn = slg_db.connect(":memory:")
         self.addCleanup(conn.close)
         result = slg_scan.scan(conn, roots=["Z:/no/such/root"])
-        self.assertEqual(result, {"matched": 0, "unmatched": []})
+        self.assertEqual(result["matched"], 0)
+        self.assertEqual(result["unmatched"], [])
+        self.assertTrue(result["errors"])
 
     def test_cli_help_without_default_roots(self):
         # On a machine without the author's hard-coded library folder,

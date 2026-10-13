@@ -14,14 +14,24 @@ import slg_gui  # noqa: E402
 
 class ReleaseChannelNotesTests(unittest.TestCase):
     def test_stable_and_test_notes_use_channel_when_versions_match(self):
-        with mock.patch.object(slg_gui.sys, "frozen", True, create=True):
+        with mock.patch.object(slg_gui.sys, "frozen", True, create=True), \
+                mock.patch.object(slg_gui, "TEST_APP_VERSION", slg_gui.APP_VERSION):
             for executable, channel in (("slgking.exe", "稳定版"),
                                         ("slgking_test.exe", "测试版")):
                 with self.subTest(executable=executable), \
                         mock.patch.object(slg_gui.sys, "executable", executable):
                     notes = slg_gui.release_notes_text()
-                    self.assertTrue(notes.startswith("0.24.5 " + channel))
+                    self.assertTrue(notes.startswith(slg_gui.APP_VERSION + " " + channel))
                     self.assertNotIn("管理员身份", notes)
+
+    def test_actual_channels_keep_stable_and_test_versions_separate(self):
+        with mock.patch.object(slg_gui.sys, "frozen", True, create=True):
+            for executable, version in (("slgking.exe", slg_gui.APP_VERSION),
+                                        ("slgking_test.exe", slg_gui.TEST_APP_VERSION)):
+                with self.subTest(executable=executable), mock.patch.object(
+                        slg_gui.sys, "executable", executable):
+                    self.assertTrue(slg_gui.release_notes_text().startswith(version + " "))
+                    self.assertIn("不会随账号同步", slg_gui.release_notes_text())
 
 
 class AnnouncementPageModelTests(unittest.TestCase):
@@ -141,8 +151,10 @@ class AnnouncementNavigationTests(unittest.TestCase):
         app._claim_maintenance_reward = lambda: None
 
         with mock.patch.object(slg_gui.ctk, "CTkLabel", _FakeWidget), \
+                mock.patch.object(slg_gui, "ResourceLabel", _FakeWidget), \
                 mock.patch.object(slg_gui.ctk, "CTkFrame", _FakeWidget), \
                 mock.patch.object(slg_gui.ctk, "CTkButton", _FakeWidget), \
+                mock.patch.object(slg_gui, "ResourceButton", _FakeWidget), \
                 mock.patch.object(slg_gui.ctk, "CTkTextbox", _FakeWidget), \
                 mock.patch.object(slg_gui, "ui_font", return_value=None), \
                 mock.patch.object(slg_gui.slg_db, "set_pref"):

@@ -16,6 +16,7 @@ not reach dikgames. A down server surfaces as a message, nothing more.
 """
 
 import hashlib
+from contextlib import closing
 import json
 import os
 import queue
@@ -28,8 +29,11 @@ import urllib.parse
 import urllib.request
 
 import slg_db
+import slg_hidden_games
+import slg_local_library
 import slg_scrape
 import slg_server_transport
+from slg_catalogues import normalize_catalogue
 
 SERVER_BASE = "https://slg-king.com"
 PREF_LAST_PULL = "last_pull_lastmod"
@@ -177,12 +181,12 @@ def _translation_conflict(conn, table, old_ref, canonical_ref):
 def _unknown_game_reference(conn, old_id, old_slug):
     """Conservatively reject hidden cards with unhandled local references."""
     supported = {
-        "games", "tags", "game_tags", "game_aliases", "local", "state",
+        "games", "tags", "game_tags", "game_aliases", "local", "state", "game_cover_overrides", "hidden_games",
         "collection_items", "wishlist_version_seen", "translations",
         "manual_translations", "comments", "game_sources", "catalog_redirects",
         "game_redirects", "weights", "affinities", "prefs", "collections",
         "exclusions", "sync_log", "points_log", "signin", "owned_titles",
-        "source_sync_state", "sqlite_sequence",
+        "source_sync_state", "sqlite_sequence", "game_catalogs", "game_metadata", "user_game_categories",
     }
     tables = [row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")]
@@ -212,6 +216,12 @@ def _unknown_game_reference(conn, old_id, old_slug):
 
 
 def _redirect_pair_conflict(conn, old_id, canonical_id, old_slug):
+    if slg_local_library.cover_override_conflict(conn, old_id, canonical_id):
+        return True
+    old_metadata = conn.execute("SELECT metadata_json FROM game_metadata WHERE game_id=?", (old_id,)).fetchone()
+    new_metadata = conn.execute("SELECT metadata_json FROM game_metadata WHERE game_id=?", (canonical_id,)).fetchone()
+    if old_metadata and new_metadata and json.loads(old_metadata[0]) != json.loads(new_metadata[0]):
+        return True
     for table, fields in (("state", ("status", "note", "my_rating")),
                           ("local", ("folder_path", "folder_version", "exe_path"))):
         if not {"game_id"} <= _table_columns(conn, table):
@@ -282,6 +292,14 @@ def _redirect_pair_conflict(conn, old_id, canonical_id, old_slug):
 
 def _merge_redirect_pair(conn, old_id, canonical_id, old_slug, canonical_slug):
     """Move supported references after a conflict-free preflight."""
+    if old_slug.startswith("dlsite-rj") != canonical_slug.startswith("dlsite-rj"):
+        raise ValueError("不能在不同目录之间迁移游戏身份。")
+    slg_local_library.merge_cover_override(conn, old_id, canonical_id)
+    slg_hidden_games.merge_redirect(conn, old_id, canonical_id)
+    conn.execute("INSERT OR IGNORE INTO game_metadata(game_id,metadata_json)"
+                 " SELECT ?,metadata_json FROM game_metadata WHERE game_id=?", (canonical_id, old_id))
+    conn.execute("INSERT OR IGNORE INTO game_catalogs SELECT ?,catalog_id FROM game_catalogs WHERE game_id=?",
+                 (canonical_id, old_id))
     for table, fields in (("state", ("status", "note", "my_rating")),
                           ("local", ("folder_path", "folder_version", "exe_path"))):
         columns = _table_columns(conn, table)
@@ -411,7 +429,7 @@ def _merge_redirect_pair(conn, old_id, canonical_id, old_slug, canonical_slug):
 
 
 def _redirect_has_user_references(conn, old_id, old_slug):
-    for table in ("state", "local", "wishlist_version_seen",
+    for table in ("game_cover_overrides", "hidden_games", "state", "local", "wishlist_version_seen",
                   "collection_items", "game_aliases"):
         if "game_id" in _table_columns(conn, table) and conn.execute(
                 "SELECT 1 FROM %s WHERE game_id=? LIMIT 1" % table,
@@ -440,6 +458,8 @@ def _redirect_plan(conn, redirects):
             "SELECT id,origin FROM games WHERE slug=?", (old_slug,)
         ).fetchone()
         safe = bool(canonical and canonical["origin"] == "site")
+        if old_slug.startswith("dlsite-rj") != canonical_slug.startswith("dlsite-rj"):
+            safe = False
         if old and old["origin"] != "site":
             safe = False
         if safe and old and int(old["id"]) != int(canonical["id"]):
@@ -452,10 +472,17 @@ def _redirect_plan(conn, redirects):
     return plan
 
 
-def _sync_catalog_redirects(conn, redirects):
+def _sync_catalog_redirects(conn, redirects, catalog_id="western_slg", manage_transaction=True,
+                            prior_backup=None):
     """Back up only when a redirect state or local user reference will change."""
+    normalize_catalogue(catalog_id, allow_all=False)
+    for old_slug, canonical_slug in redirects.items():
+        if any(("dlsite" if slug.startswith("dlsite-rj") else "western_slg") != catalog_id
+               for slug in (old_slug, canonical_slug)):
+            raise ValueError("重定向与所选目录不匹配。")
+    slug_filter = "old_slug LIKE 'dlsite-rj%'" if catalog_id == "dlsite" else "old_slug NOT LIKE 'dlsite-rj%'"
     existing = {row["old_slug"]: row for row in conn.execute(
-        "SELECT old_slug,canonical_slug,active FROM catalog_redirects")}
+        "SELECT old_slug,canonical_slug,active FROM catalog_redirects WHERE " + slug_filter)}
     plan = _redirect_plan(conn, redirects)
     needs_backup = False
     if not redirects:
@@ -475,13 +502,15 @@ def _sync_catalog_redirects(conn, redirects):
                 needs_backup = True
                 break
 
-    conn.commit()
-    backup_path = _create_catalog_backup(conn) if needs_backup else None
+    if manage_transaction:
+        conn.commit()
+    backup_path = (_create_catalog_backup(conn) if needs_backup and manage_transaction else prior_backup)
     active = blocked = 0
     migrated_pair = False
-    conn.execute("BEGIN IMMEDIATE")
+    if manage_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     try:
-        conn.execute("DELETE FROM catalog_redirects")
+        conn.execute("DELETE FROM catalog_redirects WHERE " + slug_filter)
         for old_slug, canonical_slug, old_id, canonical_id, safe in plan:
             if safe and old_id is not None and canonical_id is not None \
                     and old_id != canonical_id:
@@ -507,20 +536,27 @@ def _sync_catalog_redirects(conn, redirects):
             # ratings. Rebuild them in the same transaction as the slug merge
             # so taste sorting cannot keep stale evidence from the hidden row.
             slg_db.recompute_weights(conn, commit=False)
-        conn.commit()
+        if manage_transaction:
+            conn.commit()
     except Exception:
-        conn.rollback()
+        if manage_transaction:
+            conn.rollback()
         raise
     return {"active": active, "blocked": blocked, "backup": backup_path}
 
 
-def fetch_manifest(timeout=30, tries=3, raise_on_failure=False):
+def fetch_manifest(timeout=30, tries=3, raise_on_failure=False, catalog_id="western_slg"):
     """The server's manifest dict, or None on failure unless requested otherwise.
 
     Retried because the box is one cheap instance: the first request after a
     cold start or a publish can take a beat, and the manifest is ~150 bytes, so
     a retry costs nothing.
     """
+    normalize_catalogue(catalog_id, allow_all=False)
+    if catalog_id == "dlsite":
+        import slg_dlsite_online as online
+        raw = _server_http_get(SERVER_BASE + online.MANIFEST_PATH, timeout=timeout)
+        return online.validate_manifest(json.loads(raw.decode("utf-8")))
     for attempt in range(tries):
         try:
             raw = _server_http_get(SERVER_BASE + "/manifest.json", timeout=timeout)
@@ -536,7 +572,7 @@ def fetch_manifest(timeout=30, tries=3, raise_on_failure=False):
     return None
 
 
-def merge_catalog(conn, snapshot_path):
+def _merge_catalog(conn, snapshot_path, catalog_id):
     """Upsert every site game from `snapshot_path` into `conn`. Returns (created, total).
 
     Reads the snapshot's games and game_tags with the snapshot's own ids, then
@@ -564,9 +600,13 @@ def merge_catalog(conn, snapshot_path):
         source_cols = {r[1] for r in src.execute("PRAGMA table_info(game_sources)")}
         if {"source_id", "external_id", "game_id", "source_url"} <= source_cols:
             source_rows = src.execute(
-                "SELECT * FROM game_sources WHERE source_id IN ('dikgames','f95zone')"
+                "SELECT * FROM game_sources WHERE source_id IN ('dikgames','f95zone','dlsite')"
             ).fetchall()
         redirect_rows = []
+        metadata_rows = {}
+        if {r[1] for r in src.execute("PRAGMA table_info(game_metadata)")}:
+            metadata_rows = {row["game_id"]: json.loads(row["metadata_json"])
+                             for row in src.execute("SELECT * FROM game_metadata")}
         redirect_cols = {r[1] for r in src.execute(
             "PRAGMA table_info(game_redirects)")}
         if {"old_slug", "canonical_slug"} <= redirect_cols:
@@ -577,6 +617,13 @@ def merge_catalog(conn, snapshot_path):
         src.close()
 
     created = 0
+    allowed_sources = {"dlsite"} if catalog_id == "dlsite" else {"dikgames", "f95zone"}
+    if any(source["source_id"] not in allowed_sources for source in source_rows):
+        raise ValueError("快照来源与所选目录不匹配。")
+    for game in games:
+        is_dlsite = re.fullmatch(r"dlsite-rj\d+", game["slug"]) is not None
+        if is_dlsite != (catalog_id == "dlsite"):
+            raise ValueError("快照游戏与所选目录不匹配。")
     for g in games:
         # A locally added game with the same slug is still the user's game.
         # Never let a server source replace its title, URL, tags or local fields.
@@ -594,8 +641,16 @@ def merge_catalog(conn, snapshot_path):
             conn, game_id, rating=g["rating"], version=g["version"],
             developer=g["developer"], overview=g["overview"],
             site_views=g["site_views"], site_likes=g["site_likes"],
-            site_comments=g["site_comments"])
-        if g["cover_file"] and not g["cover_file"].startswith("pending:"):
+            site_comments=g["site_comments"], commit=False)
+        slg_db.set_game_catalogue(conn, game_id, catalog_id)
+        if catalog_id == "dlsite":
+            # Raw source ratings are displayed separately from legacy scores.
+            conn.execute("UPDATE games SET rating=NULL,heat=NULL WHERE id=?", (game_id,))
+            if g["id"] in metadata_rows:
+                slg_db.set_dlsite_metadata(conn, game_id, metadata_rows[g["id"]])
+        if catalog_id == "dlsite":
+            slg_db.set_cover(conn,game_id,g["cover_file"])
+        elif g["cover_file"] and not g["cover_file"].startswith("pending:"):
             slg_db.set_cover(conn, game_id, g["cover_file"])
         created += int(is_new)
 
@@ -638,28 +693,88 @@ def merge_catalog(conn, snapshot_path):
             match_status=source["match_status"] if "match_status" in source_cols else "new",
             match_confidence=source["match_confidence"] if "match_confidence" in source_cols else None,
             suggested_game_id=suggested_id)
-    conn.commit()
     conn.execute(
         "CREATE TABLE IF NOT EXISTS catalog_redirects ("
         "old_slug TEXT PRIMARY KEY, canonical_slug TEXT NOT NULL,"
         "active INTEGER NOT NULL DEFAULT 0)")
     redirects = _redirect_rows(
         redirect_rows, {row["slug"] for row in games})
-    _sync_catalog_redirects(conn, redirects)
+    _sync_catalog_redirects(conn, redirects, catalog_id, manage_transaction=False)
     return created, len(games)
 
 
-def _missing_covers(conn):
+def merge_catalog(conn, snapshot_path, catalog_id="western_slg"):
+    """Merge one physical catalogue atomically without changing personal IDs."""
+    normalize_catalogue(catalog_id, allow_all=False)
+    # Backups must run before the write savepoint: sqlite backup on a source
+    # connection holding an active write transaction can wait indefinitely.
+    with closing(sqlite3.connect(snapshot_path)) as source:
+        has_redirects = bool(source.execute("SELECT 1 FROM sqlite_master WHERE name='game_redirects'").fetchone())
+        incoming_redirects = bool(source.execute("SELECT 1 FROM game_redirects LIMIT 1").fetchone()) if has_redirects else False
+    slug_filter = "old_slug LIKE 'dlsite-rj%'" if catalog_id == "dlsite" else "old_slug NOT LIKE 'dlsite-rj%'"
+    current_redirects = bool(conn.execute("SELECT 1 FROM catalog_redirects WHERE active=1 AND " + slug_filter + " LIMIT 1").fetchone())
+    if (incoming_redirects or current_redirects) and conn.execute("SELECT 1 FROM games LIMIT 1").fetchone():
+        conn.commit()
+        _create_catalog_backup(conn)
+    savepoint = "catalog_merge"
+    conn.execute("SAVEPOINT " + savepoint)
+    try:
+        result = _merge_catalog(conn, snapshot_path, catalog_id)
+        conn.execute("RELEASE SAVEPOINT " + savepoint)
+        return result
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT " + savepoint)
+        conn.execute("RELEASE SAVEPOINT " + savepoint)
+        raise
+
+
+def import_local_catalogue(conn, snapshot_path, manifest_path, log=print):
+    """Import a bundled, hash-verified DLsite snapshot without remote access."""
+    import slg_dlsite_online as online
+    if online.has_online_catalogue(conn):
+        count = conn.execute("SELECT count(*) FROM game_catalogs WHERE catalog_id='dlsite'").fetchone()[0]
+        return {"catalog_id":"dlsite","new":0,"catalogue":count,"unchanged":True}
+    with open(manifest_path, encoding="utf-8") as stream:
+        manifest = json.load(stream)
+    if not isinstance(manifest, dict) or manifest.get("catalog_id") != "dlsite":
+        raise ValueError("本地快照目录身份无效。")
+    expected = manifest.get("db_sha256")
+    if not isinstance(expected, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", expected):
+        raise ValueError("本地快照校验信息无效。")
+    with open(snapshot_path, "rb") as stream:
+        digest = hashlib.sha256(stream.read()).hexdigest()
+    if digest != expected.casefold():
+        raise ValueError("本地快照校验失败，未更改游戏库。")
+    with closing(sqlite3.connect(snapshot_path)) as source:
+        count = source.execute("SELECT COUNT(*) FROM games").fetchone()[0]
+    if type(manifest.get("count")) is not int or manifest["count"] != count:
+        raise ValueError("本地快照数量与清单不匹配。")
+    key = online.BUNDLE_HASH_KEY
+    if slg_db.get_pref(conn, key) == digest:
+        return {"catalog_id": "dlsite", "new": 0, "catalogue": manifest.get("count", 0), "unchanged": True}
+    created, total = merge_catalog(conn, snapshot_path, "dlsite")
+    slg_db.set_pref(conn, key, digest)
+    if manifest.get("lastmod"):
+        slg_db.set_pref(conn, PREF_LAST_PULL + ".dlsite", str(manifest["lastmod"]))
+    log("DLsite 试点目录 %d 款 · 新增 %d" % (total, created))
+    return {"catalog_id": "dlsite", "new": created, "catalogue": total, "unchanged": False}
+
+
+def _missing_covers(conn, catalog_id="western_slg"):
     """Site games whose cover_file names a file not yet in covers_dir().
 
     User-added games are excluded: their covers are local files the server does
     not publish, so requesting them would only ever 404 and leave the cover
     counter permanently stuck above zero.
     """
+    normalize_catalogue(catalog_id, allow_all=False)
+    if catalog_id == "dlsite":
+        return []
     dest = slg_db.covers_dir()
     rows = conn.execute(
         "SELECT id, cover_file FROM games"
         " WHERE origin = 'site'"
+        " AND id IN (SELECT game_id FROM game_catalogs WHERE catalog_id='western_slg')"
         " AND cover_file IS NOT NULL AND cover_file NOT LIKE 'pending:%'"
     ).fetchall()
     return [r for r in rows
@@ -732,16 +847,46 @@ def download_covers(conn, log=print, on_progress=None, should_stop=None):
     return done
 
 
-def pull(conn, log=print, on_progress=None, should_stop=None):
+def _collector_status(manifest, source_id):
+    from slg_source_status import STATUS_PATHS,public_status
+    path=manifest.get("source_status_path")
+    if path != STATUS_PATHS[source_id]:
+        return None
+    try:
+        raw=_server_http_get(SERVER_BASE+path,timeout=10)
+        if len(raw)>8192:return None
+        return public_status(json.loads(raw.decode("utf-8")),source_id)
+    except Exception:
+        # Collector telemetry cannot prevent importing a valid catalogue.
+        return None
+
+
+def pull(conn, log=print, on_progress=None, should_stop=None, catalog_id="western_slg", download_images=True):
     """Download + merge the catalogue and its missing covers. Returns a summary dict.
 
     `should_stop` is a callable, as in slg_scrape, so the GUI's stop button can
     cut a long cover download short.
     """
+    normalize_catalogue(catalog_id, allow_all=False)
+    if catalog_id == "dlsite":
+        import slg_dlsite_online as online
+        if conn.execute("SELECT 1 FROM catalog_redirects WHERE active=1 AND old_slug LIKE 'dlsite-rj%' LIMIT 1").fetchone():
+            conn.commit()
+            _create_catalog_backup(conn)
+        def fetch(path):
+            if should_stop and should_stop():
+                raise RuntimeError("DLsite同步已取消，保留上次目录。")
+            raw = _server_http_get(SERVER_BASE + path,timeout=30)
+            if should_stop and should_stop():
+                raise RuntimeError("DLsite同步已取消，保留上次目录。")
+            return raw
+        return online.pull(conn,fetch,_merge_catalog,log)
     should_stop = should_stop or (lambda: False)
     manifest = fetch_manifest(raise_on_failure=True)
     if manifest is None:
         raise RuntimeError("服务器不可用，请稍后再试")
+    if not isinstance(manifest, dict) or manifest.get("catalog_id", "western_slg") != "western_slg":
+        raise RuntimeError("服务器目录身份与所选目录不匹配")
 
     lastmod = manifest.get("lastmod")
     want = manifest.get("db_sha256")
@@ -767,7 +912,13 @@ def pull(conn, log=print, on_progress=None, should_stop=None):
         fd, tmp = tempfile.mkstemp(suffix=".db")
         os.close(fd)
         try:
-            raw = _server_http_get(SERVER_BASE + "/slgking.db", timeout=120)
+            snapshot_path=manifest.get("db_path")
+            if snapshot_path is not None:
+                if not want or snapshot_path != "/catalogues/western_slg/snapshots/"+want+".db":
+                    raise RuntimeError("服务器快照路径无效")
+            else:
+                snapshot_path="/slgking.db"
+            raw = _server_http_get(SERVER_BASE + snapshot_path, timeout=120)
             if want and hashlib.sha256(raw).hexdigest() != want:
                 raise RuntimeError("目录校验失败（sha256 不一致），已放弃本次更新")
             with open(tmp, "wb") as fh:
@@ -781,7 +932,9 @@ def pull(conn, log=print, on_progress=None, should_stop=None):
             slg_db.set_pref(conn, PREF_LAST_PULL_HASH, want)
         log("全站 %d 款 · 新增 %d" % (count, created))
 
-    covers = _download_covers(_missing_covers(conn), log, on_progress, should_stop)
+    # GUI downloads visible images on demand; legacy CLI retains bulk behavior.
+    covers = _download_covers(_missing_covers(conn), log, on_progress, should_stop) if download_images else 0
     slg_db.invalidate_cover_gaps()
     return {"catalogue": count, "new": created,
-            "covers": covers, "unchanged": unchanged}
+            "covers": covers, "unchanged": unchanged,
+            "source_status":_collector_status(manifest,"f95zone")}

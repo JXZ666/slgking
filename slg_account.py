@@ -315,7 +315,7 @@ def diagnose_connectivity(timeout=_CONNECTIVITY_TIMEOUT):
     checks["manifest"] = _connectivity_probe_http(
         "/manifest.json", routes, timeout, expect_manifest=True)
 
-    copy_lines = ["SLGking 连接诊断（只读）"]
+    copy_lines = ["黄油之王 连接诊断（只读）"]
     copy_lines.extend((
         "DNS：%s" % _connectivity_display(checks["dns"]),
         "TCP：%s" % _connectivity_display(checks["tcp"]),
@@ -539,9 +539,16 @@ def _read_session(path):
     try:
         with open(path, encoding="utf-8") as inp:
             data = json.load(inp)
-        account_id = str(data["account_id"])
-        return {"account_id": data["account_id"],
-                "device_token": _dpapi(base64.b64decode(data["token"]), False).decode("utf-8")}
+        if not isinstance(data, dict):
+            raise ValueError("invalid session shape")
+        account_id, token = data.get("account_id"), data.get("token")
+        if (not isinstance(account_id, str) or not account_id.strip()
+                or not isinstance(token, str) or not token):
+            raise ValueError("invalid session fields")
+        device_token = _dpapi(base64.b64decode(token, validate=True), False).decode("utf-8")
+        if not device_token.strip():
+            raise ValueError("empty device session")
+        return {"account_id": account_id, "device_token": device_token}
     except FileNotFoundError:
         return None
     except (ValueError, KeyError, OSError, UnicodeError, binascii.Error) as exc:
@@ -773,7 +780,7 @@ def developer_login(developer_key, allow_inactive=False):
         old = (session_for_mode(True) if allow_inactive else session())
     except AccountError:
         old = None
-    payload = {"device_label": "SLGking 管理员设备"}
+    payload = {"device_label": "黄油之王 管理员设备"}
     if old:
         payload["device_token"] = old["device_token"]
     result = request(

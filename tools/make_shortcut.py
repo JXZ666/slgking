@@ -39,9 +39,9 @@ MAIN_EXE = "slgking.exe"
 
 # (exe 文件名, 快捷方式名, 说明)。第一个是主程序，它没打包就算整个脚本失败。
 TARGETS = (
-    (MAIN_EXE, "SLG黄游之王.lnk", "SLG黄游之王 - dikgames 游戏库管理"),
-    ("slgking_admin.exe", "SLG黄游之王-管理工具.lnk",
-     "SLG黄游之王 - 作者运维工具（仅本机使用，勿分发）"),
+    (MAIN_EXE, "黄油之王.lnk", "黄油之王 - 游戏目录与本地游戏库管理"),
+    ("slgking_admin.exe", "黄油之王-管理工具.lnk",
+     "黄油之王 - 作者运维工具（仅本机使用，勿分发）"),
 )
 
 # Pure ASCII: every value it needs arrives through the environment.

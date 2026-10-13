@@ -41,10 +41,12 @@ class ScanTitleLookupTests(unittest.TestCase):
                     wraps=slg_scan._title_index_titles) as build_title_map:
                 result = slg_scan.scan(conn, roots=[root], log=logs.append)
 
-        self.assertEqual(result, {"matched": 2, "unmatched": []})
+        self.assertEqual(result["matched"], 1)
+        self.assertEqual(result["unmatched"], [])
+        self.assertEqual(result["items"][1]["status"], "conflict")
         self.assertEqual(build_title_map.call_count, 1)
         matching_logs = [line for line in logs if line.endswith("#%d Display Title" % game_id)]
-        self.assertEqual(len(matching_logs), 2)
+        self.assertEqual(len(matching_logs), 1)
 
 
 if __name__ == "__main__":
