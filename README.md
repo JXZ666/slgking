@@ -1,81 +1,55 @@
-# SLG黄游之王 · SLGking
+# 黄油之王
 
-面向 18 周岁以上用户的游戏目录与社区：网页端方便检索游戏、查看评论和自由讨论，Windows 客户端帮助管理本地游戏库，并按个人评分与偏好推荐作品。
+面向 **18 周岁以上用户**的游戏目录、个人游戏管理与社区。找作品、按标签筛选、阅读公开评论，也可以整理自己已有的游戏。
 
-[打开网页端](https://slg-king.com/m/#/)　·　[访问官网](https://slg-king.com/)　·　[下载最新稳定版](https://github.com/JXZ666/slgking/releases/latest)　·　[更新日志](CHANGELOG.md)　·　[GitHub 仓库](https://github.com/JXZ666/slgking)
+| 平台 | 用途 | 入口 |
+| --- | --- | --- |
+| Windows | 目录检索、本地游戏库、扫描匹配与启动程序管理 | [下载发布页中的 `slgking.exe`](https://github.com/JXZ666/slgking/releases/latest) |
+| 网页 | 手机或电脑浏览器检索目录、查看评论、参与论坛和使用云端账号 | [直接打开](https://slg-king.com/m/#/) |
+| Android | 手机浏览目录、评分收藏、追踪更新与 AI 翻译 | [在发布页下载 APK（测试版）](https://github.com/JXZ666/slgking/releases/latest) |
 
-> 本项目只整理游戏资料并帮助管理本地游戏库，不托管游戏文件，也不提供游戏下载。游戏文件请通过其作者或发行方提供的渠道获取。
+[官网](https://slg-king.com/) · [全部发行记录](https://github.com/JXZ666/slgking/releases) · [问题反馈](https://github.com/JXZ666/slgking/issues)
 
-<img src="assets/screenshots/v023-overview.png" alt="SLGking 游戏目录与检索界面" width="900">
+> 本项目只整理游戏资料，不托管游戏文件，也不提供游戏下载。请通过作品作者或发行方的渠道获取游戏。下载版号和具体更新以公开发行页为准。
 
-图：在桌面客户端浏览游戏目录、筛选标签和查找作品。
+## 找游戏与整理游戏
 
-## 这款软件能做什么
+- 浏览 SLG 大类、DLsite 或全部目录，按名称、标签和来源检索；DLsite 还支持 RJ 编号、开发者、语言与作品形式。未知资料保持未知，原生评分与站内评分分别展示。
+- Windows 可以扫描多个本地路径，自动寻找合集中的游戏根目录，核对候选、选择启动程序，也能手动添加作品、修复路径和更换封面。扫描不会执行游戏或脚本；联网匹配需主动查询并确认。
+- Windows 和 Android 保留本机评分、想玩、收藏夹与个人记录。Android 的「追踪」分为版本更新、想玩、收藏夹；AI 翻译可先选公司和模型，再填入自己的 API Key，也保留免费翻译入口。
+- 网页提供分页目录、积分榜和装扮榜。三端可阅读公开评论并使用共同的云端账号；论坛与游戏评论分别组织。
 
-- 找游戏：网页和客户端都能搜索游戏名、按中文标签筛选，按评分、热度或最近更新排序。客户端的「按xp推荐」会参考本机评分及游戏共有的标签、开发者与引擎，优先显示更符合个人偏好的作品。
-- 看评论、参与讨论：游戏评论针对具体作品，与客户端共享；网页论坛供大家自由讨论，可选择关联游戏。登录后可以发表评论、点赞、点踩和举报；客户端还可以保存仅自己可见的本机私人评论。
-- 整理游戏：Windows 客户端支持「想玩」或「已下载」标记、收藏夹、本地目录扫描、安装版本记录和更新提醒。也可以添加目录里没有的游戏，并为本地游戏选择启动程序。
+目录资料来自 [Dikgames](https://dikgames.com/)、[F95](https://f95zone.to.it/) 和 [DLsite](https://www.dlsite.com/)，由项目服务器整理后供三端读取。DLsite 目前仅收录部分作品，更新受来源规则、访问限制和采集预算影响；已有目录不代表全站覆盖。使用软件检索不会直接触发外站采集。
 
-<img src="assets/screenshots/v023-comments.png" alt="SLGking 游戏评论区界面" width="900">
+<img src="docs/media/v027-android-ai.png" alt="Android 0.27 测试版的 AI 翻译公司选择界面" width="320">
 
-图：在游戏评论区翻页阅读公开评论，或发表自己的评论。
-
-游戏目录资料来自 [dikgames.com](https://dikgames.com) 和 [F95zone.to.it](https://f95zone.to.it)，由项目服务器整理，供网页检索和客户端同步。官网提供项目介绍、网页入口、客户端下载和更新信息。
+图：Android 翻译设置，选择公司和模型后填写自己的 API Key。
 
 ## 快速开始
 
-1. **网页端：** 用手机或电脑浏览器[打开网页端](https://slg-king.com/m/#/)，无需安装即可搜索目录、选择中文标签、查看详情和公开评论。到「我的」登录已有客户端账号或创建账号，可使用可折叠个人中心、签到、任务以及评论和论坛。已有账号请直接登录，避免重复注册。
-2. **Windows 客户端：** 从[稳定版发布页](https://github.com/JXZ666/slgking/releases/latest)下载 `slgking.exe` 并运行。首次打开后点击「更新游戏数据」获取目录和封面，之后已缓存的资料可离线检索。登录云端账号后，可以管理本机收藏和评分、扫描目录、保存私人记录；给熟悉的游戏评分，再选「按xp推荐」积累个人偏好。
+1. Windows 下载 `slgking.exe`；Android 下载发行页唯一的官方 APK；网页直接打开链接。Android 需要 Android 7.0 及以上，包含 arm64 与 x86_64，不含 32 位 ARM。
+2. 客户端选择目录后点击「更新游戏数据」。封面按需下载，缓存后的目录和资料可离线浏览；网页需要联网。
+3. 到「个人」创建或登录账号，使用评分、收藏、签到、商城及公开评论。未登录仍可检索目录和阅读公开评论。
+4. Windows 到「本地游戏库」核对扫描候选和启动程序；Android 到「追踪」管理想玩与收藏。PC 的扫描、游戏启动与存档工具不属于手机功能。
 
-程序数据保存在 exe 以外的位置，替换软件文件不会删除已有资料。登录后可在「更多工具…」中使用「备份与恢复…」迁移个人资料；也可以退出软件后复制整个 `%LOCALAPPDATA%\slgking` 文件夹。账号登录密钥和恢复码不包含在个人资料备份中。
+Android 仍是测试版。遇到问题请提供设备型号、Android 版本及复现步骤，提交截图前遮住账号密钥、API Key 和私人路径。
 
-## 云端账号与评论
+## 账号、私人资料与备份
 
-普通账号不使用邮箱注册。每次「创建账号」都会生成一份新身份；换设备时请用「登录」，不要重复创建，否则新旧账号的积分和评论不会合并。创建账号后，软件会显示一串登录密钥和一串恢复码；请分别妥善保存，它们不会再次显示。新设备登录需要两串密钥；已信任设备在连续 7 天未登录后，也需要恢复码。密钥丢失后无法找回，账号也无法通过邮箱重置。
+三端共用云端账号、积分、装扮和公开评论。换设备请登录已有账号，不要重复创建新身份；妥善保存登录密钥和恢复码，项目无法通过邮箱重置账号。
 
-网页端与 Windows 客户端共用云端账号，昵称、云端积分、头衔、签到记录、头像框、名片框和公开评论可以在其他设备登录使用。网页论坛独立于游戏评论，论坛内容不计入公开游戏评论奖励。本机游戏评分、想玩/已下载状态、收藏夹、游戏路径、自建游戏分类和私人记录只留在当前电脑，不会随账号自动同步；换电脑需要自行备份迁移。客户端首次创建或登录时，会尝试将通过本机存档校验的旧积分与头衔迁入账号一次。
+**本机评分、收藏、游戏路径、私人记录和自建游戏不会随登录自动跨端同步。** Windows 数据保存在 `%LOCALAPPDATA%\slgking`，Android 数据在应用私有目录。网页「个人云记录」是单独的云端功能，仅本人登录后可见，不会与客户端本机私人记录自动合并。
 
-未登录用户可以浏览目录、同步目录并查看公开评论；评分、个人资料、收藏管理、签到、积分商城和发表评论需要登录。每日签到和当天的群兑换码各可获得 10 积分；符合奖励规则的公开评论审核通过后可获得 20 积分，评论奖励有账号和游戏频率限制。积分商城还提供每日与每周任务；公开评论任务在评论审核通过后按首次公开日期计进度。公开评论可能展示你的昵称、已装备头衔和名片装饰。私人评论限 500 字，仅保存在本机。其他补偿活动仅在公告显示时开放。
+升级前使用「备份与恢复」导出个人 JSON，并另存个人图片。JSON 不携带图片文件、Windows 本机私人评论或账号登录密钥与恢复码；导入可能覆盖原记录，请先备份目标设备。完整数据目录可能包含会话凭证和私人路径，应加密私存。正常覆盖升级保留原资料；Android 卸载重装会清除未备份的应用数据。
 
-## 数据与隐私
+目录更新、封面、账号与评论功能需要网络。软件会发送随机安装标识、版本、平台及少量功能汇总统计，不上传本地游戏文件、私人评论正文或游戏路径。使用第三方 AI 翻译时，待翻译文本将发送到你配置的服务商；API Key 请自行保管，不要公开分享备份或设置截图。
 
-### 数据与联网
+## 反馈与许可
 
-- 保存在本机：游戏评分、状态、收藏夹、私人评论、扫描到的游戏目录与启动程序，以及本地偏好和翻译缓存。默认数据目录为 `%LOCALAPPDATA%\slgking`。
-- 云端账号数据：账号身份、昵称、云端积分、头衔、签到、名片装饰和你主动公开的评论。忘记登录密钥或恢复码时，项目无法替你重置账号。
-- 使用统计：软件会发送随机生成的安装标识、客户端版本、启动平台、游戏条目数，以及少量功能事件和汇总数字（例如本机积分、头衔数和收藏夹数），用于了解版本使用情况。该标识不由硬件信息或云端账号生成。统计不包含本地游戏目录、私人评论正文或游戏文件；公开评论只有在你选择公开发表时才会上传。
-- 网络用途：更新游戏目录和封面、检查软件更新、读取公告、使用云端账号与评论，以及发送上述使用统计。目录同步和账号功能需要网络。
+[GitHub Issues](https://github.com/JXZ666/slgking/issues) · QQ 交流群：1124074040。
 
-## 常见问题
-
-### 软件会下载或启动游戏吗？
-
-不会提供游戏文件或下载地址。软件可以扫描你已有的本地目录；对你手动选择了启动程序的本地游戏，也可以从详情页启动。
-
-### 换电脑后，哪些资料会跟着账号走？
-
-云端账号资产和公开评论可在新设备登录后使用。本机评分、收藏夹、游戏目录、私人评论等需要通过「备份与恢复…」或复制 `%LOCALAPPDATA%\slgking` 迁移。账号密钥与恢复码不包含在本机备份中。
-
-### 为什么我不能发表评论或使用积分功能？
-
-这些个人功能需要先创建或登录云端账号。未登录仍可浏览游戏目录和公开评论。
-
-### 评论通过审核了，为什么没有积分？
-
-奖励只发给符合规则的有效公开评论，并有频率限制：每个账号 7 天内最多 3 条评论获得奖励；同一款游戏 30 天内最多奖励 1 条。待审核或未通过的评论不会立即获得积分。
-
-### 同步失败或评论加载不出来怎么办？
-
-先检查网络，再重试对应操作。目录更新和云端评论依赖服务器，网络或服务器维护时可能暂时不可用；已经保存在本机的资料不会因此被删除。
-
-### 怎样反馈问题或建议？
-
-可在 [GitHub Issues](https://github.com/JXZ666/slgking/issues) 提交问题，也可以加入 QQ 交流群 1124074040。提交截图或日志前，请先确认没有包含个人游戏目录等隐私信息。
-
-## 许可证
-
-本项目采用 [GNU General Public License v3.0](LICENSE)。
+感谢 **vegetable dog** 为 Android 移植作出的贡献。本项目采用 [GNU General Public License v3.0](LICENSE)。各端对应源码与校验和随发行提供；自动生成的标签源码以 Windows 发行基线为准，Android 与网页请使用各自的源码附件。
 
 ### English
 
-SLGking is a game catalogue and community for adults aged 18+. [Open the web app](https://slg-king.com/m/#/) to search by tags, read game reviews, and join the independent discussion forum without installation. The Windows client also manages games already on your computer and recommends titles using local ratings. Both share cloud accounts and public game reviews; local ratings, collections, game paths, private notes, and custom game categories do not automatically sync. It does not host or distribute game files. Visit the [official website](https://slg-king.com/) or get the Windows client from [GitHub](https://github.com/JXZ666/slgking/releases/latest).
+黄油之王 is a game catalogue and personal library manager for adults aged 18+. Windows helps organize games already on your PC; the web app provides catalogue browsing and community features; Android is available as a test build. It does not host or distribute game files. Cloud accounts and public comments are shared, while local ratings, collections and private records do not automatically sync between devices. Get downloads and matching source archives from [Releases](https://github.com/JXZ666/slgking/releases/latest).
