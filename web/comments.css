@@ -1,0 +1,10 @@
+.comment-mode { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+.comment-mode button { min-height: 44px; flex: 1 1 100px; min-width: 0; white-space: normal; }
+.comment-mode button[aria-pressed="true"] { border-color: var(--gold, #e9ba51); background: var(--surface, #262628); color: var(--gold, #e9ba51); }
+.comment-mode button:focus-visible { outline: 2px solid var(--gold, #e9ba51); outline-offset: 3px; }
+.comment-privacy { line-height: 1.7; overflow-wrap: anywhere; }
+.comment-form, .comment-list, .game-comments { min-width: 0; }
+.comment-item .author-name { overflow-wrap: anywhere; }
+.comment-form-footer button { min-height: 44px; white-space: normal; }
+.personal-comment { border-inline-start: 2px solid var(--line, #414148); padding-inline-start: 12px; }
+@media (max-width: 430px) { .comment-heading { align-items: flex-start; } .comment-sort button { min-height: 44px; } }

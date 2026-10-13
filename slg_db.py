@@ -1810,8 +1810,6 @@ def remove_from_collection(conn, game_id, collection_id):
 
 # --- backup / restore ----------------------------------------------------------
 
-LEGACY_IMPORTED_ASSETS_PREF = "cloud.legacy_imported_assets"
-
 # The user's own curation, in JSON: ratings/notes/status, tag exclusions,
 # collections and their members, and hand-written translations. prefs (which
 # holds the API key and the sync gate) and the machine-translation cache stay
@@ -2068,12 +2066,6 @@ def import_user_data(conn, data):
     savepoint = "slg_user_restore_%s" % uuid.uuid4().hex
     conn.execute("SAVEPOINT " + savepoint)
     try:
-        # Imported balances are editable backup data, not native legacy
-        # history. Keep this provenance in the same restore transaction so a
-        # failed restore cannot block migration of the original local assets.
-        if data.get("points_log") or data.get("owned_titles"):
-            conn.execute("INSERT OR REPLACE INTO prefs (key,value) VALUES (?,?)",
-                         (LEGACY_IMPORTED_ASSETS_PREF, "1"))
         # Children cleared before parents. state and collection_items are held
         # back because their game_id must be re-keyed from game_slug.
         for table in ("collection_items", "state", "exclusions",

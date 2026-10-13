@@ -471,30 +471,68 @@ _URL_BLOCK = re.compile(r"<url>(.*?)</url>", re.S)
 
 
 def fetch_sitemap(fetcher, log=print):
-    """{slug: {'lastmod': date, 'cover': url}} for the whole site, 3 requests.
+    """Discover same-site post sitemap partitions and preserve full lastmod.
 
-    Way cheaper than walking tag listings, which visited 2859 game slots for
-    1274 games (2.24x) and re-read ~600 pages per re-sync for nothing.
+    Old fixed partitions are used only when the index cannot be read. The
+    bounded discovery does not accept arbitrary off-site fetch destinations.
     """
+    from urllib.parse import urlsplit
+    import xml.etree.ElementTree as ET
+
+    def parse(xml):
+        try:
+            return ET.fromstring(xml) if xml else None
+        except (ET.ParseError, TypeError):
+            return None
+
+    def local_name(tag):
+        return tag.rsplit("}", 1)[-1]
+
+    root = parse(fetcher.get(BASE + "/sitemap_index.xml"))
+    names = []
+    if root is not None and local_name(root.tag) == "sitemapindex":
+        for entry in root:
+            for child in entry:
+                if local_name(child.tag) != "loc" or not child.text:
+                    continue
+                parsed = urlsplit(child.text.strip())
+                if (parsed.scheme == "https" and parsed.netloc == urlsplit(BASE).netloc
+                        and not parsed.query and not parsed.fragment
+                        and re.fullmatch(r"/post-sitemap[0-9]*\.xml", parsed.path)):
+                    name = parsed.path.lstrip("/")
+                    if name not in names:
+                        names.append(name)
+    else:
+        log("  ! sitemap index unavailable; using legacy post partitions")
+        names = list(SITEMAPS)
+    if len(names) > 32:
+        # Fail closed rather than claim a complete catalogue from a truncation.
+        raise ValueError("too many post sitemap partitions")
     out = {}
-    for name in SITEMAPS:
-        xml = fetcher.get("%s/%s" % (BASE, name))
-        if not xml:
-            log("  ! %s 取不到，跳过" % name)
+    for name in names:
+        tree = parse(fetcher.get(BASE + "/" + name))
+        if tree is None or local_name(tree.tag) != "urlset":
+            log("  ! %s unavailable or invalid, skipped" % name)
             continue
-        for block in _URL_BLOCK.findall(xml):
-            loc = re.search(r"<loc>([^<]+)</loc>", block)
-            if not loc:
+        for entry in tree:
+            values = {local_name(c.tag): (c.text or "").strip() for c in entry}
+            loc = urlsplit(values.get("loc", ""))
+            if loc.scheme != "https" or loc.netloc != urlsplit(BASE).netloc:
                 continue
-            slug = loc.group(1).rstrip("/").rsplit("/", 1)[-1]
+            slug = loc.path.rstrip("/").rsplit("/", 1)[-1]
             if not slug:
                 continue
-            mod = re.search(r"<lastmod>([^<]+)</lastmod>", block)
-            img = re.search(r"<image:loc>([^<]+)</image:loc>", block)
-            out[slug] = {
-                "lastmod": mod.group(1)[:10] if mod else None,
-                "cover": _sized_cover(img.group(1)) if img else None,
-            }
+            cover = None
+            for image in entry:
+                if local_name(image.tag) == "image":
+                    for child in image:
+                        if local_name(child.tag) == "loc":
+                            cover = _sized_cover((child.text or "").strip())
+                            break
+            item = {"lastmod": values.get("lastmod") or None, "cover": cover}
+            previous = out.get(slug)
+            if previous is None or (item["lastmod"] or "") >= (previous["lastmod"] or ""):
+                out[slug] = item
     return out
 
 

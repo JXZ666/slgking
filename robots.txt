@@ -1,0 +1,5 @@
+# 不收录（0.25.0 冻结决定，见 .claude/web-api-contract.md）。
+# 站内不做任何站外引流，因此整站拒绝收录。目录与封面仍可由客户端直接 HTTP 拉取，
+# 不受 robots.txt 影响——它只约束遵守协议的爬虫。
+User-agent: *
+Disallow: /

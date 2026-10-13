@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" content="#120c15">
+<title>黄油之王 · 手机版</title>
+<link rel="stylesheet" href="/m/style.css">
+<link rel="stylesheet" href="/m/forum.css">
+<link rel="stylesheet" href="/m/account.css">
+<link rel="stylesheet" href="/m/author.css">
+<link rel="stylesheet" href="/m/shop.css">
+<link rel="stylesheet" href="/m/announcements.css">
+<link rel="stylesheet" href="/m/comments.css">
+<link rel="stylesheet" href="/m/catalogue.css">
+<link rel="stylesheet" href="/m/leaderboard.css">
+</head>
+<body>
+
+<div id="age-gate" class="gate hidden">
+  <div class="gate-box" role="dialog" aria-modal="true" aria-labelledby="age-title" aria-describedby="age-description">
+    <div class="gate-mark">18+</div>
+    <h2 id="age-title">本页含成人向游戏资料</h2>
+    <p id="age-description" class="muted">仅面向成年用户。未满 18 岁请立即离开。</p>
+    <button id="age-enter" class="block">我已满 18 岁，进入</button>
+    <button id="age-leave" class="ghost block">离开</button>
+  </div>
+</div>
+
+<header class="topbar">
+  <a class="brand" href="#/">
+    <span class="mark" aria-hidden="true">S</span>
+    <span>
+      <span class="eyebrow">黄油之王 · 网页版 <span id="web-version"></span></span>
+      <span id="topbar-title">目录</span>
+    </span>
+  </a>
+  <a id="topbar-user" class="pill" href="#/login">登录</a>
+</header>
+
+<main id="view" aria-live="polite"></main>
+
+<nav class="tabbar" aria-label="主导航">
+  <a href="#/" data-tab="home"><b aria-hidden="true">◆</b><span>首页</span></a>
+  <a href="#/search" data-tab="search"><b aria-hidden="true">⌕</b><span>搜索</span></a>
+  <a href="#/forum" data-tab="forum"><b aria-hidden="true">◎</b><span>论坛</span></a>
+  <a href="#/login" data-tab="me"><b aria-hidden="true">☺</b><span>我的</span></a>
+</nav>
+
+<script type="module" src="/m/app.js"></script>
+</body>
+</html>

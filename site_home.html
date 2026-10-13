@@ -1,131 +1,331 @@
 <!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#140d18">
-<meta name="description" content="SLGking 是面向成年用户的桌面平台：按性癖检索成人向游戏、查看和撰写玩家评论、管理本地游戏库。游戏文件由用户自行管理，本站不托管或提供游戏下载。">
-<meta property="og:type" content="website">
-<meta property="og:title" content="SLGking｜按性癖找游戏、看评论、管理本地游戏库">
-<meta property="og:description" content="面向成年用户的桌面平台，整合游戏检索、社区评论与本地游戏管理。本站不托管或提供游戏文件下载。">
-<meta property="og:image" content="https://raw.githubusercontent.com/JXZ666/slgking/main/assets/screenshots/v023-overview.png">
-<meta property="og:url" content="https://slg-king.com/">
-<title>SLGking｜按性癖找游戏、看评论、管理本地游戏库</title>
-<style>
-:root{color-scheme:dark;--bg:#140d18;--surface:#211725;--surface2:#1a121e;--line:#49344a;--text:#f7edf5;--muted:#c0afbf;--rose:#f07aa7;--gold:#f0cc83;--green:#9cdec1;--max:1080px}
-*{box-sizing:border-box}
-html{scroll-behavior:smooth}
-body{margin:0;background:radial-gradient(ellipse at 75% -10%,#6b2e5038,transparent 42%),radial-gradient(ellipse at 0 50%,#47234428,transparent 35%),var(--bg);color:var(--text);font:16px/1.65 Inter,"Segoe UI","Microsoft YaHei",sans-serif}
-a{color:inherit}
-a:focus-visible{outline:3px solid var(--gold);outline-offset:4px;border-radius:4px}
-.wrap{width:min(var(--max),calc(100% - 40px));margin:auto}
-header{height:76px;display:flex;align-items:center;justify-content:space-between;gap:18px;border-bottom:1px solid #ffffff12}
-.brand{display:flex;align-items:center;gap:11px;text-decoration:none;font-weight:800;letter-spacing:.02em}
-.mark{width:39px;height:39px;display:grid;place-items:center;border:1px solid #f07aa766;border-radius:13px;background:linear-gradient(145deg,#f07aa7,#8c3c69);color:#26121f;box-shadow:0 0 24px #f07aa729;font-size:20px}
-nav{display:flex;align-items:center;gap:22px}nav a{color:var(--muted);text-decoration:none;font-size:13px}nav a:hover{color:var(--text)}
-.button{display:inline-flex;align-items:center;justify-content:center;min-height:45px;padding:10px 17px;border:1px solid transparent;border-radius:11px;background:linear-gradient(115deg,var(--rose),#e599b0);color:#29121f;text-decoration:none;font-weight:750;box-shadow:0 9px 25px #ef659b22}
-.button.secondary{background:#2a1e2d;border-color:#59415b;color:var(--text);box-shadow:none}
-.hero{padding:68px 0 54px;display:grid;grid-template-columns:minmax(0,1.3fr) minmax(250px,.7fr);gap:36px;align-items:center}
-.eyebrow{color:var(--gold);font-size:12px;font-weight:750;letter-spacing:.14em;text-transform:uppercase}
-h1{font-size:clamp(34px,5vw,58px);line-height:1.13;letter-spacing:-.04em;margin:13px 0 17px}
-.lead{max-width:660px;color:#ddcedb;font-size:18px;margin:0}
-.actions{display:flex;flex-wrap:wrap;gap:11px;margin-top:26px}
-.notice{border:1px solid #9a564c88;border-radius:16px;background:linear-gradient(145deg,#351d2b,#211520);padding:22px;box-shadow:0 18px 42px #09060b55}
-.notice strong{display:block;color:#ffc1a6;font-size:15px;margin-bottom:7px}.notice p{margin:0;color:#ddc9d3;font-size:13px}
-.note-label{display:inline-block;border:1px solid #a7675977;border-radius:99px;padding:4px 9px;color:#ffc5a7;font-size:11px;font-weight:800;letter-spacing:.1em;margin-bottom:11px}
-section{padding:30px 0 42px}
-.section-head{margin-bottom:18px}.section-head h2{font-size:24px;margin:0 0 5px}.section-head p{color:var(--muted);margin:0;font-size:14px}
-.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px}
-.card{border:1px solid var(--line);border-radius:15px;background:linear-gradient(145deg,#241a28,#1b141f);padding:20px;min-width:0}
-.card .icon{color:var(--gold);font-size:20px;font-weight:800}.card h3{font-size:16px;margin:8px 0 5px}.card p{color:var(--muted);font-size:13px;margin:0}
-.screenshots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
-.screenshot{margin:0;min-width:0;border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#201722}
-.screenshot a{display:block;padding:12px;background:linear-gradient(145deg,#38243a,#1a121e)}
-.screenshot img{display:block;width:100%;height:auto;max-height:340px;object-fit:contain;border-radius:8px;background:#160f1a}
-.screenshot figcaption{padding:14px 17px 17px;color:var(--muted);font-size:13px}
-.screenshot figcaption strong{display:block;color:var(--text);font-size:15px;margin-bottom:3px}
-.privacy{display:grid;grid-template-columns:1fr 1fr;gap:14px}.privacy .card{padding:22px}.privacy ul{padding-left:19px;margin:12px 0 0;color:var(--muted);font-size:13px}.privacy li+li{margin-top:7px}
-.community{display:flex;align-items:center;justify-content:space-between;gap:22px;background:linear-gradient(115deg,#302039,#211724);border:1px solid #62415f;border-radius:17px;padding:23px 25px}
-.community h2{margin:0 0 4px;font-size:21px}.community p{margin:0;color:var(--muted);font-size:13px}
-.group{flex:none;border:1px solid #74583f;border-radius:12px;background:#1c151e;padding:10px 14px;color:var(--gold);font:700 19px ui-monospace,Consolas,monospace;letter-spacing:.06em}
-.links{display:flex;flex-wrap:wrap;gap:12px 22px;margin-top:18px}.links a{color:#edb3cf;font-size:13px;text-decoration:none}.links a:hover{text-decoration:underline}
-footer{margin-top:20px;border-top:1px solid #ffffff12;padding:21px 0 30px;color:#9d8d9e;font-size:12px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
-@media(max-width:760px){.hero{grid-template-columns:1fr;padding:48px 0 35px;gap:23px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.screenshots{grid-template-columns:1fr}.privacy{grid-template-columns:1fr}.community{align-items:flex-start;flex-direction:column}}
-@media(max-width:540px){.wrap{width:min(100% - 28px,var(--max))}header{height:auto;min-height:68px}.brand{font-size:14px}.mark{width:35px;height:35px}nav{gap:12px}nav a{font-size:12px}nav a:nth-child(2){display:none}.nav-download{display:none}.hero{padding:38px 0 28px}h1{font-size:37px}.lead{font-size:16px}.notice{padding:18px}.grid{grid-template-columns:1fr}.card{padding:17px}.community{padding:19px}.group{font-size:17px}section{padding:24px 0 32px}}
-@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
-</style>
-</head>
-<body>
-<header class="wrap">
-  <a class="brand" href="#top" aria-label="SLGking 首页"><span class="mark" aria-hidden="true">S</span><span>SLGking</span></a>
-  <nav aria-label="页面导航">
-    <a href="#features">功能</a><a href="#privacy">账号与隐私</a><a href="#community">交流群</a>
-    <a class="button nav-download" href="https://github.com/JXZ666/slgking/releases/latest" target="_blank" rel="noopener noreferrer">稳定版下载</a>
-  </nav>
-</header>
-<main id="top" class="wrap">
-  <section class="hero" aria-labelledby="hero-title">
-    <div>
-      <div class="eyebrow">成人向游戏检索 · 玩家评论 · 本地游戏管理</div>
-      <h1 id="hero-title">按性癖找游戏，<br>看玩家评论，<br>管理本地游戏库。</h1>
-      <p class="lead">SLGking 是面向成年用户的桌面平台：用个人偏好发现游戏，和玩家交流，再把自己的游戏库与进度整理清楚。检索、评论和管理功能都在桌面客户端中使用；官网提供介绍、下载和更新信息。</p>
-      <div class="actions">
-        <a class="button" href="https://github.com/JXZ666/slgking/releases/latest" target="_blank" rel="noopener noreferrer">前往 GitHub 获取稳定版</a>
-        <a class="button secondary" href="https://github.com/JXZ666/slgking#快速开始" target="_blank" rel="noopener noreferrer">查看功能与快速开始</a>
+<html lang="zh-CN" data-product-mode="triple">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#151219" />
+    <meta name="description" content="黄油之王 提供 Windows 客户端、网页端与 Android 测试版：检索成人向游戏、阅读玩家评论、管理本机资料。云端账号共用，私人记录不自动同步。本站不提供游戏文件下载。" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="黄油之王｜Windows、网页与 Android 三端入口" />
+    <meta property="og:description" content="电脑整理游戏库，网页检索与讨论，Android 记录收藏和私人资料。Android 仍为测试版，仅供成年用户使用。" />
+    <meta
+      property="og:image"
+      content="https://slg-king.com/site-assets/overview.webp"
+    />
+    <meta property="og:url" content="https://slg-king.com/" />
+    <title>黄油之王｜Windows、网页与 Android 三端入口</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ac2256'/%3E%3Ctext x='16' y='24' text-anchor='middle' font-family='Segoe UI,sans-serif' font-size='25' font-weight='800' fill='white'%3ES%3C/text%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/site-assets/home.css" />
+    <script src="/site-assets/home.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#top">跳到主要内容</a>
+    <header class="site-header">
+      <div class="wrap header-inner">
+        <a class="brand" href="#top" title="返回首页"
+          ><span class="mark" aria-hidden="true">S</span>黄油之王</a
+        >
+        <nav aria-label="页面导航"><a href="#features">选择使用端</a><a href="#privacy">账号与隐私</a><a href="#community">交流群</a></nav>
+        <div class="header-tools">
+          <button class="theme-toggle" type="button" hidden>
+            主题：跟随系统</button
+          ><a class="button nav-download" href="#features">三端入口</a>
+        </div>
       </div>
-    </div>
-    <aside class="notice" aria-label="年龄与内容提示">
-      <span class="note-label">18+ ONLY</span>
-      <strong>仅供年满 18 周岁的用户使用</strong>
-      <p>软件面向成人题材游戏爱好者。本站仅介绍目录管理工具，不托管游戏文件，也不提供游戏文件下载或资源获取渠道。</p>
-    </aside>
-  </section>
-
-  <section id="screenshots" aria-labelledby="screenshots-title">
-    <div class="section-head"><h2 id="screenshots-title">先看看软件长什么样</h2><p>下面是桌面客户端的实际界面。点击图片可以查看大图。</p></div>
-    <div class="screenshots">
-      <figure class="screenshot">
-        <a href="https://raw.githubusercontent.com/JXZ666/slgking/main/assets/screenshots/v023-overview.png" target="_blank" rel="noopener noreferrer" aria-label="查看 SLGking 游戏检索界面大图">
-          <img src="https://raw.githubusercontent.com/JXZ666/slgking/main/assets/screenshots/v023-overview.png" alt="SLGking 桌面客户端的游戏检索与条目浏览界面" loading="lazy" decoding="async">
-        </a>
-        <figcaption><strong>发现感兴趣的游戏</strong>按标签筛选、浏览条目，再用自己的评分积累偏好。</figcaption>
-      </figure>
-      <figure class="screenshot">
-        <a href="https://raw.githubusercontent.com/JXZ666/slgking/main/assets/screenshots/v023-comments.png" target="_blank" rel="noopener noreferrer" aria-label="查看 SLGking 游戏评论区界面大图">
-          <img src="https://raw.githubusercontent.com/JXZ666/slgking/main/assets/screenshots/v023-comments.png" alt="SLGking 桌面客户端的游戏评论区与公开评论界面" loading="lazy" decoding="async">
-        </a>
-        <figcaption><strong>看看玩家怎么说</strong>进入游戏评论区，阅读公开评论，登录后也能发表自己的看法。</figcaption>
-      </figure>
-    </div>
-  </section>
-
-  <section id="features" aria-labelledby="features-title">
-    <div class="section-head"><h2 id="features-title">检索、评论、管理，一个桌面平台</h2><p>下面三项核心体验都在 SLGking 桌面客户端内完成；网站本身不提供在线游戏目录或评论浏览。</p></div>
-    <div class="grid">
-      <article class="card"><div class="icon" aria-hidden="true">01</div><h3>按性癖找游戏</h3><p>按标签和条目资料筛选，也可以给游戏评分。评分会逐步形成你对标签、开发者和引擎的偏好，用来调整后续条目的排序。评分与偏好保存在本机。</p></article>
-      <article class="card"><div class="icon" aria-hidden="true">02</div><h3>查看和撰写玩家评论</h3><p>在客户端的游戏评论区查看其他玩家的公开评论；登录账号后可以发表公开评论。个人评分和私人备注仍保存在本机。</p></article>
-      <article class="card"><div class="icon" aria-hidden="true">03</div><h3>管理本地游戏库</h3><p>扫描你选择的本地文件夹，整理游戏状态、版本与游玩进度。游戏路径和本地资料留在自己的电脑；软件不托管或提供游戏文件下载。</p></article>
-    </div>
-  </section>
-
-  <section id="privacy" aria-labelledby="privacy-title">
-    <div class="section-head"><h2 id="privacy-title">账号、评论与隐私</h2><p>本地资料和用户主动发布的云端内容分别处理。</p></div>
-    <div class="privacy">
-      <article class="card"><h3>保存在本机的数据</h3><ul><li>游戏库、文件夹路径、评分、状态、收藏和私人评论保存在本机。</li><li>本地游戏文件不会上传到 SLGking 服务器。</li><li>软件会发送不含游戏路径和评论正文的匿名使用事件与汇总数据。</li></ul></article>
-      <article class="card"><h3>云端账号与公开评论</h3><ul><li>账号登录密钥和恢复码由用户保管；遗失后无法找回。</li><li>公开评论会展示账号昵称及已装备的头衔、名片装饰，并经过自动审核。</li><li>私人评论只保存在本机；云端账号不会同步本地游戏库和私人评论。</li></ul></article>
-    </div>
-    <div class="links">
-      <a href="https://github.com/JXZ666/slgking#快速开始" target="_blank" rel="noopener noreferrer">使用说明与快速开始 →</a>
-      <a href="https://github.com/JXZ666/slgking#数据与联网" target="_blank" rel="noopener noreferrer">账号、评论与数据说明 →</a>
-      <a href="https://github.com/JXZ666/slgking/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer">查看更新记录 →</a>
-      <a href="https://github.com/JXZ666/slgking/releases/latest" target="_blank" rel="noopener noreferrer">下载最新稳定版 →</a>
-    </div>
-  </section>
-
-  <section id="community" aria-labelledby="community-title">
-    <div class="community"><div><h2 id="community-title">反馈与使用交流</h2><p>加入 QQ 交流群获取使用帮助、反馈问题和查看维护公告。</p></div><div class="group" aria-label="QQ群号">1124074040</div></div>
-  </section>
-</main>
-<footer class="wrap"><span>SLGking · 成人向游戏目录与本地管理工具</span><span><a href="https://github.com/JXZ666/slgking" target="_blank" rel="noopener noreferrer">GitHub 项目页</a> · 不托管游戏文件，不提供游戏文件下载</span></footer>
-</body>
+    </header>
+    <main id="top">
+      <section class="hero wrap" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">Windows · 网页 · Android</p>
+          <h1 id="hero-title">
+            找到喜欢的游戏，<br /><span>整理自己的游戏库。</span>
+          </h1>
+          <p class="lead">电脑整理游戏库，网页随时检索与讨论，Android 记录收藏和私人资料。选择适合你的入口。</p>
+          <div class="actions"><a class="button web-entry" href="https://slg-king.com/m/#/">打开网页端</a><a class="button secondary" href="https://github.com/JXZ666/slgking/releases/latest" target="_blank" rel="noopener noreferrer">下载 Windows 稳定版 ↗</a><a class="button secondary" href="https://github.com/JXZ666/slgking/releases/download/v0.25.0/slgking-android-0.25.0-a3.apk" target="_blank" rel="noopener noreferrer">下载 Android 测试版 ↗</a></div><p class="download-note">Windows 前往 GitHub 发布页；Android 为 0.25.0-a3 测试版。</p>
+        </div>
+        <figure class="hero-visual screenshot">
+          <a
+            class="image-frame hero-frame"
+            href="/site-assets/overview.webp"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="查看桌面客户端游戏检索界面大图"
+            ><img
+              src="/site-assets/overview.webp"
+              width="1770"
+              height="1140"
+              fetchpriority="high"
+              decoding="async"
+              alt="黄油之王 桌面客户端的标签筛选与游戏条目浏览界面"
+            /><span class="image-fallback" hidden
+              >界面图片暂时无法加载，请稍后重试。</span
+            ></a
+          >
+          <figcaption>
+            桌面客户端界面示例（0.23）；当前稳定版以发布页为准。<span
+              >点击查看大图 ↗</span
+            >
+          </figcaption>
+        </figure>
+      </section>
+      <aside class="age-note wrap" aria-label="年龄与内容提示">
+        <strong>18+ 仅供年满 18 周岁的用户使用</strong>
+        <p>
+          软件面向成人题材游戏爱好者。本站仅介绍目录管理工具，不托管游戏文件，也不提供游戏文件下载或资源获取渠道。
+        </p>
+      </aside>
+      <section
+        id="features"
+        class="section wrap"
+        aria-labelledby="features-title"
+      >
+        <div class="section-head">
+          <h2 id="features-title">选一个适合你的入口。</h2><p>三端各有所长，云端账号共用，私人记录保存在各自本机。</p>
+        </div>
+        <div class="platforms" aria-label="三端介绍">
+  <article class="platform" aria-labelledby="platform-windows">
+    <h3 id="platform-windows">Windows 客户端</h3><p class="platform-device">整理电脑里的游戏库</p>
+    <p>检索目录，记录评分与收藏，把已有游戏整理到一起。</p>
+    <ul class="platform-list"><li>本机评分、收藏、私人记录与自建分类</li><li>扫描目录、启动已有游戏、管理本地存档</li><li>更新目录后可离线搜索和筛选</li></ul>
+    <p class="platform-note">本机路径与私人记录不会随账号自动同步。</p>
+    <a class="button secondary" href="https://github.com/JXZ666/slgking/releases/latest" target="_blank" rel="noopener noreferrer">下载 Windows 稳定版 ↗</a>
+  </article>
+  <article class="platform" aria-labelledby="platform-web">
+    <h3 id="platform-web">网页端</h3><p class="platform-device">手机与电脑浏览器，免安装</p>
+    <p>随时查游戏资料、阅读玩家评论，参与自由论坛。</p>
+    <ul class="platform-list"><li>目录搜索、中文标签筛选与游戏详情</li><li>公开评论、论坛与账号资料</li><li>注册、登录、签到和查看任务</li></ul>
+    <p class="platform-note">需要联网；暂不提供本机评分、收藏或私人游戏库。</p>
+    <a class="button secondary" href="https://slg-king.com/m/#/">打开网页端</a>
+  </article>
+  <article class="platform" aria-labelledby="platform-android">
+    <h3 id="platform-android">Android 测试版</h3><p class="platform-device">手机上的收藏与私人记录</p>
+    <p>检索目录、添加游戏与分类，通过备份迁移个人资料。</p>
+    <ul class="platform-list"><li>本机收藏、私人记录与自建分类</li><li>云端账号、公开评论与游戏化功能</li><li>Android 7.0+，arm64 / x86_64</li></ul>
+    <p class="platform-note">0.25.0-a3 测试版，可能存在问题。不支持 32 位 ARM；不提供电脑扫描、Windows 游戏启动或存档管理。</p>
+    <a class="button secondary" href="https://github.com/JXZ666/slgking/releases/download/v0.25.0/slgking-android-0.25.0-a3.apk" target="_blank" rel="noopener noreferrer">下载 Android 测试版 ↗</a><a class="text-link" href="https://github.com/JXZ666/slgking/issues" target="_blank" rel="noopener noreferrer">反馈 Android 问题 ↗</a>
+  </article>
+</div><div class="feature-examples-head"><h3>看看桌面客户端能做什么</h3><p>以下为真实桌面界面示例，三端功能以各自说明为准。</p></div><article class="feature-main">
+          <div class="feature-copy">
+            <h3>按性癖找游戏</h3>
+            <p>
+              从标签和条目资料入手，筛出自己感兴趣的游戏。给游戏评分后，标签、开发者与引擎偏好会逐步影响后续排序。
+            </p>
+            <p class="feature-detail">Windows 客户端的评分与偏好保存在本机；网页不提供本机评分。</p>
+            <a class="text-link" href="#quick-start">开始建立自己的偏好 →</a>
+          </div>
+          <figure id="screenshots" class="screenshot feature-screen">
+            <a
+              class="image-frame"
+              href="/site-assets/overview.webp"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="查看游戏检索界面大图"
+              ><img
+                src="/site-assets/overview.webp"
+                width="1770"
+                height="1140"
+                loading="lazy"
+                decoding="async"
+                alt="游戏检索界面中的标签筛选、游戏列表与条目资料"
+              /><span class="image-fallback" hidden
+                >界面图片暂时无法加载，请稍后重试。</span
+              ></a
+            >
+            <figcaption>
+              标签筛选与条目浏览 · 桌面客户端界面示例（0.23）
+            </figcaption>
+          </figure>
+        </article>
+        <div class="feature-support">
+          <article>
+            <figure class="screenshot">
+              <a
+                class="image-frame"
+                href="/site-assets/comments.webp"
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="查看游戏评论区界面大图"
+                ><img
+                  src="/site-assets/comments.webp"
+                  width="2400"
+                  height="1470"
+                  loading="lazy"
+                  decoding="async"
+                  alt="黄油之王 游戏评论区的公开评论与评论输入界面"
+                /><span class="image-fallback" hidden
+                  >界面图片暂时无法加载，请稍后重试。</span
+                ></a
+              >
+              <figcaption>玩家评论 · 桌面客户端界面示例（0.23）</figcaption>
+            </figure>
+            <h3>先看看，玩家怎么说</h3>
+            <p>
+              未登录也能阅读公开评论。登录后可以发表自己的看法；Windows 与 Android 的个人评分和私人备注仍留在各自本机。
+            </p>
+          </article>
+          <article>
+            <figure class="screenshot">
+              <a
+                class="image-frame"
+                href="/site-assets/library.webp"
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="查看本地游戏库界面大图"
+                ><img
+                  src="/site-assets/library.webp"
+                  width="1770"
+                  height="1140"
+                  loading="lazy"
+                  decoding="async"
+                  alt="黄油之王 桌面客户端使用演示资料的本地游戏管理界面"
+                /><span class="image-fallback" hidden
+                  >界面图片暂时无法加载，请稍后重试。</span
+                ></a
+              >
+              <figcaption>
+                本地游戏管理 · 界面示例（0.23），图中游戏为演示资料
+              </figcaption>
+            </figure>
+            <h3>在 Windows 上，让游戏库有条理</h3>
+            <p>
+              扫描自己选择的文件夹，整理想玩／已下载状态、版本与收藏夹。游戏路径与本地资料留在自己的电脑。
+            </p>
+          </article>
+        </div>
+        <div class="feature-cta"><p>找到下一款想玩的游戏。</p><a class="button" href="#quick-start">按设备开始使用 →</a></div>
+      </section>
+      <section
+        id="quick-start"
+        class="section start-section"
+        aria-labelledby="quick-start-title"
+      >
+        <div class="wrap">
+          <div class="section-head">
+            <h2 id="quick-start-title">从你正在用的设备开始。</h2><p>先浏览目录，需要账号功能时再登录。已有账号请选择“登录”，注册会创建另一份身份。</p>
+          </div>
+          <ol class="steps">
+  <li><h3>Windows</h3><p>前往发布页下载 <code>slgking.exe</code> 并运行，点击“更新游戏数据”。需要评分、收藏或互动时，到“个人”页面登录。</p><a class="text-link" href="https://github.com/JXZ666/slgking/releases/latest" target="_blank" rel="noopener noreferrer">前往 Windows 发布页 ↗</a></li>
+  <li><h3>网页</h3><p>在浏览器打开网页端，直接搜索或组合标签筛选。需要签到、编辑资料或参与讨论时，登录已有账号或注册。</p><a class="text-link" href="https://slg-king.com/m/#/">用浏览器打开 →</a></li>
+  <li><h3>Android</h3><p>下载测试 APK，按系统提示允许此来源安装。打开应用后更新目录，再登录账号。迁移资料前，先导出当前备份。</p><a class="text-link" href="https://github.com/JXZ666/slgking/releases/download/v0.25.0/slgking-android-0.25.0-a3.apk" target="_blank" rel="noopener noreferrer">获取 Android 测试 APK ↗</a></li>
+</ol>
+          <a
+            class="text-link manual-link"
+            href="https://github.com/JXZ666/slgking#快速开始"
+            target="_blank"
+            rel="noopener noreferrer"
+            >阅读完整使用说明 ↗</a
+          >
+        </div>
+      </section>
+      <section
+        id="privacy"
+        class="section wrap"
+        aria-labelledby="privacy-title"
+      >
+        <div class="section-head">
+          <h2 id="privacy-title">云端账号共用，私人记录留在本机。</h2><p>登录同一个账号，不等于自动同步整个游戏库。</p>
+        </div>
+        <div class="privacy-overview">
+  <article><h3>电脑与手机的私人资料</h3><p>Windows 和 Android 的评分、状态、收藏、私人备注与自建分类保存在各自本机，不随账号自动同步。电脑扫描到的路径与启动程序留在电脑。</p><p>游戏文件不会上传。个人资料备份可能包含本机路径，请私下保管；导入前先导出当前资料。</p></article>
+  <article><h3>云端账号与公开内容</h3><p>三端可以使用同一个账号。昵称、云端积分、头衔、签到记录和装饰跟随账号使用，游戏公开评论共用；网页论坛是独立讨论区。</p><p>主动公开发表的内容会上传，可能展示昵称、头衔与装饰。私人记录仍留在本机。</p></article>
+</div>
+        <div class="faq">
+  <details><summary>三端可以用同一个账号吗？收藏会同步吗？</summary><div><p>三端共用云端身份、积分、签到与公开评论。Windows 和 Android 的评分、收藏及私人记录不自动同步，需通过备份迁移；网页暂不提供这套私人游戏库。</p></div></details>
+  <details><summary>iPhone 应该使用哪个入口？</summary><div><p>使用网页端即可。Android APK 无法安装到 iPhone，目前没有 iOS 安装包。</p></div></details>
+  <details><summary>Android 安装失败或遇到问题怎么办？</summary><div><p>请确认设备支持 Android 7.0 及以上和 arm64 或 x86_64；32 位 ARM 不受支持。当前 APK 为测试版，可能存在问题。</p><a class="text-link" href="https://github.com/JXZ666/slgking/issues" target="_blank" rel="noopener noreferrer">提交问题与复现步骤 ↗</a><p>反馈可附手机型号、Android 版本和截图；请勿公开登录密钥、恢复码或私人备份。</p></div></details>
+          <details>
+            <summary>账号遗失后可以找回吗？</summary>
+            <div>
+              <p>
+                登录密钥和恢复码请自行保存；遗失后无法找回，账号不能通过邮箱重置。
+                新设备登录需要登录密钥和恢复码。换设备时请选择“登录”，重复创建账号会生成另一份身份。
+              </p>
+            </div>
+          </details>
+          <details>
+            <summary>电脑与 Android 的私人资料怎样迁移？</summary><div><p>评分、收藏、私人记录与自建分类不会随登录自动同步。Windows 和 Android 可通过个人资料备份迁移；Windows 入口为“更多工具… → 备份与恢复…”。</p><p>导入可能覆盖已有记录，并清除备份未包含的记录。请先导出当前资料。个人备份不含账号登录密钥与恢复码，可能含本机路径，请私下保管。</p></div></details>
+          <details>
+            <summary>Windows 客户端会发送哪些使用统计？</summary>
+            <div>
+              <p>
+                软件会发送随机生成的安装标识、客户端版本、启动平台、游戏条目数，以及少量功能事件和汇总数字，用于了解版本使用情况。该标识不由硬件信息或云端账号生成；统计不含本地游戏目录、私人评论正文或游戏文件。
+              </p>
+            </div>
+          </details>
+          <details>
+            <summary>这里可以下载游戏文件吗？</summary>
+            <div>
+              <p>
+                不可以。黄油之王
+                是目录检索、评论与本地管理工具。本站不托管游戏文件，也不提供游戏文件下载或资源获取渠道。
+              </p>
+            </div>
+          </details>
+          <details>
+            <summary>没有网络，还能使用吗？</summary><div><p>Windows 在首次更新目录和封面后，可离线搜索、筛选与浏览本机资料。网页需要联网；客户端的云端账号、公开评论及目录更新也需要联网。</p></div></details>
+        </div>
+        <div class="links">
+          <a
+            href="https://github.com/JXZ666/slgking#数据与联网"
+            target="_blank"
+            rel="noopener noreferrer"
+            >账号、评论与数据说明 ↗</a
+          ><a
+            href="https://github.com/JXZ666/slgking/blob/main/CHANGELOG.md"
+            target="_blank"
+            rel="noopener noreferrer"
+            >更新记录 ↗</a
+          >
+        </div>
+      </section>
+      <section
+        id="community"
+        class="section wrap community-section"
+        aria-labelledby="community-title"
+      >
+        <div class="community-copy">
+          <h2 id="community-title">一起聊聊，下一款游戏。</h2>
+          <p>加入 QQ 交流群，获取使用帮助、反馈问题和查看维护公告。</p>
+          <div class="group-row">
+            <span class="group-label">QQ 交流群</span
+            ><strong class="group-number">1124074040</strong
+            ><button
+              class="copy-button"
+              type="button"
+              data-copy="1124074040"
+              hidden
+            >
+              复制群号
+            </button>
+          </div>
+          <p
+            id="copy-status"
+            class="copy-status"
+            role="status"
+            aria-live="polite"
+          ></p>
+        </div>
+        <div class="final-download"><h3>选择你的使用方式</h3><div class="actions"><a class="button web-entry" href="https://slg-king.com/m/#/">打开网页端</a><a class="button secondary" href="https://github.com/JXZ666/slgking/releases/latest" target="_blank" rel="noopener noreferrer">下载 Windows 稳定版 ↗</a><a class="button secondary" href="https://github.com/JXZ666/slgking/releases/download/v0.25.0/slgking-android-0.25.0-a3.apk" target="_blank" rel="noopener noreferrer">下载 Android 测试版 ↗</a></div><p>Windows 稳定版 · 网页免安装 · Android 测试版</p></div>
+      </section>
+    </main>
+    <footer class="wrap">
+      <a class="footer-brand" href="#top">黄油之王</a>
+      <p>
+        Windows、网页与 Android 游戏目录工具<br />不托管游戏文件，不提供游戏文件下载
+      </p>
+      <a
+        class="text-link"
+        href="https://github.com/JXZ666/slgking"
+        target="_blank"
+        rel="noopener noreferrer"
+        >GitHub 项目页 ↗</a
+      >
+    </footer>
+  </body>
 </html>

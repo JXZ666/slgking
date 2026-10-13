@@ -1,0 +1,24 @@
+/* Account disclosures keep phone navigation compact without remounting forms. */
+.account-header{padding:0 0 14px;overflow-wrap:anywhere}
+.account-summary p{margin:5px 0}
+.account-summary .account-nickname{font-size:17px;font-weight:700;color:var(--text)}
+.account-actions{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}
+.account-actions button{min-width:0;overflow-wrap:anywhere}
+.account-fold{border-top:1px solid var(--line);overflow-wrap:anywhere;min-width:0}
+.account-fold>summary{min-height:52px;padding:14px 4px;font-weight:600;cursor:pointer;touch-action:manipulation}
+.account-fold>summary::marker{color:var(--muted)}
+.account-fold>summary:focus-visible{outline:3px solid var(--gold);outline-offset:2px}
+.account-fold>summary:active{background:var(--surface)}
+.account-fold-heading{display:inline-flex;align-items:center;flex-wrap:wrap;gap:8px;max-width:calc(100% - 24px);vertical-align:middle}
+.account-fold-badge{font-size:12px;font-weight:400;color:var(--green)}
+.account-fold-content{padding:0 4px 16px;min-width:0}
+.account-fold-content>p:first-child{margin-top:0}
+.account-fold-content form{display:grid;gap:8px}
+.account-fold-content textarea:focus-visible{outline:3px solid var(--gold);outline-offset:2px}
+.account-fold-content textarea,.account-fold-content input{min-width:0;max-width:100%}
+.account-fold-content .quest-list>.card{background:none;border:0;border-radius:0;box-shadow:none;padding:12px 0;border-bottom:1px solid var(--line)}
+.account-fold-content .quest-list>.card+.card{margin-top:0}
+.account-details p{margin:8px 0}
+.account-details .signin-calendar{margin-top:16px}
+.account-registration{margin-bottom:14px}
+.account-registration code{overflow-wrap:anywhere;word-break:break-all}
