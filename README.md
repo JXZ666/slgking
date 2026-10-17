@@ -1,55 +1,100 @@
-# 黄油之王
+<div align="center">
 
-面向 **18 周岁以上用户**的游戏目录、个人游戏管理与社区。找作品、按标签筛选、阅读公开评论，也可以整理自己已有的游戏。
+<h1>黄油之王</h1>
 
-| 平台 | 用途 | 入口 |
-| --- | --- | --- |
-| Windows | 目录检索、本地游戏库、扫描匹配与启动程序管理 | [下载发布页中的 `slgking.exe`](https://github.com/JXZ666/slgking/releases/latest) |
-| 网页 | 手机或电脑浏览器检索目录、查看评论、参与论坛和使用云端账号 | [直接打开](https://slg-king.com/m/#/) |
-| Android | 手机浏览目录、评分收藏、追踪更新与 AI 翻译 | [在发布页下载 APK（测试版）](https://github.com/JXZ666/slgking/releases/latest) |
+<p><strong>找下一款想玩的游戏，也整理电脑里已经拥有的游戏。</strong></p>
 
-[官网](https://slg-king.com/) · [全部发行记录](https://github.com/JXZ666/slgking/releases) · [问题反馈](https://github.com/JXZ666/slgking/issues)
+<p>游戏目录 · 本地游戏库 · 更新追踪 · 玩家社区</p>
 
-> 本项目只整理游戏资料，不托管游戏文件，也不提供游戏下载。请通过作品作者或发行方的渠道获取游戏。下载版号和具体更新以公开发行页为准。
+<p><a href="https://github.com/JXZ666/slgking/releases/latest">Windows 下载</a> · <a href="https://slg-king.com/m/#/">打开网页版</a> · <a href="https://github.com/JXZ666/slgking/releases/latest">Android 测试版</a></p>
 
-## 找游戏与整理游戏
+<p><a href="https://slg-king.com/">官网</a> · <a href="https://github.com/JXZ666/slgking/releases">发行记录</a> · <a href="https://github.com/JXZ666/slgking/issues">反馈问题</a></p>
 
-- 浏览 SLG 大类、DLsite 或全部目录，按名称、标签和来源检索；DLsite 还支持 RJ 编号、开发者、语言与作品形式。未知资料保持未知，原生评分与站内评分分别展示。
-- Windows 可以扫描多个本地路径，自动寻找合集中的游戏根目录，核对候选、选择启动程序，也能手动添加作品、修复路径和更换封面。扫描不会执行游戏或脚本；联网匹配需主动查询并确认。
-- Windows 和 Android 保留本机评分、想玩、收藏夹与个人记录。Android 的「追踪」分为版本更新、想玩、收藏夹；AI 翻译可先选公司和模型，再填入自己的 API Key，也保留免费翻译入口。
-- 网页提供分页目录、积分榜和装扮榜。三端可阅读公开评论并使用共同的云端账号；论坛与游戏评论分别组织。
+</div>
 
-目录资料来自 [Dikgames](https://dikgames.com/)、[F95](https://f95zone.to.it/) 和 [DLsite](https://www.dlsite.com/)，由项目服务器整理后供三端读取。DLsite 目前仅收录部分作品，更新受来源规则、访问限制和采集预算影响；已有目录不代表全站覆盖。使用软件检索不会直接触发外站采集。
+![黄油之王：Windows 目录、网页版与 Android 界面](docs/media/v027-overview.webp)
 
-<img src="docs/media/v027-android-ai.png" alt="Android 0.27 测试版的 AI 翻译公司选择界面" width="320">
+黄油之王面向 **18 周岁以上用户**。你可以按标签找作品、阅读公开评论，把想玩的游戏收进清单；也可以在 Windows 上扫描已有的游戏文件夹，核对匹配结果，整理封面和启动程序。
 
-图：Android 翻译设置，选择公司和模型后填写自己的 API Key。
+> 本页展示 0.27 系列功能，实际可下载版本以公开发行页为准；Android 为测试版。项目只整理游戏资料，不托管或分发游戏文件，不提供游戏下载，请通过作者或发行方的渠道获取游戏。
 
-## 快速开始
+## 从找游戏，到自己的游戏库
 
-1. Windows 下载 `slgking.exe`；Android 下载发行页唯一的官方 APK；网页直接打开链接。Android 需要 Android 7.0 及以上，包含 arm64 与 x86_64，不含 32 位 ARM。
-2. 客户端选择目录后点击「更新游戏数据」。封面按需下载，缓存后的目录和资料可离线浏览；网页需要联网。
-3. 到「个人」创建或登录账号，使用评分、收藏、签到、商城及公开评论。未登录仍可检索目录和阅读公开评论。
-4. Windows 到「本地游戏库」核对扫描候选和启动程序；Android 到「追踪」管理想玩与收藏。PC 的扫描、游戏启动与存档工具不属于手机功能。
+### 按题材找作品，少翻几页目录
 
-Android 仍是测试版。遇到问题请提供设备型号、Android 版本及复现步骤，提交截图前遮住账号密钥、API Key 和私人路径。
+切换 **SLG 大类、DLsite、全部目录**，按名称、来源和标签筛选。DLsite 目录还支持 RJ 编号、开发者、语言与作品形式检索，原生评分和站内评分分开展示。网页的分页、排序和筛选条件保存在链接中，从详情返回可以接着看。
 
-## 账号、私人资料与备份
+![网页版：DLsite 目录、标签与筛选](docs/media/v027-web.webp)
 
-三端共用云端账号、积分、装扮和公开评论。换设备请登录已有账号，不要重复创建新身份；妥善保存登录密钥和恢复码，项目无法通过邮箱重置账号。
+网页版已上线，手机和电脑浏览器都能直接打开。除了目录检索，还可以阅读评论、参与论坛，查看积分榜与装扮榜。
 
-**本机评分、收藏、游戏路径、私人记录和自建游戏不会随登录自动跨端同步。** Windows 数据保存在 `%LOCALAPPDATA%\slgking`，Android 数据在应用私有目录。网页「个人云记录」是单独的云端功能，仅本人登录后可见，不会与客户端本机私人记录自动合并。
+### 游戏放在哪、该启动哪个，在本地库里理清楚
 
-升级前使用「备份与恢复」导出个人 JSON，并另存个人图片。JSON 不携带图片文件、Windows 本机私人评论或账号登录密钥与恢复码；导入可能覆盖原记录，请先备份目标设备。完整数据目录可能包含会话凭证和私人路径，应加密私存。正常覆盖升级保留原资料；Android 卸载重装会清除未备份的应用数据。
+Windows 支持多路径扫描，也能在合集文件夹中自动寻找多款游戏的根目录。匹配时结合引擎线索、标题、编号和启动程序，逐款预览后再确认；遇到资料不足的作品，可以手动添加或主动联网查询。
 
-目录更新、封面、账号与评论功能需要网络。软件会发送随机安装标识、版本、平台及少量功能汇总统计，不上传本地游戏文件、私人评论正文或游戏路径。使用第三方 AI 翻译时，待翻译文本将发送到你配置的服务商；API Key 请自行保管，不要公开分享备份或设置截图。
+![Windows 0.27：目录浏览与本地管理入口，使用演示数据](docs/media/v027-windows.webp)
 
-## 反馈与许可
+- 核对候选与启动程序，减少卸载器、配置工具等辅助 EXE 的干扰。
+- 修复移动后的游戏路径，自行选择或更换封面，保留人工修改。
+- 扫描不执行游戏或脚本。联网查询由你发起，确认后才采用资料。
+- 更换封面可选择本地图片、从剪贴板粘贴，或联网查找候选；预览确认后再保存。
 
-[GitHub Issues](https://github.com/JXZ666/slgking/issues) · QQ 交流群：1124074040。
+### 想玩的、收藏的、等更新的，分别看
 
-感谢 **vegetable dog** 为 Android 移植作出的贡献。本项目采用 [GNU General Public License v3.0](LICENSE)。各端对应源码与校验和随发行提供；自动生成的标签源码以 Windows 发行基线为准，Android 与网页请使用各自的源码附件。
+Android 的「追踪」分为 **版本更新／想玩／收藏夹**。更新可以逐条标为已读，切回详情后继续浏览；「我的记录」用于管理自己的记录、分类和网址。
 
-### English
+![Android：追踪分区与 AI 翻译设置](docs/media/v027-android.webp)
 
-黄油之王 is a game catalogue and personal library manager for adults aged 18+. Windows helps organize games already on your PC; the web app provides catalogue browsing and community features; Android is available as a test build. It does not host or distribute game files. Cloud accounts and public comments are shared, while local ratings, collections and private records do not automatically sync between devices. Get downloads and matching source archives from [Releases](https://github.com/JXZ666/slgking/releases/latest).
+阅读外文简介时，可以使用免费翻译，或选择自己的 AI 服务商。Android 预置 DeepSeek、硅基流动、Kimi、智谱 GLM、通义千问和 OpenAI 等选项，先选公司与模型，再填 API Key；自定义接口仍可手动设置。第三方服务的可用性、费用及隐私规则由相应服务商决定。
+
+## 三端怎么选
+
+| 你想做什么 | Windows | 网页 | Android |
+| --- | --- | --- | --- |
+| 按目录、来源与标签找作品 | 支持 | 支持，浏览器直接用 | 支持 |
+| 扫描电脑游戏、匹配资料、管理启动程序 | 支持 | 不支持 | 不支持 |
+| 管理本机评分、想玩、收藏及私人记录 | 支持 | 提供独立的个人云记录 | 支持 |
+| 集中查看版本更新、想玩、收藏夹 | 支持相关管理功能 | 以目录和云端功能为主 | 「追踪」三分区 |
+| 阅读公开评论、使用共同的云端账号 | 支持 | 支持 | 支持 |
+| 离线查看已缓存目录和资料 | 支持 | 需要联网 | 支持 |
+
+账号、积分、装扮和公开评论共用。**本机评分、收藏、路径、私人记录和自建游戏不会随登录自动跨端同步。** 网页的个人云记录仅本人登录后可见，与客户端本机记录分开保存。
+
+## 三步开始
+
+1. **选一个入口。** Windows 下载发行页中的 `slgking.exe`；Android 下载官方 APK；网页直接打开 [slg-king.com/m/](https://slg-king.com/m/#/)。Android 需要 7.0 及以上，支持 arm64 和 x86_64，不含 32 位 ARM。
+2. **更新并浏览目录。** 客户端选择目录后点击「更新游戏数据」，封面按需下载；网页直接检索。未登录也能查目录、阅读公开评论。Windows 用户可进一步扫描本地库，先核对候选再保存。
+3. **记下自己的进度。** 把感兴趣的作品加入想玩或收藏，使用评分和个人记录。需要签到、商城或发表评论时再创建或登录账号；换设备请使用已有账号。
+
+## 升级、备份与资料边界
+
+- 升级前从「备份与恢复」导出个人 JSON，并另存个人图片。Windows 替换 EXE、Android 正常覆盖安装会保留资料；Android 卸载重装会清除未备份的应用数据。
+- JSON 不包含图片文件、Windows 本机私人评论、账号登录密钥或恢复码。导入可能覆盖已有记录，请先备份目标设备。完整数据目录可能包含会话凭证与私人路径，应加密私存。
+- 妥善保存账号登录密钥和恢复码，项目无法通过邮箱重置账号。Windows 私人资料在 `%LOCALAPPDATA%\slgking`，Android 在应用私有目录。
+- 目录更新、封面、账号与评论需要网络。软件会发送随机安装标识、版本、平台及少量功能汇总统计，不上传本地游戏文件、私人评论正文或游戏路径。
+- 使用第三方 AI 翻译时，待翻译文本会发送给你配置的服务商。不要公开 API Key、账号密钥、恢复码或完整备份。
+
+## 目录从哪里来
+
+目录资料来自 [Dikgames](https://dikgames.com/)、[F95](https://f95zone.to.it/) 和 [DLsite](https://www.dlsite.com/)，经项目服务器整理为公开快照，再由三端读取。日常检索不会直接触发外站采集。
+
+不同来源的资料完整度、更新速度和覆盖范围不同。DLsite 目前仅收录部分作品，更新受来源规则、访问限制与采集预算影响；不承诺全站收录或固定新增数量。缺失资料和未知标签不会被当成已核实内容，游戏更新仍请以作者或发行方说明为准。
+
+## 反馈与参与
+
+遇到问题，请到 [GitHub Issues](https://github.com/JXZ666/slgking/issues) 留下版本、平台、复现步骤和预期结果。Android 问题请补充设备型号与系统版本；截图中请遮住账号密钥、API Key、私人路径和备份内容。
+
+QQ 交流群：**1124074040**。欢迎反馈目录错误、使用体验和可复现的 Bug。
+
+感谢 **vegetable dog** 为 Android 移植作出的贡献，也感谢提交反馈和参与测试的玩家。
+
+本项目采用 [GNU General Public License v3.0](LICENSE)。各端发行信息及对应源码入口请查看 [发行记录](https://github.com/JXZ666/slgking/releases)；游戏资料、封面和第三方服务的权利归各自权利人所有。
+
+<details>
+<summary>English</summary>
+
+黄油之王 is a game catalogue and personal library manager for adults aged 18+. Browse and filter game information, organize games already on your Windows PC, or use the web and Android apps for browsing and personal records. Android is a test build. The project does not host or distribute game files.
+
+Cloud accounts and public comments are shared. Local ratings, collections, paths and private records do not automatically sync between devices. Download builds from [Releases](https://github.com/JXZ666/slgking/releases/latest), or [open the web app](https://slg-king.com/m/#/).
+
+</details>
