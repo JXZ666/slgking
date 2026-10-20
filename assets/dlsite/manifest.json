@@ -1,0 +1,35 @@
+{
+  "catalog_id": "dlsite",
+  "count": 151,
+  "db_sha256": "280ea71904627b948822e927c1b0437347b10d9c209ab73f8113a72890167c52",
+  "collected_at": "2026-10-05T07:40:14+00:00",
+  "lastmod": "2026-10-05T07:40:14+00:00",
+  "channel": "bundled_pilot",
+  "provenance": {
+    "source": "https://www.dlsite.com",
+    "robots_url": "https://www.dlsite.com/robots.txt",
+    "interval_seconds": 10.0,
+    "target": 200,
+    "actual_count": 151,
+    "target_reached": false,
+    "requests_this_run": 127,
+    "latest_selected": 98,
+    "popular_selected": 53,
+    "latest_supplement": 0,
+    "discovery_pages": [
+      "https://www.dlsite.com/maniax/works/type/=/work_type_category/game",
+      "https://www.dlsite.com/maniax/ranking/day/=/category/game",
+      "https://www.dlsite.com/maniax/fsr/=/work_type_category/game/work_category/doujin/from/left_pain.work_type",
+      "https://www.dlsite.com/maniax/ranking/week?category=game",
+      "https://www.dlsite.com/maniax/ranking/month?category=game"
+    ],
+    "candidate_count": 163,
+    "checked_count": 163,
+    "excluded_count": 12,
+    "selection_scope": "eligible public candidates discovered from permitted lists, not a claim of exhaustive site coverage",
+    "stopped_reason": "Allowed candidate pool exhausted",
+    "descriptions_and_images": "excluded; republication permission not established",
+    "rating_policy": "native only; no conversion or cross-source comparison",
+    "assembled_at": "2026-10-05T07:40:57+00:00"
+  }
+}

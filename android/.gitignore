@@ -1,0 +1,13 @@
+.gradle/
+build/
+app/build/
+local.properties
+app/src/main/python/
+app/src/main/assets/seed/
+app/src/main/assets/tag_zh.json
+*.keystore
+*.jks
+test-account.txt
+.idea/
+captures/
+.kotlin/
