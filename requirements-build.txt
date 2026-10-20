@@ -1,0 +1,5 @@
+# Reference environment observed during release preparation; original requirements.txt is unchanged.
+customtkinter==6.0.0
+Pillow==12.3.0
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.7

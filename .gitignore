@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+build/
+dist/
+.venv/
+.pytest_cache/
+dev_secret.txt
+*.log

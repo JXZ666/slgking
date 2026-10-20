@@ -1,0 +1,2 @@
+# Preserve the exact release-build input bytes in Git blobs and source archives.
+* -text

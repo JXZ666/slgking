@@ -1,0 +1,59 @@
+{
+  "product": "黄油之王",
+  "platform": "Windows",
+  "version": "0.28.0",
+  "channel": "stable",
+  "original_build_commit": "c6f6bfd3d4f020d09819c776873d06540817eef4",
+  "source_snapshot": "Reviewed client-only snapshot without parent history",
+  "artifact": {
+    "name": "slgking.exe",
+    "bytes": 28278386,
+    "sha256": "b13431f1f004983f52a2b107819836058ebfb665c207ff0f03aed4f8edd299d0",
+    "built_at": "2026-10-20T13:28:43+08:00"
+  },
+  "preservation": "All original build inputs listed in SOURCE_MANIFEST.json are byte-for-byte unchanged.",
+  "original_file_count": 417,
+  "python_modules": 78,
+  "seeds": [
+    {
+      "path": "assets/seed/slgking.db",
+      "sha256": "ae1de6b5a8ab5b07563a7f9c4bab17f06509de958c7c2e6d1db8bbc8decb685a",
+      "integrity": "ok",
+      "personal_counts": {
+        "state": 0,
+        "local": 0,
+        "manual_translations": 0,
+        "weights": 0,
+        "affinities": 0,
+        "exclusions": 0,
+        "prefs": 0,
+        "sync_log": 0
+      }
+    },
+    {
+      "path": "assets/dlsite/slgking.db",
+      "sha256": "280ea71904627b948822e927c1b0437347b10d9c209ab73f8113a72890167c52",
+      "integrity": "ok",
+      "personal_counts": {
+        "state": 0,
+        "local": 0,
+        "local_saves": 0,
+        "user_game_categories": 0,
+        "game_aliases": 0,
+        "collections": 0,
+        "collection_items": 0,
+        "manual_translations": 0,
+        "comments": 0,
+        "points_log": 0,
+        "signin": 0,
+        "owned_titles": 0,
+        "wishlist_version_seen": 0,
+        "weights": 0,
+        "affinities": 0,
+        "exclusions": 0,
+        "prefs": 0,
+        "sync_log": 0
+      }
+    }
+  ]
+}

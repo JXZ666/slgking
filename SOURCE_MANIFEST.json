@@ -1,0 +1,2090 @@
+{
+  "origin_commit": "c6f6bfd3d4f020d09819c776873d06540817eef4",
+  "files": [
+    {
+      "path": "LICENSE",
+      "bytes": 35825,
+      "sha256": "bfde1fd94c3b17b89fbbfa6321660c8284f631bf126db1e0a32c897944a842db"
+    },
+    {
+      "path": "assets/avatar.png",
+      "bytes": 139302,
+      "sha256": "ad6180edd2ba6d7ae47fb0534d92c6bde916d7f41870636c7f5e164aad8fb9db"
+    },
+    {
+      "path": "assets/brand_logo.png",
+      "bytes": 37446,
+      "sha256": "e8a90c20f8d6d9bc5734abe427adc365ff1d01be8d39a94c6607cdfe67603ec3"
+    },
+    {
+      "path": "assets/branding/butter-crown-source.svg",
+      "bytes": 432,
+      "sha256": "6210fe0316962195c7047b1e5c794eee9b25c064c1c6b373b95e1ca43132634e"
+    },
+    {
+      "path": "assets/branding/butter-crown.svg",
+      "bytes": 448,
+      "sha256": "00acf9366a7993e38a97d83a05d4d5d343891b7c2e478f93f083ceee05d023ed"
+    },
+    {
+      "path": "assets/dlsite/manifest.json",
+      "bytes": 1511,
+      "sha256": "85de457e2da6a8ffe7b07b09af68ee338bec48d4425f835d1d979ec551220153"
+    },
+    {
+      "path": "assets/dlsite/slgking.db",
+      "bytes": 401408,
+      "sha256": "280ea71904627b948822e927c1b0437347b10d9c209ab73f8113a72890167c52"
+    },
+    {
+      "path": "assets/dlsite/tag_zh.json",
+      "bytes": 7787,
+      "sha256": "b11346fcf9041a132c06882e2f872c5bb33479c3c8d7ad6f1bb38ea3bc3f8ea9"
+    },
+    {
+      "path": "assets/seed/covers/16-years-later.jpg",
+      "bytes": 13180,
+      "sha256": "9fccfe385e476a64a1e300cb0ff6da448d3cef6f88f33b2a1f6730825890b18b"
+    },
+    {
+      "path": "assets/seed/covers/30-year-old-virgin.jpg",
+      "bytes": 14870,
+      "sha256": "f3ac0cfedf6ba1c8415b838970bcc927539e68bbfc92e61a62ca235c3ea716e4"
+    },
+    {
+      "path": "assets/seed/covers/a-perfect-couple.jpg",
+      "bytes": 19468,
+      "sha256": "ae86af9e7555b6554f8c14d12e14f5c376a01a3bb947bacdf46616c5cf8bb138"
+    },
+    {
+      "path": "assets/seed/covers/a-struggle-with-sin.jpg",
+      "bytes": 17309,
+      "sha256": "84ea922ac91afe1b8e8abbe77c2c4dbdbd8f1e50c4e84c0fa9ea09d4bbe5345a"
+    },
+    {
+      "path": "assets/seed/covers/alice-in-wonderland.jpg",
+      "bytes": 16630,
+      "sha256": "ee437fe3483d826f4ce4343c941cb79fa64ac6cb5d44a0244b66ab9c2a1bda58"
+    },
+    {
+      "path": "assets/seed/covers/alternate-existence.jpg",
+      "bytes": 14733,
+      "sha256": "d647c777b9ab67137d1c2f5debc02a60c95f21e84fa2a47c3f6f022e0aa620e5"
+    },
+    {
+      "path": "assets/seed/covers/amnesia.jpg",
+      "bytes": 19427,
+      "sha256": "53abd93abcc086dba54d602710270223628730311af024e62b29e3084785b362"
+    },
+    {
+      "path": "assets/seed/covers/an-alchemists-tale.jpg",
+      "bytes": 9997,
+      "sha256": "6b76072d4010d1922d62c185d4df1f7914fb01ba733885b9b57532744a85ff75"
+    },
+    {
+      "path": "assets/seed/covers/anomalous-coffee-machine.jpg",
+      "bytes": 22537,
+      "sha256": "f47f1fb4a13435ce605cd4cc0e8c74c268fc9de15025d05b33653537ec15efc5"
+    },
+    {
+      "path": "assets/seed/covers/attack-on-survey-corps.jpg",
+      "bytes": 24462,
+      "sha256": "7fc93441c9121ada37e0ce74b66444c3cbc372416577f7c6ed7c450434216fba"
+    },
+    {
+      "path": "assets/seed/covers/away-from-home.jpg",
+      "bytes": 14238,
+      "sha256": "3ce360a4095b7256bb6b8b6adf0fbc636eaefcabca66a04f7bba13295b07de0a"
+    },
+    {
+      "path": "assets/seed/covers/back-again.jpg",
+      "bytes": 18895,
+      "sha256": "ed23743173c0c5052e68050c4e309619493ec6c797c97715785f5aba543b8fb2"
+    },
+    {
+      "path": "assets/seed/covers/ballad-of-outstanding-bimbo-sorcery-v0-11-screwthename.jpg",
+      "bytes": 23602,
+      "sha256": "462720b23d47c7c0d47f2ba852e9c860191323504ec6830485c41fa5f97a659f"
+    },
+    {
+      "path": "assets/seed/covers/bastians-family-secret.jpg",
+      "bytes": 8461,
+      "sha256": "7455803aac391f86423f1465dab42901d772a176661582f7201c17ae242f4511"
+    },
+    {
+      "path": "assets/seed/covers/beast-companions.jpg",
+      "bytes": 20153,
+      "sha256": "a949ecb599e49f019be1ca2aedc417c42e32d1de3b172a17d6f6d42871ef4f61"
+    },
+    {
+      "path": "assets/seed/covers/beast-control.jpg",
+      "bytes": 17948,
+      "sha256": "910fa6ab2c99524ba00ff6c92cc672d4dfd0be885d10fd429e11d322aaf29c51"
+    },
+    {
+      "path": "assets/seed/covers/become-someone.jpg",
+      "bytes": 15844,
+      "sha256": "6a24d2c1b9bad36ed1e8e1a3736edf445c55e4e79c92d004d377fa2b93376e4c"
+    },
+    {
+      "path": "assets/seed/covers/being-a-wife.jpg",
+      "bytes": 12140,
+      "sha256": "7c185208999d80cc772daa49a20d4fe947283a7da75e104cfe552c99d66a08f3"
+    },
+    {
+      "path": "assets/seed/covers/between-worlds.jpg",
+      "bytes": 12311,
+      "sha256": "90291ec5ffed86aac47d38a53207ce1eabbade1580bbaaf332b3e3797e1384b8"
+    },
+    {
+      "path": "assets/seed/covers/bloodcrave.jpg",
+      "bytes": 18284,
+      "sha256": "3d7ccaa290f18c9e6f557d302c52ed4fdc5ef9f94f5943b92733598b6409cdad"
+    },
+    {
+      "path": "assets/seed/covers/brothel-megacorporation.jpg",
+      "bytes": 8966,
+      "sha256": "dff8642ca81af51590a33e8504c79d4593f1514b9a7c463f595fd719b2056376"
+    },
+    {
+      "path": "assets/seed/covers/by-justice-or-mercy.jpg",
+      "bytes": 13160,
+      "sha256": "b61b076e02f96894cfc5a04ed2797fd642ed7338b84fc13028b2e12994f78324"
+    },
+    {
+      "path": "assets/seed/covers/cabin-by-the-lake.jpg",
+      "bytes": 21298,
+      "sha256": "930567333ed55225532d3d23246c603b16a04b57c3fbf3b8c20378fbe6eb4cb3"
+    },
+    {
+      "path": "assets/seed/covers/camp-pinewood-remix.jpg",
+      "bytes": 12470,
+      "sha256": "49a38385ae6ee528b21559af8d587f06f4df4f10e16177793ea4807289217b64"
+    },
+    {
+      "path": "assets/seed/covers/charmed.jpg",
+      "bytes": 8537,
+      "sha256": "438ee88a857497565eb9d358c14c76d7cf28e138846fe3a0d5fcf3c8f47d5e64"
+    },
+    {
+      "path": "assets/seed/covers/come-home.jpg",
+      "bytes": 24139,
+      "sha256": "52e5d52c5a63b575a9273ad04cb7da782f814cefe768b752331d050be3af43a3"
+    },
+    {
+      "path": "assets/seed/covers/corruption-of-champions-ii.jpg",
+      "bytes": 12391,
+      "sha256": "bf4469709a06c958494d5bade499e1404813a6673a7fe9b12746c243a35b87f0"
+    },
+    {
+      "path": "assets/seed/covers/course-of-temptation.jpg",
+      "bytes": 21660,
+      "sha256": "6fa42956ffb4b3050dee239a7be6c670153054a45b9b7e8b681e3cf19fd5ee53"
+    },
+    {
+      "path": "assets/seed/covers/court-magician.jpg",
+      "bytes": 20040,
+      "sha256": "748b40a13137082ab58563d9ea18e8255d04a7ce8a97aaa8eda55a44c0e50782"
+    },
+    {
+      "path": "assets/seed/covers/curvy-moments.jpg",
+      "bytes": 20280,
+      "sha256": "b4f03ddef28164285587c45c53ec30cb0c5b5a374282d8c11339287102e30d52"
+    },
+    {
+      "path": "assets/seed/covers/cybernetic-seduction.jpg",
+      "bytes": 19450,
+      "sha256": "a1841e282be3998450ddda27dccbb4edbdad3079a229f5f370295260924a9de4"
+    },
+    {
+      "path": "assets/seed/covers/daily-lives-of-my-countryside.jpg",
+      "bytes": 16347,
+      "sha256": "a86046335a524e9734accd3ed960f524291ea7411a7c987b3e459a5e1d72827e"
+    },
+    {
+      "path": "assets/seed/covers/debasing-grounds.jpg",
+      "bytes": 4941,
+      "sha256": "220b9dae34e7ad793f0fea6a250e4108d7c0fa8a6ef24f78239b56644aecdced"
+    },
+    {
+      "path": "assets/seed/covers/defending-lydia-collier.jpg",
+      "bytes": 11668,
+      "sha256": "9077a66c1b457cb331c5f2cdc777e170873c81fb7a1370e8225419171121317c"
+    },
+    {
+      "path": "assets/seed/covers/degrees-of-lewdity.jpg",
+      "bytes": 11234,
+      "sha256": "eb0cd1591d147143613255a2b0aeb167282405dd9ca57eb1bfa7f3b85f152aa7"
+    },
+    {
+      "path": "assets/seed/covers/demon-curse.jpg",
+      "bytes": 19168,
+      "sha256": "d4abc1c9fd6e7d83bd589de4f989197016e70230e205374b8545381d4e999bc5"
+    },
+    {
+      "path": "assets/seed/covers/demon-deals.jpg",
+      "bytes": 17979,
+      "sha256": "8c44b9f91dfa50132c336aaaf55171ed4e00e9b018781debf803a638f5b48d5d"
+    },
+    {
+      "path": "assets/seed/covers/destroyer.jpg",
+      "bytes": 10541,
+      "sha256": "61ce21d06910047d609e47454d12a736f8e09b5e560361f404ca6caed9fc31ec"
+    },
+    {
+      "path": "assets/seed/covers/devoted-wife.jpg",
+      "bytes": 15309,
+      "sha256": "f7b8f4443a86fc7049f9e50dcb3315d7c3b882b1beb941adf8f3a10474182e63"
+    },
+    {
+      "path": "assets/seed/covers/dilemma-of-devotion.jpg",
+      "bytes": 17288,
+      "sha256": "a7c28df39874b8fde03334c6f3cb68c3712c23826151f2032aa78c4c48fd009d"
+    },
+    {
+      "path": "assets/seed/covers/dimension-69.jpg",
+      "bytes": 18796,
+      "sha256": "153be24cb1b296cc4f4db81d1243ebcaa44d25928a2dd52d134f566114f14ef1"
+    },
+    {
+      "path": "assets/seed/covers/disruption.jpg",
+      "bytes": 7948,
+      "sha256": "8fd8154087e133081f864e82dfbee0dc56a2cb9daea595de189ba2453ebc9dfa"
+    },
+    {
+      "path": "assets/seed/covers/domination-mansion.jpg",
+      "bytes": 23164,
+      "sha256": "019714334c74745fc1c02973379f6ab095a66586a436f25dce9655d54e8f471e"
+    },
+    {
+      "path": "assets/seed/covers/doomination.jpg",
+      "bytes": 22150,
+      "sha256": "eb80940573532c77d7e83264e4e9873f38e268a64731b925216432ace2315284"
+    },
+    {
+      "path": "assets/seed/covers/dreamland.jpg",
+      "bytes": 5046,
+      "sha256": "e53e19bee9e8b2ea40f0e69a038a6c7dbd1a0a987241968ab6a818ff358ed451"
+    },
+    {
+      "path": "assets/seed/covers/dungeon-slaves.jpg",
+      "bytes": 18694,
+      "sha256": "a6863e77e3d223affc33c45620bc2b71b9cda1a7eaca4a72e828e789873a619c"
+    },
+    {
+      "path": "assets/seed/covers/evas-ecstasy.jpg",
+      "bytes": 13631,
+      "sha256": "7bb3dd0f49fc28c862df99ddcf2712ca7b9a4b3f77fe6d9aba7fe4d308254ec7"
+    },
+    {
+      "path": "assets/seed/covers/facefuck-madness.jpg",
+      "bytes": 19090,
+      "sha256": "0e4e22e364d9f557b879d9657bcab1d610e28888662f28b7a891180e601ad96a"
+    },
+    {
+      "path": "assets/seed/covers/falling-undercover-nox-syndicate.jpg",
+      "bytes": 13800,
+      "sha256": "33ddc55b05cf0a74b56120bdf818745e2b5dc2f6e373f987872b6f6e9fa282e7"
+    },
+    {
+      "path": "assets/seed/covers/family-trouble.jpg",
+      "bytes": 22359,
+      "sha256": "37c628a226e3b3879557981853dcd98b16b5956ce9e920a3e937bdded6592e4b"
+    },
+    {
+      "path": "assets/seed/covers/family-vacation.jpg",
+      "bytes": 14605,
+      "sha256": "f1d194811aa991c9824fe08860fc72811ac404d507cc54040e722b2611f760b2"
+    },
+    {
+      "path": "assets/seed/covers/favorite-teacher.jpg",
+      "bytes": 16551,
+      "sha256": "620b8001bd2f4319279804c7bdc59ec0c95ae10be2666a91149cf904ea7c4f6a"
+    },
+    {
+      "path": "assets/seed/covers/femboy-survival.jpg",
+      "bytes": 21660,
+      "sha256": "2a7175e03ccf4e6422408d3fbfd5ad0e402e28d042e5a4eafc46ea4dd32c82f9"
+    },
+    {
+      "path": "assets/seed/covers/freshwomen.jpg",
+      "bytes": 17697,
+      "sha256": "ab4832ad5f60fc693f32a2e11751202748091a69cfe772c8ef90a5eecd5889b4"
+    },
+    {
+      "path": "assets/seed/covers/friends-in-need.jpg",
+      "bytes": 19695,
+      "sha256": "f75eb3a7e532cd9b65215557990eacb17f88e382be2ff0077d551eed68426530"
+    },
+    {
+      "path": "assets/seed/covers/friends-of-mine.jpg",
+      "bytes": 11882,
+      "sha256": "017ff94d85ea1bd0e00d200099a00812356d101087083d20d1d4f31dae96d922"
+    },
+    {
+      "path": "assets/seed/covers/furtown-new-beginnings.jpg",
+      "bytes": 23629,
+      "sha256": "9c602b0d65dcd95300c4f533e8bbe912f89483ed0f3c77eb3c1edadf8b26be7e"
+    },
+    {
+      "path": "assets/seed/covers/futa-family.jpg",
+      "bytes": 11848,
+      "sha256": "00538b1937159e27c4d620764fcb8e41ba8a3466c78361426c05c8ad04f48a5a"
+    },
+    {
+      "path": "assets/seed/covers/futa-prision-2.jpg",
+      "bytes": 15540,
+      "sha256": "47fb2f1e8d14c2874112574b2988cb04142c98dec05ba9f1160ad3b451f6b631"
+    },
+    {
+      "path": "assets/seed/covers/game-of-whores.jpg",
+      "bytes": 18485,
+      "sha256": "c35ca943c6a1ab1ad08650a743ffb173d0ac6d008e2163532a94388ac33c6f5c"
+    },
+    {
+      "path": "assets/seed/covers/girlfriend-2.jpg",
+      "bytes": 14510,
+      "sha256": "bcf92502bc96cc1ea8ebcb414398234fb2380a71d7ad5f3f3ddfe8477dfd61cc"
+    },
+    {
+      "path": "assets/seed/covers/goddesses-whim.jpg",
+      "bytes": 9658,
+      "sha256": "03fc086af53fad4ae59fff8e5c37c3d33294632e097d86a576b8f492e6dacc06"
+    },
+    {
+      "path": "assets/seed/covers/gogopizzaboy.jpg",
+      "bytes": 21864,
+      "sha256": "e5ae0cf8a30330d4a6031f3ef6445e6afbd8b082893f7d7aa815356515eef7f3"
+    },
+    {
+      "path": "assets/seed/covers/grandmas-house.jpg",
+      "bytes": 21584,
+      "sha256": "322491ce0a07171ea83d0b41565f9cb37e5e5a1ae7bb23f32f6113d1978a7e6a"
+    },
+    {
+      "path": "assets/seed/covers/growing-things-up.jpg",
+      "bytes": 15465,
+      "sha256": "ec8549353e8c0d332c6a1c8ef7cbafe2f7241d6e555c3a14926ad4d6eec1a829"
+    },
+    {
+      "path": "assets/seed/covers/guilty-pleasure.jpg",
+      "bytes": 16053,
+      "sha256": "eaff2c33d203885047decbe077921646cde91d90282d95be7be78f4bdae9113a"
+    },
+    {
+      "path": "assets/seed/covers/hail-dicktator.jpg",
+      "bytes": 17769,
+      "sha256": "dfb841e4a9e30866d213c183b8a73c5d61747eb5cf7984785981a35ee0d8b019"
+    },
+    {
+      "path": "assets/seed/covers/harmony-haven.jpg",
+      "bytes": 11651,
+      "sha256": "0572f11f73646473dbded45a1565574b880cab80493d0269813c2d5cb1af96c8"
+    },
+    {
+      "path": "assets/seed/covers/he-lives-here-now.jpg",
+      "bytes": 15690,
+      "sha256": "441d4b04927f543f61b2a31cd827a2f70b97a44374d7078c8d73e1ed13ab135e"
+    },
+    {
+      "path": "assets/seed/covers/he-maid-her-fall.jpg",
+      "bytes": 15793,
+      "sha256": "79823c2b230c4c9797005edfb81eaca8769c8bb24383ec4611e9b8c3319535a2"
+    },
+    {
+      "path": "assets/seed/covers/her-desire.jpg",
+      "bytes": 11747,
+      "sha256": "65707b0a36bcb90961ca267b844ffcda3a975386e2f61bd0c83e0b3c971e018d"
+    },
+    {
+      "path": "assets/seed/covers/heroes-of-celtica-dark-druid.jpg",
+      "bytes": 19163,
+      "sha256": "3315dcb1dca593421bb33aec004cf1b887494ad41fb32159e1121946cd93b25d"
+    },
+    {
+      "path": "assets/seed/covers/hey-phil.jpg",
+      "bytes": 20680,
+      "sha256": "bbebbc78c6dd583196820f5acee872667fb15a512a6778958ba6b55e40ad783f"
+    },
+    {
+      "path": "assets/seed/covers/hikari-first-interlude.jpg",
+      "bytes": 11918,
+      "sha256": "612ba195d892122afe09ff4ada37430e6bf9087637ab3271df67c38fe7977959"
+    },
+    {
+      "path": "assets/seed/covers/holly-smiles-at-the-end.jpg",
+      "bytes": 17615,
+      "sha256": "21259c5f56a9700779c2db3906111350fb360388e1d755bd21b0aabc8b569bbd"
+    },
+    {
+      "path": "assets/seed/covers/home-together.jpg",
+      "bytes": 5487,
+      "sha256": "aae1905cf387de5ba5b987992f5d3692636515e2b52f20fc9e1a756c3933d0ef"
+    },
+    {
+      "path": "assets/seed/covers/honey-kingdom.jpg",
+      "bytes": 12868,
+      "sha256": "dc5df37de8d9f705616899c5ab1324c80cc66bb03f0a54b0874ff181268af369"
+    },
+    {
+      "path": "assets/seed/covers/hornycraft.jpg",
+      "bytes": 23897,
+      "sha256": "ed1c7ac9ca8fb829fd08ac3c05fa2e0258119fd6fd4775fb647d5ed8c29bb823"
+    },
+    {
+      "path": "assets/seed/covers/horton-bay-stories-jake.jpg",
+      "bytes": 9916,
+      "sha256": "8cd45a4c89dc75b12d7f4fee8a1b5ebeb4072677786c1bf9d99147c9785213dd"
+    },
+    {
+      "path": "assets/seed/covers/imperial-chronicles.jpg",
+      "bytes": 11768,
+      "sha256": "3eed9e5a8e36d8db970467e243a09b8c3e753a3c05b24c7a1175f5728df6e5b5"
+    },
+    {
+      "path": "assets/seed/covers/in-her-service.jpg",
+      "bytes": 13269,
+      "sha256": "35b1f20a6d155d7594fb4c98b9ca5c58a777839e54dcbfc9da38c98bb0aa7495"
+    },
+    {
+      "path": "assets/seed/covers/in-security.jpg",
+      "bytes": 11905,
+      "sha256": "93b729dacc1d54e51917f3eb1aa0cd82667aff445a76cce47cc177888e63e068"
+    },
+    {
+      "path": "assets/seed/covers/invulnerable.jpg",
+      "bytes": 25219,
+      "sha256": "240b028b1314d78eee6ab1533af35209b58cf60c02f82cdaf0dbda4203702119"
+    },
+    {
+      "path": "assets/seed/covers/jennifers-life.jpg",
+      "bytes": 10292,
+      "sha256": "bd5be8d8affed880a7d4bf8773ec6aeb81b197c098f50a58d38fbd582ef2ce88"
+    },
+    {
+      "path": "assets/seed/covers/just-one-more-chance.jpg",
+      "bytes": 23011,
+      "sha256": "43ac795dd61af467abab94aa3bdbb682e5a8cef62f5efc77f9da24a287fb712c"
+    },
+    {
+      "path": "assets/seed/covers/kings-fall.jpg",
+      "bytes": 18315,
+      "sha256": "a7615389e4c02f0f255c6aef3d7cf0d7a4cb037334e070b5520b0fad1981b3e9"
+    },
+    {
+      "path": "assets/seed/covers/lessons-in-love.jpg",
+      "bytes": 31243,
+      "sha256": "00b6ab3f043a48600b3e6a030fac4b46f54bc6f222f7531a4ac8067b02467105"
+    },
+    {
+      "path": "assets/seed/covers/lets-split-up-gang.jpg",
+      "bytes": 21606,
+      "sha256": "50bb67b0dbd2275b9848e31a1bda14317962314c3354368868342d8619f4f9e1"
+    },
+    {
+      "path": "assets/seed/covers/lisa-total-investigation.jpg",
+      "bytes": 18160,
+      "sha256": "d603e59b64167ebf60e0c9bd3cbdbdaf878654dd4c2a439cba61545e3ed80884"
+    },
+    {
+      "path": "assets/seed/covers/littleman-remake.jpg",
+      "bytes": 19518,
+      "sha256": "177f8ebcde72032beede6d03c9c1f4d7f3d6e29b5367155f196100075a762ab2"
+    },
+    {
+      "path": "assets/seed/covers/live-in-corruption.jpg",
+      "bytes": 16449,
+      "sha256": "a879743d4e9581b1925efed5d216394545febc0a913bea3c413962c6b2ec0ae7"
+    },
+    {
+      "path": "assets/seed/covers/lockdown-dom.jpg",
+      "bytes": 13363,
+      "sha256": "4bedee45c5040534d0b7b374b248a2fa4aeaa36a106510fd70cf4ef1599d642c"
+    },
+    {
+      "path": "assets/seed/covers/locked-in-chastity.jpg",
+      "bytes": 8183,
+      "sha256": "7fd3dac9207dae36d8fda1c1fd343affb63211627a1f0c0a15ffa56927454028"
+    },
+    {
+      "path": "assets/seed/covers/love-and-sex-second-base.jpg",
+      "bytes": 24010,
+      "sha256": "620f3f2425a0b5df355f2af813076a1e8f9329d686c12f81a6cead9daa1e1d1a"
+    },
+    {
+      "path": "assets/seed/covers/lunars-chosen.jpg",
+      "bytes": 10075,
+      "sha256": "666fe1ec721ffe8f1289c728b8f04061bb8600f670ca210c13131d5265edade3"
+    },
+    {
+      "path": "assets/seed/covers/lust-for-life-a-sissy-story.jpg",
+      "bytes": 7028,
+      "sha256": "98b04ccd0476901cfda75ceba3d9564329f02805c16b6c64c07bd1a3539699d6"
+    },
+    {
+      "path": "assets/seed/covers/lustful-sin.jpg",
+      "bytes": 19398,
+      "sha256": "30d0aba166cbd73f1fdb7fa40c46340ed244db020dc76a95cb240f0979ef1578"
+    },
+    {
+      "path": "assets/seed/covers/lusty-buccaneers.jpg",
+      "bytes": 14136,
+      "sha256": "fbbef1845d51d2205e8559307c9d5ba60b2a8bb5aa5f1c4bc034a3e351dced55"
+    },
+    {
+      "path": "assets/seed/covers/mastering-the-pink-box.jpg",
+      "bytes": 12070,
+      "sha256": "3b777ada38cd0f4c09495baf827223a414c20fdab09f3450c3cc3c2d29f357b4"
+    },
+    {
+      "path": "assets/seed/covers/masters-of-raana.jpg",
+      "bytes": 10029,
+      "sha256": "13e7f9d98907744d131eb88ef43740c0e03bfc4763e8200942385050c62d711b"
+    },
+    {
+      "path": "assets/seed/covers/milftoon-milfland.jpg",
+      "bytes": 21747,
+      "sha256": "2fc612bff3f1a09b48eabf3207095a9be25fc9fbad4388ffa830577733aab722"
+    },
+    {
+      "path": "assets/seed/covers/milfy-cases-damsels-in-distress.jpg",
+      "bytes": 8759,
+      "sha256": "ec37e595589adda26d3fb7be3943451ea6833701a14c6f649fbddc8788b99236"
+    },
+    {
+      "path": "assets/seed/covers/mind-control.jpg",
+      "bytes": 18066,
+      "sha256": "84724e8aeca76f65ec4f5e1ac137981c670d8f338254c3a0f3a41c43344b802c"
+    },
+    {
+      "path": "assets/seed/covers/misanthropy.jpg",
+      "bytes": 20458,
+      "sha256": "1aeec5884f7227de39f813674d737f567d6b161ce5abcd3f59d7cad29919f51d"
+    },
+    {
+      "path": "assets/seed/covers/mma-life-simulator.jpg",
+      "bytes": 12905,
+      "sha256": "557d0ac268128228baf02f1f4aae7dfad5a0597b15d4b0417b7da2245713ea98"
+    },
+    {
+      "path": "assets/seed/covers/moncurse.jpg",
+      "bytes": 16527,
+      "sha256": "db566b970fda03bcbe7553a82a351ca29df1641ac8c650e66b04253a91cb9b87"
+    },
+    {
+      "path": "assets/seed/covers/moniker-smiths-bloodlines.jpg",
+      "bytes": 10581,
+      "sha256": "e1d27a773616cc7f16b35b7dd5f39038b0fab05d49d94741b808262ce4884a11"
+    },
+    {
+      "path": "assets/seed/covers/move-the-chains.jpg",
+      "bytes": 15704,
+      "sha256": "03b19a21a2a25a92c13a0a8165d16a88cb7771117dc09b278c38c199cf587a44"
+    },
+    {
+      "path": "assets/seed/covers/my-a-rank-witch-2.jpg",
+      "bytes": 14154,
+      "sha256": "b9244e613f7f3d4d531e6a287bac402410b77d137467fe64c8aec8e8774e9205"
+    },
+    {
+      "path": "assets/seed/covers/my-bully-tries-to-corrupt-my-mother.jpg",
+      "bytes": 9290,
+      "sha256": "af277237ee47a09d4e034710344fa90110afc15310dd81370309eb3d453ba722"
+    },
+    {
+      "path": "assets/seed/covers/my-girlfriends-friends.jpg",
+      "bytes": 14692,
+      "sha256": "3abe01e68be0f04ee2bcb7bc9534d9426b8937f9f7d796d552a1ac97ecb68e78"
+    },
+    {
+      "path": "assets/seed/covers/my-girlfriends-new-kink.jpg",
+      "bytes": 17235,
+      "sha256": "21e79db4a21509fdc1bd059062cdc3ef0b2c287f2a68296d6d50f9030add6eee"
+    },
+    {
+      "path": "assets/seed/covers/my-girlfriends-streaming-career.jpg",
+      "bytes": 9668,
+      "sha256": "b409638da2b016a8957fe706649a6cd199331c4a97dcffbddcf13eb22acd2851"
+    },
+    {
+      "path": "assets/seed/covers/my-hotwife.jpg",
+      "bytes": 12638,
+      "sha256": "d457feee1b309a8be02b8f03a93db8723ff4379583ab7c863d235d8bedf35793"
+    },
+    {
+      "path": "assets/seed/covers/my-true-desire.jpg",
+      "bytes": 17825,
+      "sha256": "0c5378bb516b8b9ce0c4efafeac446a7ff8d266d4b3e9a6faac0db01b1d96aae"
+    },
+    {
+      "path": "assets/seed/covers/naruto-shinobi-lord.jpg",
+      "bytes": 11632,
+      "sha256": "73be815610f3639c7e2cedf47837cbc59296dab8769748752b83a972a3d62d1d"
+    },
+    {
+      "path": "assets/seed/covers/naughty-neighbours.jpg",
+      "bytes": 16188,
+      "sha256": "68d7f9a616588bb3c7a89e189e37801451fca502844f5fa775bad5ca35bcdcea"
+    },
+    {
+      "path": "assets/seed/covers/nekontr.jpg",
+      "bytes": 16334,
+      "sha256": "8358ab3cf8c6c17a8ff7e6cecb207a2e2b24f39237bc9c33c9c61605b32da045"
+    },
+    {
+      "path": "assets/seed/covers/nephilim.jpg",
+      "bytes": 13497,
+      "sha256": "f6e27c34c1dcc23f758918ce67f77d6cb318bcf34628bdd842a0345295e76357"
+    },
+    {
+      "path": "assets/seed/covers/new-beginnings-in-japan.jpg",
+      "bytes": 15600,
+      "sha256": "65115266caedfa11d72cc2f5fdaccf493e57c157debd83ac0afb909767aeeb36"
+    },
+    {
+      "path": "assets/seed/covers/new-coral-city.jpg",
+      "bytes": 25585,
+      "sha256": "b8feec86284cea75a91b071d4214dd0c74b73cf98eb40ac7de19825059e0381f"
+    },
+    {
+      "path": "assets/seed/covers/new-life-project.jpg",
+      "bytes": 14446,
+      "sha256": "cf98982c52167717c4817785b202e83b97ff1e8a1629faa368c23cf649234f17"
+    },
+    {
+      "path": "assets/seed/covers/not-going-back.jpg",
+      "bytes": 10271,
+      "sha256": "306e765a2e352fb8f1a8e4bede54431650de8d2f530b6649505d37a6df317793"
+    },
+    {
+      "path": "assets/seed/covers/ntr-phone-group.jpg",
+      "bytes": 11612,
+      "sha256": "fc30dd5d62ba46a60eacad0220bc274beef359e3f2afd76012c864f75aef7280"
+    },
+    {
+      "path": "assets/seed/covers/ntr-phone.jpg",
+      "bytes": 12575,
+      "sha256": "c3f712fbb2c73efb04ab53275f9700e10dda4ded478693b5864cacedc83e9c1a"
+    },
+    {
+      "path": "assets/seed/covers/nyatorase-shared-passions.jpg",
+      "bytes": 19861,
+      "sha256": "7cb1fabec2ffdf2dddfec78ea4727470d1852e0bf4d323bb5b670ec25960226f"
+    },
+    {
+      "path": "assets/seed/covers/nympho-tamer-v0-74-bottomless-pit.jpg",
+      "bytes": 14956,
+      "sha256": "b03c7894e7134e31cf627cb1bd369050429a8561d94b333145043033baee4ea2"
+    },
+    {
+      "path": "assets/seed/covers/office-queen.jpg",
+      "bytes": 13919,
+      "sha256": "09aef3b23864720637542a121631734df74cdfbff46197b4e0aea3a3142e5c76"
+    },
+    {
+      "path": "assets/seed/covers/origin-story.jpg",
+      "bytes": 12121,
+      "sha256": "cc20a4b2a0cb505c547c808460deb46e0212c8636c69a32886d7e90ecceafd9f"
+    },
+    {
+      "path": "assets/seed/covers/our-bright-days.jpg",
+      "bytes": 10222,
+      "sha256": "ca6d35005b5369e5e4602a4996d81587df8b5544fc62d96f583d8355ca069a35"
+    },
+    {
+      "path": "assets/seed/covers/our-home.jpg",
+      "bytes": 5721,
+      "sha256": "60d63365887fb8545fea002b2aec2724ed9c8c0d576bae9b52a52a74c76de9d2"
+    },
+    {
+      "path": "assets/seed/covers/our-only-man.jpg",
+      "bytes": 14908,
+      "sha256": "00aa1507c332a6a1356b76e0ad04922b2522ef4d5da671d25f823ef6fc62a569"
+    },
+    {
+      "path": "assets/seed/covers/over-the-moon.jpg",
+      "bytes": 4764,
+      "sha256": "72b725285a586d32cdb8c6af0bc819f76caa3631e59cd3ae2976314d616e340d"
+    },
+    {
+      "path": "assets/seed/covers/pandoras-box-2.jpg",
+      "bytes": 18608,
+      "sha256": "815a5fef7739d4507f35319b5bc81513323ae11439dcd4f94b148980ac2b46e8"
+    },
+    {
+      "path": "assets/seed/covers/paracosmic-reality.jpg",
+      "bytes": 10445,
+      "sha256": "7ae6965b844c2f62f7ed865227c9b7724f73e851cf84c1c7fa88385b2a0a28ca"
+    },
+    {
+      "path": "assets/seed/covers/paradise-city.jpg",
+      "bytes": 21112,
+      "sha256": "c98b2a41d60123f2719720715c45777a911025b3e26c51e697522b877895d134"
+    },
+    {
+      "path": "assets/seed/covers/parasite-black.jpg",
+      "bytes": 15602,
+      "sha256": "dc80786f7ac5585f05814906c5227476832dd247c490ea69d1baa6107a9e774a"
+    },
+    {
+      "path": "assets/seed/covers/pawn-pleasure.jpg",
+      "bytes": 13729,
+      "sha256": "cc92efed43487241759a9912a813231558e2a1b2980d70af359ff328801ed1fa"
+    },
+    {
+      "path": "assets/seed/covers/peach-hills-division.jpg",
+      "bytes": 14021,
+      "sha256": "d22fbd41b3becdaf52a4f4169a6da8d72f11e5db33c3a86ae9859f590d71b39c"
+    },
+    {
+      "path": "assets/seed/covers/peasants-quest.jpg",
+      "bytes": 13858,
+      "sha256": "a5f2a7eba19f5a1221de5571868361c0fbe77bcdfb573ab039da2b4f3e034d01"
+    },
+    {
+      "path": "assets/seed/covers/peerless-lust.jpg",
+      "bytes": 20123,
+      "sha256": "bff8548b7bf231f7118e6f85fb88c5c47ec32ed1e3290e0ce7392c194da40af5"
+    },
+    {
+      "path": "assets/seed/covers/pervert-action-timelapse.jpg",
+      "bytes": 7542,
+      "sha256": "cca87e5c0dd9b85013e7b127f0f527a23e05c351aa5bfa2848bd693db0c4f96f"
+    },
+    {
+      "path": "assets/seed/covers/pill-king.jpg",
+      "bytes": 18504,
+      "sha256": "05f5cf65893ddc16d4ac6ac3e5e0ae3bf8771db18db871763aeb6910238b9d13"
+    },
+    {
+      "path": "assets/seed/covers/plowed.jpg",
+      "bytes": 10701,
+      "sha256": "4c607407754f49b3e05db482e1a239a11ab0209f394bfd8caee17255c1dbfba2"
+    },
+    {
+      "path": "assets/seed/covers/plus-size-family-taboo.jpg",
+      "bytes": 16437,
+      "sha256": "2bd92e4a28c4946991da797d76908dd8ff5fe55a37cf4f21fc03df8e690ee302"
+    },
+    {
+      "path": "assets/seed/covers/private-eyes-and-secret-desires.jpg",
+      "bytes": 14926,
+      "sha256": "fc8ba023db6ae872ff1a3564f7ff255bf65b552814dd79da404e7e10d3b9d568"
+    },
+    {
+      "path": "assets/seed/covers/project-mnemosyne.jpg",
+      "bytes": 6638,
+      "sha256": "957bd3e41039cb4344b9ef850c030a57b6ecf9614a8b848f670aa17bd9bed263"
+    },
+    {
+      "path": "assets/seed/covers/project-myriam-life-and-explorations.jpg",
+      "bytes": 21770,
+      "sha256": "c16fb2f98cc35c0b06ef7d4abd260f0fc91c1bd5706e51b756cbb3d3c2dab2e0"
+    },
+    {
+      "path": "assets/seed/covers/purity-of-blood.jpg",
+      "bytes": 10007,
+      "sha256": "680f5e590640bff447b27efddc19488ec9192b31b858a59b17586bf42232f5f1"
+    },
+    {
+      "path": "assets/seed/covers/qprey-2-house-arrest.jpg",
+      "bytes": 13085,
+      "sha256": "4cb90a7d5cb69821243f4ad5ee743e1b558f2e7c3ef27667e0d7a3222ee9d83e"
+    },
+    {
+      "path": "assets/seed/covers/rebel-duet.jpg",
+      "bytes": 13823,
+      "sha256": "dfca7e2e56e558b94772a1b9fd144c05335dde618e85a4655f0da27832b232dd"
+    },
+    {
+      "path": "assets/seed/covers/reclaiming-the-lost.jpg",
+      "bytes": 6171,
+      "sha256": "ea6782b2e043f1ca8d0652d426ad4547322494daa63db5be3f4a5e3aed4e9d0a"
+    },
+    {
+      "path": "assets/seed/covers/refuge-of-embers.jpg",
+      "bytes": 11620,
+      "sha256": "3ffc732bddb13bca51751c0d65783dff1a8058c9e0226d341dd3b701bdf2412e"
+    },
+    {
+      "path": "assets/seed/covers/regret-island.jpg",
+      "bytes": 15404,
+      "sha256": "3d8ed136fcdcb56edfeb0527eb99fbe01feecc8b0a44c66182c8e3746ff1413b"
+    },
+    {
+      "path": "assets/seed/covers/renryuu-ascension.jpg",
+      "bytes": 22327,
+      "sha256": "86e6f09dc38f0e96a3804d8e426852fd9a5bf8d10951a64affa11b2797d5d0a2"
+    },
+    {
+      "path": "assets/seed/covers/rewind.jpg",
+      "bytes": 5528,
+      "sha256": "178730e6b30a4d5d39caf0b33f02290851531a98937ea32058ce24e89044bfa5"
+    },
+    {
+      "path": "assets/seed/covers/rick-and-morty-a-way-back-home.jpg",
+      "bytes": 13717,
+      "sha256": "7b54e52bdebd289e8ef49c5264453834cba732409e59d61bc5bef694e4b416ae"
+    },
+    {
+      "path": "assets/seed/covers/rick-and-morty-another-way-home.jpg",
+      "bytes": 9157,
+      "sha256": "5adcd6914181c3668ae52e76c15b093a61195908850cce3d9a395d921e6d4883"
+    },
+    {
+      "path": "assets/seed/covers/ripples.jpg",
+      "bytes": 5712,
+      "sha256": "40bef60fb9d90d0dcdb689dc27111626dec8348223adacedf4d54a41df615264"
+    },
+    {
+      "path": "assets/seed/covers/rise-of-corruption.jpg",
+      "bytes": 16764,
+      "sha256": "f9701536dddbd4d5aeac17969e58136f6425f90837b787432d0f44604b99cee7"
+    },
+    {
+      "path": "assets/seed/covers/rogue-femme.jpg",
+      "bytes": 18084,
+      "sha256": "42b35279d2ef631d1403e6ae5d85f086d0a9a01a8da8088b4dcec769fb45c5e5"
+    },
+    {
+      "path": "assets/seed/covers/rogue-like-evolution.jpg",
+      "bytes": 23744,
+      "sha256": "86713f9596ab899c407513399c3e76be88ef62eb04d02dc2e70311d0bef39b09"
+    },
+    {
+      "path": "assets/seed/covers/romantic-escapades.jpg",
+      "bytes": 10728,
+      "sha256": "9017fdee19f8207dc58c10ae5a86ccd94e0b745857bfeba5103b934366cf64cc"
+    },
+    {
+      "path": "assets/seed/covers/royale-harem.jpg",
+      "bytes": 19188,
+      "sha256": "f1c2b449bc7a677f1dac79681933df540d5b9f766bb012cf31f315dff735a15a"
+    },
+    {
+      "path": "assets/seed/covers/ruleuniverse.jpg",
+      "bytes": 20035,
+      "sha256": "8ef1373684469a963a9c67028d2aec5f963563bd7f00d6281e0ec9a807d90f2d"
+    },
+    {
+      "path": "assets/seed/covers/sapphire-safari.jpg",
+      "bytes": 18196,
+      "sha256": "4f25077eaee426c610c82cd68d62c9957bd0024280806930bec7a54b41ba2693"
+    },
+    {
+      "path": "assets/seed/covers/sara-oh-daddy-part-2.jpg",
+      "bytes": 9284,
+      "sha256": "50109993b3477de7c8b3f9420e200f0eb2aa7801a6248d7f50f1630e80b7ae68"
+    },
+    {
+      "path": "assets/seed/covers/school-love-and-friends.jpg",
+      "bytes": 8727,
+      "sha256": "dcb8fc9bce9f8a644b88f103ca7c917c4688297c5a37a5e747b8592ead47937d"
+    },
+    {
+      "path": "assets/seed/covers/seaside-mystery.jpg",
+      "bytes": 14301,
+      "sha256": "873fb3b6e53dda147a643e83e142f0634d044e3e7e99617d64d6747b54c61206"
+    },
+    {
+      "path": "assets/seed/covers/secret-care-cafe.jpg",
+      "bytes": 18742,
+      "sha256": "fbb750407330c98243612638470ba3e383ffaa8f117c5820d5ac125748ac379c"
+    },
+    {
+      "path": "assets/seed/covers/secretary.jpg",
+      "bytes": 15979,
+      "sha256": "0b106fd0cb62a5e06be1a3ab5f2a9a28554741cf8f8e66b10cdb765d22404996"
+    },
+    {
+      "path": "assets/seed/covers/secrets-of-the-family.jpg",
+      "bytes": 7218,
+      "sha256": "4f9de78045bc2331486c2a80a40ad76c09f244ac29d1cb09ceaf6d446260e9dc"
+    },
+    {
+      "path": "assets/seed/covers/seeds-of-chaos.jpg",
+      "bytes": 16330,
+      "sha256": "c7f31ded3bbc8f42b91d01cc86f15362afb9f09a99fe9e8eb9d6352dee9dbb3c"
+    },
+    {
+      "path": "assets/seed/covers/seeking-closure.jpg",
+      "bytes": 22928,
+      "sha256": "57cd9d9958b9e5f0c26fcf2a6f59aa57e94af8426742796623b889857adb0368"
+    },
+    {
+      "path": "assets/seed/covers/serenity.jpg",
+      "bytes": 16168,
+      "sha256": "14ba3a1f3163e944cf5233e1ba3c97433f18e91f230a8fb75e9502ce9f8cfb2c"
+    },
+    {
+      "path": "assets/seed/covers/sex-formula.jpg",
+      "bytes": 9111,
+      "sha256": "65e150e5efcc1d1fe65f24d4827519eec99c3013c31da7043df10e873aed194f"
+    },
+    {
+      "path": "assets/seed/covers/sexbot-restoration.jpg",
+      "bytes": 16772,
+      "sha256": "fe19076a5b75de54ba06edbf36c78507b5051615e61b7ff3fdad41396b516d95"
+    },
+    {
+      "path": "assets/seed/covers/shadows-of-ambition.jpg",
+      "bytes": 12426,
+      "sha256": "f53d9a9c7beba5a1f2a146516a904989c3e3058da0e36e0b9cb7fa0088b7b4c0"
+    },
+    {
+      "path": "assets/seed/covers/shadows-of-desire.jpg",
+      "bytes": 12211,
+      "sha256": "f40baf523d583762aa87ad5679373c4f473006612b654fea103f5eb15325fdd5"
+    },
+    {
+      "path": "assets/seed/covers/shadows.jpg",
+      "bytes": 9494,
+      "sha256": "19df5e5895c561d5544fbeba706656a67fcc187cae475d542d9b135aa10305f1"
+    },
+    {
+      "path": "assets/seed/covers/shattered-dreams-redemption.jpg",
+      "bytes": 7038,
+      "sha256": "8d3c3b4de570351aec87e917c755f4b4c242e328f67f4a46779d64a6eb82feee"
+    },
+    {
+      "path": "assets/seed/covers/shattered-minds.jpg",
+      "bytes": 20697,
+      "sha256": "6398dac15f9eaae656eacd9278dda6f038f3a8a290a36841fb38803ed029b1c6"
+    },
+    {
+      "path": "assets/seed/covers/shattered.jpg",
+      "bytes": 11348,
+      "sha256": "93cb25f4156314f6a24aecf21225c6e16d8b8be1efcc9b841b5f8ef37baa73ed"
+    },
+    {
+      "path": "assets/seed/covers/shellys-future-past.jpg",
+      "bytes": 10355,
+      "sha256": "91c3c1ffcedf48da3a6e2bf0022be3bee8d7cbb0825a4406a61b9f48a594b9b8"
+    },
+    {
+      "path": "assets/seed/covers/shosakyu-the-succubus-i-summoned-is-a-noob.jpg",
+      "bytes": 18570,
+      "sha256": "94639d969af17de1089d74c072b0f21bd62b8f1c32655cb253389a19d39d0f1d"
+    },
+    {
+      "path": "assets/seed/covers/sickimtrack-2.jpg",
+      "bytes": 7664,
+      "sha256": "4f490024099d1ecdc2aa8f33443a7343d0f78b3b34322d8d891996e6f228c62b"
+    },
+    {
+      "path": "assets/seed/covers/simple-days.jpg",
+      "bytes": 16996,
+      "sha256": "5f9d152840009d1d4f86b8963c077c7f2fac4dbc0c90087c20c416e444084196"
+    },
+    {
+      "path": "assets/seed/covers/simulation-69.jpg",
+      "bytes": 16358,
+      "sha256": "b4ef524575c09d1db44222094a3414d45f4b3992e9f33510a950148ff6dbf2b8"
+    },
+    {
+      "path": "assets/seed/covers/sin-spire.jpg",
+      "bytes": 11120,
+      "sha256": "d035c9190cd18ab9520e6dc21ab48ddd8bc525113850b10445c71eec7ddd94c9"
+    },
+    {
+      "path": "assets/seed/covers/sinful-delicacies.jpg",
+      "bytes": 14698,
+      "sha256": "5a63ae9692ed86e5aa4b55824bb41c367b5e59f2d41595e6d0532b1f70ddbc39"
+    },
+    {
+      "path": "assets/seed/covers/single-again.jpg",
+      "bytes": 18088,
+      "sha256": "b9b0beca5ab6b49be6454ac299035941039d9ed4ef40725accb3bdf0ee115add"
+    },
+    {
+      "path": "assets/seed/covers/single-mother.jpg",
+      "bytes": 12511,
+      "sha256": "355ca42b87711e8401c10cf4b918024e303c78b82bc3fcbea6cd376948192282"
+    },
+    {
+      "path": "assets/seed/covers/sinners-landing.jpg",
+      "bytes": 19299,
+      "sha256": "9f224a2e6cb6e7570bc94a07a8bb34f6419f2cca36e44ccb3c46cda2bf2b48ee"
+    },
+    {
+      "path": "assets/seed/covers/sister-wants-to-help.jpg",
+      "bytes": 13620,
+      "sha256": "3891b24aec7ce3e715ab0f5b2d0853f67c29b2d63aa0870c255796068aa144c9"
+    },
+    {
+      "path": "assets/seed/covers/slaves-of-rome.jpg",
+      "bytes": 8791,
+      "sha256": "38e449c3e670367584a0bdf28a8163ad3fdaf7f5a89ae048edc95b0187655a2a"
+    },
+    {
+      "path": "assets/seed/covers/sluttown-usa-hometown-corruption.jpg",
+      "bytes": 14849,
+      "sha256": "414358d451686a459414e4305ab9414140601820f9da0928ee7d1f589dd1b1dc"
+    },
+    {
+      "path": "assets/seed/covers/some-modeling-agency.jpg",
+      "bytes": 6682,
+      "sha256": "78a329bf7da4c4c2d11ee1f862bd44675a90369373ed68e2e2928252587f6a46"
+    },
+    {
+      "path": "assets/seed/covers/something-to-write-about-unbroken.jpg",
+      "bytes": 10110,
+      "sha256": "e8cfb2ae8edb27a53c8ec0f3f7af9a451dcf634e30194fa96e53e8a0a67ed7f5"
+    },
+    {
+      "path": "assets/seed/covers/son-of-a-bitch.jpg",
+      "bytes": 23892,
+      "sha256": "158ad9b0bae55a9595302a392c20a8cabaca2f7ea0e67b076ac7387994d88302"
+    },
+    {
+      "path": "assets/seed/covers/sophia-parker-hidden-desires.jpg",
+      "bytes": 16408,
+      "sha256": "08f9496571fcc3fef843ee0e5fc730a11e69e7395d0649804e14f2ad18393ce1"
+    },
+    {
+      "path": "assets/seed/covers/sophie-the-girl-from-the-zone.jpg",
+      "bytes": 15368,
+      "sha256": "ed6e37b3066901dfcc85598c88a3f48be6913e5bbe77784175ff0100643d1437"
+    },
+    {
+      "path": "assets/seed/covers/sovereign.jpg",
+      "bytes": 17714,
+      "sha256": "f24e95eb9e88af3952e8e9f213c69d516b47cd28b7193b5bb8a3cbcc62bbe442"
+    },
+    {
+      "path": "assets/seed/covers/space-journey-x.jpg",
+      "bytes": 15152,
+      "sha256": "03d39c61cc4aab9e28e197927ac63eed5ab75f3bbc899cd42e78a4f2281503bd"
+    },
+    {
+      "path": "assets/seed/covers/spacecorps-xxx.jpg",
+      "bytes": 14869,
+      "sha256": "1025d1c0d15a78804bd01b5c36715f0f232c25754d5be26456366a5aff8e3fd7"
+    },
+    {
+      "path": "assets/seed/covers/star-knightess-aura.jpg",
+      "bytes": 13969,
+      "sha256": "02b253d10c3f96d1d04cd0cb96fd9cd8673253966c963ac9103434fece1d044c"
+    },
+    {
+      "path": "assets/seed/covers/starmaker-story.jpg",
+      "bytes": 21976,
+      "sha256": "fa77e2242b53979c5cfb9cf01064556b881c3f1f99acf6c44409a41df384e839"
+    },
+    {
+      "path": "assets/seed/covers/stepmother-effect.jpg",
+      "bytes": 16225,
+      "sha256": "d4bbe65d83114271a0c620efb664106984f6a3605cfc70fd51ed3efbd2e0793b"
+    },
+    {
+      "path": "assets/seed/covers/steps-of-debauchery.jpg",
+      "bytes": 10293,
+      "sha256": "de34d64f9a21a3f8a21b7e390f4db48f07cba966ad20efbd050a95990a6281d6"
+    },
+    {
+      "path": "assets/seed/covers/straitened-times.jpg",
+      "bytes": 18099,
+      "sha256": "e88d681c5cd0d08ac23a76f41c0b13da855c83b8a3e5691f60994155425f87ef"
+    },
+    {
+      "path": "assets/seed/covers/succum-brewery.jpg",
+      "bytes": 18643,
+      "sha256": "bc75dad00e400fd941b664b4e8dc8d93392875d0fa7113877da513ffb0d09712"
+    },
+    {
+      "path": "assets/seed/covers/summer-scent.jpg",
+      "bytes": 8033,
+      "sha256": "3669efca4264c506ac3f626182f102b6dcba22bb0097fcd8cd537469ed487069"
+    },
+    {
+      "path": "assets/seed/covers/summer-stolen-paradise.jpg",
+      "bytes": 15369,
+      "sha256": "93f34c7178b94c0fd3133ecf74f1b6ae0d8432811352eec9517209315c6fb981"
+    },
+    {
+      "path": "assets/seed/covers/summers-gone.jpg",
+      "bytes": 6538,
+      "sha256": "ba73e3becc916b94357178d4878f39c2d495f41c91c05e2fd11dc08ae624183e"
+    },
+    {
+      "path": "assets/seed/covers/suspicious.jpg",
+      "bytes": 11003,
+      "sha256": "299fa183937bad2aa0a246f5e6c19d5aed7f440242c2ddfd286cd0cc5b5123eb"
+    },
+    {
+      "path": "assets/seed/covers/sweet-affection.jpg",
+      "bytes": 10851,
+      "sha256": "58d35e4f572f475ace181cf2420d167791f9474fec5f1d8017d54c4fbedc9ed5"
+    },
+    {
+      "path": "assets/seed/covers/sword-art-online-the-trap-of-breath-concealed-magic-2.jpg",
+      "bytes": 13924,
+      "sha256": "4f500171c1598ec7af52505876196864ee8e0a93dea4a0596f440c6bf8011fb7"
+    },
+    {
+      "path": "assets/seed/covers/symphony-of-lust.jpg",
+      "bytes": 15599,
+      "sha256": "6cba27d9695df36ff191516b5b77821b5be1372a3c86039bf7f7a9c43ce24df6"
+    },
+    {
+      "path": "assets/seed/covers/taboo-university.jpg",
+      "bytes": 16690,
+      "sha256": "6f7e79edbe0796e658b7ffc14e49613f58a3a38873bdc097d47c1f8d0a97bcfd"
+    },
+    {
+      "path": "assets/seed/covers/takeis-journey.jpg",
+      "bytes": 20104,
+      "sha256": "6cd64f4c63aedf73313a8ff4eac013fa4019f1ec8605fcc037ec8332477ab257"
+    },
+    {
+      "path": "assets/seed/covers/tales-from-the-unending-void.jpg",
+      "bytes": 13204,
+      "sha256": "b7415f3fedc9034ab806248b666f7e917ec28ba3a8788e201dfebe4f0e91cd7b"
+    },
+    {
+      "path": "assets/seed/covers/tales-of-androgyny.jpg",
+      "bytes": 18072,
+      "sha256": "29f82437d926658041edd486906d23c1238609056193fd51476bc74f491ceb9b"
+    },
+    {
+      "path": "assets/seed/covers/tales-of-terrara.jpg",
+      "bytes": 5727,
+      "sha256": "33574c73304bca9d097dc77be534c01df47544c1cee9835a24dc8b696f303097"
+    },
+    {
+      "path": "assets/seed/covers/temptations-of-love.jpg",
+      "bytes": 14687,
+      "sha256": "e097fc460730a6c0f6e7d431ca4f3631dd5fcb00f22bb9c6cc14c820ebfb0e6e"
+    },
+    {
+      "path": "assets/seed/covers/that-pervert-remake.jpg",
+      "bytes": 12866,
+      "sha256": "07fe8cb9088740d876cfc4cf7623c3ebde5bf6c55682bc4f39061f7097056157"
+    },
+    {
+      "path": "assets/seed/covers/the-adored-marriage.jpg",
+      "bytes": 13174,
+      "sha256": "3f5fb7a8ac690c533b995250d9f749d4ad111c6d9d4dddabf47363a59b61baae"
+    },
+    {
+      "path": "assets/seed/covers/the-assistant.jpg",
+      "bytes": 16320,
+      "sha256": "8ff0afdf1200036b70258bacd8d78a90331262b0ec59b75c40beb4c38ad0b04f"
+    },
+    {
+      "path": "assets/seed/covers/the-beautiful-game.jpg",
+      "bytes": 10502,
+      "sha256": "b36b3a0bf3702e101bdd02fb50d36f611b8fdbe11167a2cdac7f0c02181cd8fe"
+    },
+    {
+      "path": "assets/seed/covers/the-bite-revenant.jpg",
+      "bytes": 3481,
+      "sha256": "cb3f3e629282ec3d06a191cd0d9d0493c8c3dc02be2120c8a53896363df69388"
+    },
+    {
+      "path": "assets/seed/covers/the-bouncing-agency.jpg",
+      "bytes": 14897,
+      "sha256": "031c9d9347bee19aff1d8ca6c2242994d8dc6fb0404ddcf4499d4ce7161dcb45"
+    },
+    {
+      "path": "assets/seed/covers/the-cabin-summer-vacation.jpg",
+      "bytes": 9576,
+      "sha256": "359ef860aea9811a9f42ca4b27d284738269df37a69b5fd74f4872eed1cf6ef6"
+    },
+    {
+      "path": "assets/seed/covers/the-east-block.jpg",
+      "bytes": 20389,
+      "sha256": "3af5431babc30b6aa7f6e2e8dac5d0f90683f85abff6694005a2b21be535ff6a"
+    },
+    {
+      "path": "assets/seed/covers/the-fall-of-galadriel.jpg",
+      "bytes": 15229,
+      "sha256": "df03ab01797f6e0679c5d4a5cd57d3bc7d666f8feb6fb05ce78d2e53db68fc76"
+    },
+    {
+      "path": "assets/seed/covers/the-fiery-scion.jpg",
+      "bytes": 10345,
+      "sha256": "33542e26e6c40440aa52b3cb13a2e15eacb6df7092371b1f1a9cecb46eb7fbe6"
+    },
+    {
+      "path": "assets/seed/covers/the-futa-experiment.jpg",
+      "bytes": 16453,
+      "sha256": "5c0ee6db10397100b6272bd8a60088a1473eb4049f60e880fa33f18a2b4a5313"
+    },
+    {
+      "path": "assets/seed/covers/the-good-instructor-frenzy.jpg",
+      "bytes": 8235,
+      "sha256": "0322e8b49074b95b3862bfc2df6b36734464141d51a092a9d315bca5bfb5444b"
+    },
+    {
+      "path": "assets/seed/covers/the-halo-project.jpg",
+      "bytes": 17694,
+      "sha256": "abe64524f9a2cb7a9716f755beb6399684c82a28eaa0d1bcaeca91effc1c3612"
+    },
+    {
+      "path": "assets/seed/covers/the-inn.jpg",
+      "bytes": 20428,
+      "sha256": "22ad0f27cca72502ebb4e95eedb05ac0299776086af48812d6fdafdf9f400e65"
+    },
+    {
+      "path": "assets/seed/covers/the-intoxicating-flavor.jpg",
+      "bytes": 8683,
+      "sha256": "77ec020ca483219f843d18e21f2518746a0e6700c6f50939f2535d6e261c03ed"
+    },
+    {
+      "path": "assets/seed/covers/the-island-of-milfs.jpg",
+      "bytes": 15248,
+      "sha256": "512ec982e5138650496fcf44cd13a25ee547d2e29d568ba07b328400567da900"
+    },
+    {
+      "path": "assets/seed/covers/the-king-of-summer.jpg",
+      "bytes": 18180,
+      "sha256": "db0bce43159ae7e56dc0c071e35303abb0a9dbd2a0293a211176fd7acee56d6f"
+    },
+    {
+      "path": "assets/seed/covers/the-last-star-walker.jpg",
+      "bytes": 17422,
+      "sha256": "dff384abbefffd8b51f30c759df5baec95bf683415c668fa5390fd6d7775014b"
+    },
+    {
+      "path": "assets/seed/covers/the-long-way.jpg",
+      "bytes": 7815,
+      "sha256": "a55f0794043ed197671a541d259183456596b9bec61d0c7b61f4400e53469e8c"
+    },
+    {
+      "path": "assets/seed/covers/the-lost-love.jpg",
+      "bytes": 9797,
+      "sha256": "f600d28cdab6f306e1f0363ee169f5c7150033f8f80b1447b56486257eabe2c9"
+    },
+    {
+      "path": "assets/seed/covers/the-lust-city.jpg",
+      "bytes": 13349,
+      "sha256": "41b79a0e112c5b511d1ae222fb4df32653b765674e3c8b412e82772f44521a61"
+    },
+    {
+      "path": "assets/seed/covers/the-making-of-a-slut.jpg",
+      "bytes": 15741,
+      "sha256": "d7a0ef2555cc4a64bcbd123b3f59b9c766ba4ca38157d705ad15be98553f0364"
+    },
+    {
+      "path": "assets/seed/covers/the-mind-society.jpg",
+      "bytes": 7260,
+      "sha256": "adee0fd2055768228ec418288897fe66f176823f177ec70500e3c8cfa853edb7"
+    },
+    {
+      "path": "assets/seed/covers/the-missing-part.jpg",
+      "bytes": 5631,
+      "sha256": "f53909bfbb20e7663346a902c688f36cb5c5210308e149c107c6cc7561863701"
+    },
+    {
+      "path": "assets/seed/covers/the-necromancer-arises.jpg",
+      "bytes": 20640,
+      "sha256": "b33251b5d3c5cc0157eb2afdb233f292cf0e71bdc24dac6faa887bc638b2af0f"
+    },
+    {
+      "path": "assets/seed/covers/the-night-driver.jpg",
+      "bytes": 7699,
+      "sha256": "b5b50c6b218bc66e4df09488492df934a6a7ac419fd42d301cff57483261ae38"
+    },
+    {
+      "path": "assets/seed/covers/the-parasites.jpg",
+      "bytes": 13973,
+      "sha256": "43491a94d1da5c6d4b2d1a4569eea7c60d222ae0ece2e3a304fb05b1e1442de8"
+    },
+    {
+      "path": "assets/seed/covers/the-perfect-paradise.jpg",
+      "bytes": 13994,
+      "sha256": "66e09834c05cfc01083f7c4ed1b34302d5911c06f23e5fe4c827cfc532f8fc3f"
+    },
+    {
+      "path": "assets/seed/covers/the-pilgrimage-chapter-2.jpg",
+      "bytes": 7234,
+      "sha256": "a7579e4e8375a076416019017424566a92a06471531a6e1e1f29c996c893da2d"
+    },
+    {
+      "path": "assets/seed/covers/the-pill.jpg",
+      "bytes": 14413,
+      "sha256": "2d6b4a1187b5c9a35e53221a1f3e811e67588071a3f6432e2b4458617620fa13"
+    },
+    {
+      "path": "assets/seed/covers/the-promise.jpg",
+      "bytes": 14762,
+      "sha256": "743fbb2cb315f7e75d4cc9a719009eeddf6ba0dab621bb9cc771e0f55bd9124f"
+    },
+    {
+      "path": "assets/seed/covers/the-simpsons-dating-sim.jpg",
+      "bytes": 18047,
+      "sha256": "5002e3f655a0a7faf6353a9231f0585dd766a990aa7971b4aac8ef2b825f6934"
+    },
+    {
+      "path": "assets/seed/covers/the-sissy-girlfriend-experiment.jpg",
+      "bytes": 10096,
+      "sha256": "00a8a6f06c54ba69cde4076260375167f11fcd4a71b2994f1d2fbd5d746ae72c"
+    },
+    {
+      "path": "assets/seed/covers/the-stallion.jpg",
+      "bytes": 13675,
+      "sha256": "9ef934c85cec3903d795c137ee705996cd293bd7ded455b0aa067b6e1d5d9a42"
+    },
+    {
+      "path": "assets/seed/covers/the-swordbearer.jpg",
+      "bytes": 16004,
+      "sha256": "80ddb0144a027b781017cd97c4e6c2dbfab286cd525fc479fb50229f1b63fa3e"
+    },
+    {
+      "path": "assets/seed/covers/the-three-panels.jpg",
+      "bytes": 16038,
+      "sha256": "880515c9a6a748f57186589f14fcea63e8a6b37e083b8f341bcfa4be04bc5fc0"
+    },
+    {
+      "path": "assets/seed/covers/the-wants-of-summer.jpg",
+      "bytes": 8347,
+      "sha256": "b6c35f0971b0e752a408bdf76f3c1c0b0e5f027f105d14df6696ebbbca5e4719"
+    },
+    {
+      "path": "assets/seed/covers/the-wife-next-door.jpg",
+      "bytes": 18689,
+      "sha256": "7945ab3489f02d56d558c2afcc7ae758b4adc4475505aba1ff51c78cdbaf1f87"
+    },
+    {
+      "path": "assets/seed/covers/the-wild-boy.jpg",
+      "bytes": 9816,
+      "sha256": "77a9a78f6716fb46bdc724b7dcce92dae809b373c2b131d3e39ac163a6f3887a"
+    },
+    {
+      "path": "assets/seed/covers/the-will-of-endreon.jpg",
+      "bytes": 8700,
+      "sha256": "fbc4d52e3ffa28a1545f913b96e25c09b4cd40ee1e24c15540eda762ca8e3e90"
+    },
+    {
+      "path": "assets/seed/covers/thirsty-for-my-guest.jpg",
+      "bytes": 13461,
+      "sha256": "e2f36eddba7cb172251151f296309b07703c720025b13e3e22d16796ebe699e2"
+    },
+    {
+      "path": "assets/seed/covers/three-and-one-the-cursed-mansion.jpg",
+      "bytes": 8805,
+      "sha256": "ee34f2a44f189313d6a44a8b285efe982562d7e1f437c9a19c271e6cb73e5935"
+    },
+    {
+      "path": "assets/seed/covers/time-implosion.jpg",
+      "bytes": 11961,
+      "sha256": "919698165fa33488c9ca4fe8fb845b1b52900a0c33aaa9b471fe68bd6319e835"
+    },
+    {
+      "path": "assets/seed/covers/together-bnb.jpg",
+      "bytes": 7807,
+      "sha256": "4a56b2a498cd4c568759a13dee10f9d6a69e1857a2d511b517596e6f84abbf96"
+    },
+    {
+      "path": "assets/seed/covers/tomb-of-destiny.jpg",
+      "bytes": 13394,
+      "sha256": "2dfe50ecdad16cb1e42a1857f30611c9d2d3e35219f02e8ea251fe6a7b617ef9"
+    },
+    {
+      "path": "assets/seed/covers/total-degeneracy-island.jpg",
+      "bytes": 14235,
+      "sha256": "37c1c0da74a7a0a5f9618baf830b0768b5936bb38ec932601d6e2322796c7714"
+    },
+    {
+      "path": "assets/seed/covers/total-seduction-2.jpg",
+      "bytes": 19208,
+      "sha256": "339907e1b9a3472388204fccfee3ba9e33cb91548c2bb51ff6a6a4ba99060c26"
+    },
+    {
+      "path": "assets/seed/covers/tower-of-dreams.jpg",
+      "bytes": 20781,
+      "sha256": "70dda6d867b16312129e25d862c4fe4135ffd09aa67345c6200951dfb451be6b"
+    },
+    {
+      "path": "assets/seed/covers/toxicity.jpg",
+      "bytes": 12063,
+      "sha256": "428257110907ba94ed571acf908b59c5c15f5070cc84c95a452ffe915e5e9fe1"
+    },
+    {
+      "path": "assets/seed/covers/train-and-tame.jpg",
+      "bytes": 19061,
+      "sha256": "34bbeb773aa499cb057d75afcfc10c299225323e16c98cfe09768bb3e5a797bd"
+    },
+    {
+      "path": "assets/seed/covers/training-slayer.jpg",
+      "bytes": 16691,
+      "sha256": "f9e617d94a6015b41a0ca9050087b1b83797ba6d9eb042d7b4b6c2b710c1c899"
+    },
+    {
+      "path": "assets/seed/covers/trouble-in-paradise.jpg",
+      "bytes": 16049,
+      "sha256": "4d850c1d68a1b75bf7212502edbd6e7744237e27d949b93a8281c6e0cf84081d"
+    },
+    {
+      "path": "assets/seed/covers/troubled-legacy.jpg",
+      "bytes": 9148,
+      "sha256": "ef450b156f3d575c50724f04c6aaf9faf6494e283e2743d9f34775472594a150"
+    },
+    {
+      "path": "assets/seed/covers/true-husband.jpg",
+      "bytes": 14163,
+      "sha256": "e395c9085b3e538d4c7702635ecbce92982567e4e0f53f70f0aa13b99fc0c841"
+    },
+    {
+      "path": "assets/seed/covers/uc8.jpg",
+      "bytes": 8576,
+      "sha256": "108b71a77dac87bdbc0aac5e20ed383b9fe62aa82a7537bb2df1e97b63ee70f4"
+    },
+    {
+      "path": "assets/seed/covers/unaware-in-the-city.jpg",
+      "bytes": 18714,
+      "sha256": "366c3f20ebe146f5e4dd787bce0153640bca25c9a219cb47972a4f9efc93bc9b"
+    },
+    {
+      "path": "assets/seed/covers/under-control.jpg",
+      "bytes": 7594,
+      "sha256": "6a548d4fa91b14dc4c2400600c72160f461d1834f6768220f5a4f5aef3381423"
+    },
+    {
+      "path": "assets/seed/covers/under-the-same-roof.jpg",
+      "bytes": 20669,
+      "sha256": "7d43ed0506fc78d09c0fb3848e92fea153b12a777367060d5c6d7d4e694c32b0"
+    },
+    {
+      "path": "assets/seed/covers/under-the-witch.jpg",
+      "bytes": 8957,
+      "sha256": "92c7fbf6af914b824785787ae3d7473b127d42a7c099f48fd3d584ab3b5e441c"
+    },
+    {
+      "path": "assets/seed/covers/unexpected-consequences.jpg",
+      "bytes": 5553,
+      "sha256": "c84cdeaf4e4be7b73f6d6dd58de7ea164ee172f004655879830f3657c81ff15a"
+    },
+    {
+      "path": "assets/seed/covers/unleashed.jpg",
+      "bytes": 8454,
+      "sha256": "24f72e2e736d8c4189b30be4db9adc484829fbb6fa6e468a2032ce4348c83be4"
+    },
+    {
+      "path": "assets/seed/covers/unreal-lust-theory.jpg",
+      "bytes": 7850,
+      "sha256": "0608554c2a855580b60c70c681c6af524917a93768a86d8442ba90a1f4067a48"
+    },
+    {
+      "path": "assets/seed/covers/unyielding-2.jpg",
+      "bytes": 8953,
+      "sha256": "042a1e001f521c8628287143911db305aa93838eef6ba469749e2572b56649db"
+    },
+    {
+      "path": "assets/seed/covers/vicious-circle-femdom-edition.jpg",
+      "bytes": 8173,
+      "sha256": "fa7e0850d6ac3ae26d0856cdd0f0a9c9e4bf3a29ec65d23d3f26c74bdda99ec7"
+    },
+    {
+      "path": "assets/seed/covers/village-slut-transformation.jpg",
+      "bytes": 13769,
+      "sha256": "3056e6f908b0e09cb369e8e14778657d08c10070701266d0384b8158132709ee"
+    },
+    {
+      "path": "assets/seed/covers/warlock-and-boobs.jpg",
+      "bytes": 17017,
+      "sha256": "5f54cb44da4e217aa9c67ec83f72617e8106dbf72fab0e0ecbd785fbcb5107e1"
+    },
+    {
+      "path": "assets/seed/covers/wasteland-lewdness.jpg",
+      "bytes": 24746,
+      "sha256": "fd0036017b8b26b9d4d4d19dbd4fa985897d4e89436ee32ace8a2c2419bbddfb"
+    },
+    {
+      "path": "assets/seed/covers/wet-nightmares.jpg",
+      "bytes": 9564,
+      "sha256": "a20e01ce84b9194747e8600f910cce75e9751b117f0e9af2049bbda4d19ebaa8"
+    },
+    {
+      "path": "assets/seed/covers/wet-sand.jpg",
+      "bytes": 13027,
+      "sha256": "d2b8b44d456bc6d9bf8e7d6d4084d059e4dc3efc0756ed3511195f208808ed86"
+    },
+    {
+      "path": "assets/seed/covers/wicked-island.jpg",
+      "bytes": 20714,
+      "sha256": "fe7a8358eb42ca5e00687aef789cfdda5f929a65bc939f383431b9971d934ea6"
+    },
+    {
+      "path": "assets/seed/covers/wicked-rouge-refine.jpg",
+      "bytes": 13064,
+      "sha256": "6d8470850c19772fad0b9e91b368bf46e6c588ebe2af69e288e18b888d52ec58"
+    },
+    {
+      "path": "assets/seed/covers/wicked-ways.jpg",
+      "bytes": 8898,
+      "sha256": "f71925e8bcb2a6b1c2844aa748fdc6dd59f3d552a6e465b27fe7ef3e609b01b6"
+    },
+    {
+      "path": "assets/seed/covers/wild-cats.jpg",
+      "bytes": 12958,
+      "sha256": "6bdf1b5bb6936a5d4cd4626dbc76aa6cc32eef8b97fc2642140ccce6cadf5a70"
+    },
+    {
+      "path": "assets/seed/covers/wild-life.jpg",
+      "bytes": 4629,
+      "sha256": "ba1b80a8fe6197e9d8d1a7b8ed9c570850b6d4ea33e57e7283ef36c94cf4986e"
+    },
+    {
+      "path": "assets/seed/covers/wishes.jpg",
+      "bytes": 12971,
+      "sha256": "e4eea37c436b788799fa4ef45c324391817471d77f37b42e384a329a9b504b3e"
+    },
+    {
+      "path": "assets/seed/covers/world-of-sisters.jpg",
+      "bytes": 14387,
+      "sha256": "28b746810a229bd306e52b6e5ade0e2c40ef4086c13e86a433263bb8e0a7ef53"
+    },
+    {
+      "path": "assets/seed/covers/zaras-school-life.jpg",
+      "bytes": 18599,
+      "sha256": "e4dff1ba5329d893238811a455587d25034252d9ff4d67c4786c0f11301e1fff"
+    },
+    {
+      "path": "assets/seed/slgking.db",
+      "bytes": 540672,
+      "sha256": "ae1de6b5a8ab5b07563a7f9c4bab17f06509de958c7c2e6d1db8bbc8decb685a"
+    },
+    {
+      "path": "assets/slgking.ico",
+      "bytes": 24311,
+      "sha256": "c0b9947d00e0671942a019b9c7686fa3f0f320665539cea04835850b29e6cb96"
+    },
+    {
+      "path": "assets/slot/bar.png",
+      "bytes": 4815,
+      "sha256": "208b2fa33e076a6503f5cb401cfe0687a75f8eb91e54bb6096eb06408be2b4f4"
+    },
+    {
+      "path": "assets/slot/bell.png",
+      "bytes": 4330,
+      "sha256": "5570bb874205aafec8e41cfc532e3db39fcc08a6108e01ef911b4bfe14fd4c24"
+    },
+    {
+      "path": "assets/slot/cherry.png",
+      "bytes": 3836,
+      "sha256": "2cc79d08e5ba6674f8bb9163baf8dfd6d76e1e1869ef003cfaef77f6f3c26b48"
+    },
+    {
+      "path": "assets/slot/crown.png",
+      "bytes": 4042,
+      "sha256": "9596e61aa4b96b57dbba8d775710ecb5c18357a85a70ee92a06cac2a1897526b"
+    },
+    {
+      "path": "assets/slot/diamond.png",
+      "bytes": 4527,
+      "sha256": "b70e1ecfe4d9962c648a962abf89a7fc68453d4abfda810c11d20f8ee406efd4"
+    },
+    {
+      "path": "assets/slot/seven.png",
+      "bytes": 2649,
+      "sha256": "179a017831b17cd719038e34cb397cc4349eb6782b6b61d7d5c1f0e1074b6041"
+    },
+    {
+      "path": "assets/slot/star.png",
+      "bytes": 4384,
+      "sha256": "6121332a31dab16e4ea924341f711f9d5f940e650d74e26447dd5ff6cd15018d"
+    },
+    {
+      "path": "assets/tag_zh.json",
+      "bytes": 3913,
+      "sha256": "169899790e823c698cd32bf2f94d6f0d8ab86f363311056021a007535e6a55d7"
+    },
+    {
+      "path": "build_exe.bat",
+      "bytes": 1845,
+      "sha256": "2690edb9f27ae512d2ed4bdc0c4c01c658702f167bb9f4a7623ffed396d2f18c"
+    },
+    {
+      "path": "requirements.txt",
+      "bytes": 404,
+      "sha256": "fe8033bf95b62f5a5254a2ebf4d6b88b7c33458af8ecb76e40a2407277e5cc0c"
+    },
+    {
+      "path": "slg_account.py",
+      "bytes": 52235,
+      "sha256": "864e34976cfee7cc032877fa8317445bbde42a2f74230f6335036a7f36784a4a"
+    },
+    {
+      "path": "slg_account_chip.py",
+      "bytes": 14425,
+      "sha256": "4470a9bce3f74b48dc0fb508e6a332e2cfc7a5c52016f7f2bb12fe97752b592e"
+    },
+    {
+      "path": "slg_action_menu.py",
+      "bytes": 9807,
+      "sha256": "d66de488e72790e9d8d2164591e2ae298f4586631427039bf90973461ed5ad77"
+    },
+    {
+      "path": "slg_add_form_state.py",
+      "bytes": 4244,
+      "sha256": "66e1ce936d3b114aeeb9638cabb469e90746fa510b534acc74052012079bf617"
+    },
+    {
+      "path": "slg_avatar_editor.py",
+      "bytes": 12067,
+      "sha256": "468500f584b1bab6f426339cf6254691e0a2160170840f356c36ef1fbefa1cfc"
+    },
+    {
+      "path": "slg_avatar_ui.py",
+      "bytes": 7066,
+      "sha256": "d3251968d8112bdca707a24ff3ace933bcd1b41e70c6a71272e9a5f094efff79"
+    },
+    {
+      "path": "slg_catalogue_query.py",
+      "bytes": 9235,
+      "sha256": "8ca086ee5b297363361f90c5a5f7fc39a11bbcae3234f6b629a1fc3f853087bf"
+    },
+    {
+      "path": "slg_catalogues.py",
+      "bytes": 563,
+      "sha256": "b17552afce3f78b36db98584c86e175610dec37956c477d46a7117d98577574b"
+    },
+    {
+      "path": "slg_collection_menu.py",
+      "bytes": 3775,
+      "sha256": "b0aca2531858744c68dae751aee0d5d0eafde5683a4fbc799251763602ef69df"
+    },
+    {
+      "path": "slg_collections_ui.py",
+      "bytes": 19638,
+      "sha256": "14919c25a4313346e76c029e34ce513a7c6aa7c27409f86e2f6ddb19e4349287"
+    },
+    {
+      "path": "slg_collections_workspace.py",
+      "bytes": 3154,
+      "sha256": "7325df3834a4ee863cff4c0f56057247d9e95284e1b38475987d109e7d2fca2a"
+    },
+    {
+      "path": "slg_comment_replies.py",
+      "bytes": 3693,
+      "sha256": "23034bfc5c298902d07563a40fa0ef4e38393d56132b607371baa5bb7c712636"
+    },
+    {
+      "path": "slg_comments.py",
+      "bytes": 5898,
+      "sha256": "82fe4d9241ef9407f82bfec7fef9e7f900aeabb8faf8c8c16a24c6eb90c44d82"
+    },
+    {
+      "path": "slg_cover_clipboard.py",
+      "bytes": 2799,
+      "sha256": "ae130dfb330f48313fa0c275d0669cba543a177d347d94d94a7bd5b8a44868f0"
+    },
+    {
+      "path": "slg_crash.py",
+      "bytes": 7060,
+      "sha256": "9e18bc0b64ea2eb47c644c65ace2510187ce35c26a70b1d3961ba325a657c1a8"
+    },
+    {
+      "path": "slg_date_filters.py",
+      "bytes": 2358,
+      "sha256": "22b6c0c607393ab21eefde5ff6b3283f9c88afe6387665e530cb7225fb14db6d"
+    },
+    {
+      "path": "slg_db.py",
+      "bytes": 142380,
+      "sha256": "2befc13602716e1bf29418cc3f4099dfc8e6562d1d36fe389b2b679568e3044c"
+    },
+    {
+      "path": "slg_dlsite_client.py",
+      "bytes": 6090,
+      "sha256": "1da399fe9fdc90b701f6de4b78843cd508b6413306ed265f208726a2ace93551"
+    },
+    {
+      "path": "slg_dlsite_online.py",
+      "bytes": 14225,
+      "sha256": "a4073a34098b9c21d5f5b48f4c2380cb456cf106163cfad4b61002cf61182fc9"
+    },
+    {
+      "path": "slg_engines.py",
+      "bytes": 17875,
+      "sha256": "709fa42ea7eeb5559ec04fea64abf52182b35a7dee71dc8f9eb793f94eae9a53"
+    },
+    {
+      "path": "slg_game_categories.py",
+      "bytes": 1327,
+      "sha256": "03bc108fd2b8b73c440ee0b6ce8b48e6fc134ce4aea770f6fa46631eaa049fb3"
+    },
+    {
+      "path": "slg_game_detection.py",
+      "bytes": 13149,
+      "sha256": "5b4fdb20427f5960f8315e4ea1aff64f76f70f7e05b0416ad513aa443ca0aacc"
+    },
+    {
+      "path": "slg_game_labels.py",
+      "bytes": 3008,
+      "sha256": "5513b8ab94cef4f93a9241d22bb4f9be305bfd0d5f34669cca0f9e7387e975d2"
+    },
+    {
+      "path": "slg_game_picker.py",
+      "bytes": 13280,
+      "sha256": "2fd1a99b6ca3bd5f6a27332d915868d9aea712868e8edc9f3ddd54cf1a07030d"
+    },
+    {
+      "path": "slg_game_picker_query.py",
+      "bytes": 10248,
+      "sha256": "d0124fa60ac76a60e85600d47ec9098377842cc1a2ee4c32a5fc686fa20e9dc1"
+    },
+    {
+      "path": "slg_game_roots.py",
+      "bytes": 4360,
+      "sha256": "443b2a07f7785661d2110acc8b8ca4d9cd68ab6388bb546656e9b97d978247c0"
+    },
+    {
+      "path": "slg_gui.py",
+      "bytes": 800210,
+      "sha256": "5557706fc2835a4d6d70b47d0f1fac12fb1112282970bc42dbdc0f0ba1f53607"
+    },
+    {
+      "path": "slg_header0273.py",
+      "bytes": 8594,
+      "sha256": "01dad1d4d0734fa57ec662c18d98f65e362f5d1dd6233814c54dc8cab2da8b18"
+    },
+    {
+      "path": "slg_help_center.py",
+      "bytes": 11834,
+      "sha256": "0554548662581abba9e9bf496bcec2d3a1d16bde315d8318516c549bf76e1f1f"
+    },
+    {
+      "path": "slg_help_content.py",
+      "bytes": 38925,
+      "sha256": "e55b1d2648dfc43559a77db0a3d026bcd8cff5bca58a0d20dca696a2ce0e8aa9"
+    },
+    {
+      "path": "slg_hidden_games.py",
+      "bytes": 8702,
+      "sha256": "233a9907c61baf9dee914b5277bc50e3a2ca3b3e1740047cd2b377da5abb8317"
+    },
+    {
+      "path": "slg_image_resources.py",
+      "bytes": 12766,
+      "sha256": "97c5a96fcd8c2122ea22083f535dc6b81630d6aad175c7f387379f52f787c24d"
+    },
+    {
+      "path": "slg_keyboard_navigation.py",
+      "bytes": 1558,
+      "sha256": "aad2bf4a0e04996a2956bdbd7965fd41c72594bde510d65934010dadd9880b82"
+    },
+    {
+      "path": "slg_library_cover_candidates.py",
+      "bytes": 4653,
+      "sha256": "a9fc0a21920a8324554e81599f69aa229c8299ee5a212af5a1a9f69059a72e90"
+    },
+    {
+      "path": "slg_library_cover_ui.py",
+      "bytes": 14205,
+      "sha256": "f7582cb36d3807cad511279c9c7a2315ff837667c1f8141a7460276ed947c03a"
+    },
+    {
+      "path": "slg_library_metadata.py",
+      "bytes": 5956,
+      "sha256": "b59a1c32ba1643c3f9862e07d764485fb8f7352ea0f2f796055689814e8451bc"
+    },
+    {
+      "path": "slg_library_providers.py",
+      "bytes": 21418,
+      "sha256": "67f1302f95fe94ed441a26c2e6d74221ba28a407ef2b6953389747bef9911e56"
+    },
+    {
+      "path": "slg_library_query.py",
+      "bytes": 8354,
+      "sha256": "979fe77019eaf180d65b93cf9d78238db1f8da44d20cc4accc29e4449a859402"
+    },
+    {
+      "path": "slg_library_query_ui.py",
+      "bytes": 16762,
+      "sha256": "dabdb0986d23546c0ec3603d6cd03d306078601ee4d90e5ab35d746ccd4b0f14"
+    },
+    {
+      "path": "slg_library_ui.py",
+      "bytes": 51025,
+      "sha256": "9eaca31f86a61ca3158608e8d184d93f0d5eb5a1fabe5c33239580adb26b375e"
+    },
+    {
+      "path": "slg_local_avatar.py",
+      "bytes": 4801,
+      "sha256": "2cd7743619809a8da88b2ba5acbd39be424d7d1e1650036c3513b0c2b83cd55e"
+    },
+    {
+      "path": "slg_local_library.py",
+      "bytes": 11074,
+      "sha256": "7976b038cbac19056080a258ec32a2b6c28331faa3784e3b09ab20306f747777"
+    },
+    {
+      "path": "slg_log_ui.py",
+      "bytes": 5589,
+      "sha256": "91f149e231a1b9987e3ce8eb9bb9861adcbb3797ecdd95eda33278eb23e950ac"
+    },
+    {
+      "path": "slg_main.py",
+      "bytes": 4794,
+      "sha256": "6fe422d88831cd34922914d3699f23927047fb200117aa7bb5f87659eb594e8a"
+    },
+    {
+      "path": "slg_microinteractions.py",
+      "bytes": 5640,
+      "sha256": "d107ab08393aa67b750e3a84eb436903951839632d1a1d48fabefdd4411052aa"
+    },
+    {
+      "path": "slg_motion.py",
+      "bytes": 2937,
+      "sha256": "ef59dcd190fda275613beeff871c05e93b81f92394262daaf87f6cb552d1dd96"
+    },
+    {
+      "path": "slg_navigation_ui.py",
+      "bytes": 12682,
+      "sha256": "cda465e747df7c27a54aadaf1195fafe3178738c8283bb2b1401210c866f59d6"
+    },
+    {
+      "path": "slg_notice_projection.py",
+      "bytes": 2136,
+      "sha256": "ddcb150ef6256a5be8584f2020dea464fdd20f8fce5d677dc01f22701ccb87ed"
+    },
+    {
+      "path": "slg_notification_ui.py",
+      "bytes": 14332,
+      "sha256": "62395141878919e6534def3bd4ce9afadd475aca1056c905bc8ad76c82b05f75"
+    },
+    {
+      "path": "slg_public_cover_cache.py",
+      "bytes": 2144,
+      "sha256": "4c66e28939002e213b17953a275e4de6569c4c57355b5aaffc6d6ee65bf34837"
+    },
+    {
+      "path": "slg_public_profile_ui.py",
+      "bytes": 8748,
+      "sha256": "70175b03e96a457f83ad499031fcc09a155ad67c1c11318e46bb25fe0e3bca70"
+    },
+    {
+      "path": "slg_refresh_coordination.py",
+      "bytes": 5163,
+      "sha256": "3011cd12966e205c96e07fbe9128b49ede5800ac30e084aa7a1cfc7ec8460998"
+    },
+    {
+      "path": "slg_remote.py",
+      "bytes": 2918,
+      "sha256": "0f951e136675146aefcd9712405626fca88c94118d59e2578291b42c7088a440"
+    },
+    {
+      "path": "slg_reply_ui.py",
+      "bytes": 16089,
+      "sha256": "e09b54b1eb484c0c9233cabad5c02b26426b43790903ea2de81548471447d9c6"
+    },
+    {
+      "path": "slg_safe_focus.py",
+      "bytes": 1338,
+      "sha256": "10f433f48874ce697d382b30a82e7561606b7f6285c45ea72fb19ab6ce9c228c"
+    },
+    {
+      "path": "slg_scan.py",
+      "bytes": 41303,
+      "sha256": "0268480eccc5ec37e2abd14244c32da786ec1030aa7bc2381ee5cced8bec400d"
+    },
+    {
+      "path": "slg_scan_evidence.py",
+      "bytes": 13430,
+      "sha256": "d1b77f85c4952eee5a42f23195ffa60062f60abc78f9007c52460fcac8004354"
+    },
+    {
+      "path": "slg_scan_identity.py",
+      "bytes": 2045,
+      "sha256": "eb8f3c3df395d2df932f5db82e4f022ddacbaa104def451a2101e9494224d3f0"
+    },
+    {
+      "path": "slg_scan_review.py",
+      "bytes": 4770,
+      "sha256": "0995231788542a31fe0343868568fbfcff55337e7fe712785871fe1d210eeb9c"
+    },
+    {
+      "path": "slg_scan_target_layout.py",
+      "bytes": 3869,
+      "sha256": "0b1043bf8e44db21397baa9a59b01fdb35814bd094f1e25eb81dba66b2bf8d50"
+    },
+    {
+      "path": "slg_scan_targets.py",
+      "bytes": 4352,
+      "sha256": "494a15b4b5c40816462c8d9259911c7c0ac0e3b2288ca7919378a9c08abf87c2"
+    },
+    {
+      "path": "slg_scrape.py",
+      "bytes": 47686,
+      "sha256": "0105ae16303b30d9d6da4f2ebca14568d876a0fc5388e6a6e34ef6731a9b3910"
+    },
+    {
+      "path": "slg_server_transport.py",
+      "bytes": 4148,
+      "sha256": "97fd5dfba1a66aa1d41fe386e98cc941b63f6473efa00c74b882740955f75732"
+    },
+    {
+      "path": "slg_shop_render.py",
+      "bytes": 5366,
+      "sha256": "ed4a75342e738e47a575413b83d6f0216edede47796e5e8134f482ecb2bf7f1e"
+    },
+    {
+      "path": "slg_sidebar_layout.py",
+      "bytes": 1722,
+      "sha256": "817e97a2dffdbc19d9666c12c707b88ebefa5247cfa1cfc2cdd23a3e2423801b"
+    },
+    {
+      "path": "slg_source_status.py",
+      "bytes": 3468,
+      "sha256": "6616aeb0d8e876a9b1e9a7a95f0fb7e663af80e0e1b3b838de945916b8e41911"
+    },
+    {
+      "path": "slg_startup_lifecycle.py",
+      "bytes": 3306,
+      "sha256": "201cfbc28798ff70abc636efad83ed36fc874569d3c5e5e97021fa88948e9bfb"
+    },
+    {
+      "path": "slg_sync_progress.py",
+      "bytes": 1507,
+      "sha256": "799ec172a055c207e1d83cffabbdb4fb61d353a343a8e28493a790a126e4531a"
+    },
+    {
+      "path": "slg_sync_progress_ui.py",
+      "bytes": 2210,
+      "sha256": "9cff37d4274ffb688382369592b5f5996586275a0ea0324e1e52f3c5c31ae076"
+    },
+    {
+      "path": "slg_sync_server.py",
+      "bytes": 51073,
+      "sha256": "5a02707650384699c35fbb803ddaf0fc1eca5798d91497475d571d7370fc26eb"
+    },
+    {
+      "path": "slg_tag_selector.py",
+      "bytes": 4260,
+      "sha256": "0f1442474a3029e7129e7f85ccf5a780d98280958a938ab441477aa60b21b158"
+    },
+    {
+      "path": "slg_text_input.py",
+      "bytes": 2338,
+      "sha256": "dbc56147acb29023185a2de600b05dcf06c6c3a78d11392b134bed3241acfc34"
+    },
+    {
+      "path": "slg_theme0273.py",
+      "bytes": 904,
+      "sha256": "6d6e1c789813774c707a851dd3b7c12978312485c4d3aa5e8d9e67a24ceb32ad"
+    },
+    {
+      "path": "slg_titles.py",
+      "bytes": 37902,
+      "sha256": "bbef754be0518107620a022b69fca27676355914c81ef448c985612530d73135"
+    },
+    {
+      "path": "slg_translate.py",
+      "bytes": 17629,
+      "sha256": "dd9d307b2495df1d3d8c7417ce6bc22b73bbbc887a46fd044d28ea701f89aa32"
+    },
+    {
+      "path": "slg_update.py",
+      "bytes": 5461,
+      "sha256": "665bc501cee22029bcdac4c90023b1448345a919ce4f973ab3fd9a69271a115e"
+    },
+    {
+      "path": "slg_util.py",
+      "bytes": 1630,
+      "sha256": "1444216b11a31d09f7d3fa47e4c16e60d8878d541974d42cdb5dd320d10d1f37"
+    },
+    {
+      "path": "slg_workspace_ui.py",
+      "bytes": 18246,
+      "sha256": "6663076ecb40b95ff0bebc8cd8b22fb91b6648c58c7e7e2b025e5316f4aea9b1"
+    },
+    {
+      "path": "slgking.spec",
+      "bytes": 1989,
+      "sha256": "c91db204a7cdcd563e8e76ece52b68bab5b930308a17df5f51debb27520b919a"
+    },
+    {
+      "path": "tests/test_add_form_hotfix.py",
+      "bytes": 7958,
+      "sha256": "d12fa067563993b7c4b56be0bdf3df47db3d5d6ea9b79337c82c85ac713cb638"
+    },
+    {
+      "path": "tests/test_catalogue_query0271.py",
+      "bytes": 5802,
+      "sha256": "350dab54ca148fbeda40e13e956b47a58432f16ca3a30a8a469ae8fb9d0d3517"
+    },
+    {
+      "path": "tests/test_collections_workspace0271.py",
+      "bytes": 4508,
+      "sha256": "30794ab3638ebe0a98d3004896ae3fa1bf3f8fdf4002735ef9758ac5cd268268"
+    },
+    {
+      "path": "tests/test_cover_clipboard_hotfix.py",
+      "bytes": 5188,
+      "sha256": "681d1dacfba24f2df4aaf38da626c61563e7f4ac426b338633a4435bcfcec082"
+    },
+    {
+      "path": "tests/test_date_filters0271.py",
+      "bytes": 1821,
+      "sha256": "3b9ec813f37bf707f25569791bd4a06b491a148dea193f93ea46f5aa38855ea4"
+    },
+    {
+      "path": "tests/test_dlsite_online.py",
+      "bytes": 10122,
+      "sha256": "96d20ed8353934db6f94b4cd3fd17312d1d68aa74646d1f062366aeeeee1334d"
+    },
+    {
+      "path": "tests/test_engines.py",
+      "bytes": 20742,
+      "sha256": "8ed309d956bc1e3d07a4e89221cf616a6a3e2596636675e2d011bb927e21ca3a"
+    },
+    {
+      "path": "tests/test_feedback_matching.py",
+      "bytes": 8185,
+      "sha256": "95328ca633c17e4aed814529c67f1166bd70b36bcde3d230e4a4b88d911d6044"
+    },
+    {
+      "path": "tests/test_game_categories.py",
+      "bytes": 9489,
+      "sha256": "77cc944f4cb7ee205868bb555e938d4efebf49e6ca5c0e295d9cf8f1b3efbf12"
+    },
+    {
+      "path": "tests/test_hidden_games.py",
+      "bytes": 13119,
+      "sha256": "71f6e9f4aa2f2a7abd31ccf5dbaeb6306ab27f920d639b24b89350bf15727a4f"
+    },
+    {
+      "path": "tests/test_local_avatar0275.py",
+      "bytes": 7963,
+      "sha256": "b9fbe4f92ac4156c564a050d2e5f6f037dbb44bdfb152c710170600496a8df20"
+    },
+    {
+      "path": "tests/test_matching.py",
+      "bytes": 5686,
+      "sha256": "f95bb08c5758414cfeb06906cdebe47c0aeeec770daa25fabb952a8a568b3212"
+    },
+    {
+      "path": "tests/test_notice_projection0280.py",
+      "bytes": 3520,
+      "sha256": "6fd0fa93148ff66f25b12f07c0288f40cc25d6a3fb07f16138f9c25aa7fcccd3"
+    },
+    {
+      "path": "tests/test_parse.py",
+      "bytes": 12665,
+      "sha256": "12f6ebf3a285a9e45a97e0fc7e661378b102be17e6cb7122a168ced8f8d202df"
+    },
+    {
+      "path": "tests/test_picker0280_query.py",
+      "bytes": 8417,
+      "sha256": "ff9631ac94d2f8d13b3cb3bc194f23d7f2b22ccd8ae22437103c1e1e1ec4de91"
+    },
+    {
+      "path": "tests/test_public_profile0277.py",
+      "bytes": 5856,
+      "sha256": "61882fc895712f33d23a69ed7614a3841b1cf5414743e08fecc3907fabcb60e7"
+    },
+    {
+      "path": "tests/test_sync_progress0277.py",
+      "bytes": 12842,
+      "sha256": "051347aec076606cfbcde1793753498b2eaca2fc7ea9653a11b09a3e40328994"
+    },
+    {
+      "path": "tests/test_wishlist_updates.py",
+      "bytes": 3232,
+      "sha256": "0e78c7b75cef637c3e8b1e5d94a63fba84fb5d71c6084d1f22b8d95ebc6991c9"
+    }
+  ]
+}
