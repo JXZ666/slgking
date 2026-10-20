@@ -1,0 +1,12 @@
+.public-profile { min-width:0; max-width:720px; margin:0 auto; padding-bottom:24px; }
+.public-profile-back { display:inline-flex; align-items:center; min-height:44px; margin-bottom:8px; }
+.public-profile-heading { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px 16px; }
+.public-profile-heading h2 { margin:0; font-size:18px; }
+.public-profile button { min-height:44px; max-width:100%; border-radius:6px; overflow-wrap:anywhere; }
+.public-profile-status { min-height:24px; overflow-wrap:anywhere; }
+.public-profile-card { min-width:0; max-width:100%; padding:16px; border:1px solid var(--line,#493a48); background:var(--surface,#19111b); }
+.public-profile-card p { margin:12px 0 0; overflow-wrap:anywhere; }
+.public-profile-card .author-identity { align-items:flex-start; }
+.public-profile-card .author-nameplate { align-items:flex-start; }
+.public-profile-card .author-message { margin-top:4px; font-size:14px; }
+.public-profile a:focus-visible,.public-profile button:focus-visible { outline:3px solid var(--gold,#e7c47c); outline-offset:3px; }

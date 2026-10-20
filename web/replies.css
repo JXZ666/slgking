@@ -1,0 +1,34 @@
+.reply-discussion { margin-top: .8rem; border-top: 1px solid var(--line); }
+.reply-discussion > summary, .reply-mine > summary { min-height: 44px; padding: .7rem 0; cursor: pointer; overflow-wrap: anywhere; }
+.reply-thread { min-width: 0; }
+.reply-heading { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.reply-heading h4 { margin: .5rem 0; font-size: 1rem; }
+.reply-status { margin: .5rem 0; overflow-wrap: anywhere; }
+.reply-status:empty { display: none; }
+.reply-list { min-width: 0; }
+.reply-item { padding: .8rem 0; border-bottom: 1px solid var(--line); min-width: 0; }
+.reply-item.author-card { border-radius: 8px; padding: .8rem; }
+.reply-meta { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem .8rem; min-width: 0; }
+.reply-meta .author-nameplate { min-width: 0; max-width: 100%; }
+.reply-content, .discussion-root-content { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; margin: .6rem 0; }
+.reply-target { margin: .4rem 0; overflow-wrap: anywhere; }
+.reply-state { font-size: .8rem; color: var(--muted); }
+.reply-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.reply-actions button, .reply-refresh, .reply-pager button, .reply-composer button { min-height: 44px; border-radius: 8px; }
+.reply-pager { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: .5rem; margin: .8rem 0; }
+.reply-pager button { min-width: 0; white-space: normal; }
+.reply-mine { margin: .6rem 0; }
+.reply-composer { margin: 1rem 0 0; min-width: 0; }
+.reply-composer-target { margin: .4rem 0; overflow-wrap: anywhere; }
+.reply-composer label { display: block; margin-bottom: .4rem; }
+.reply-input { display: block; width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; resize: vertical; min-height: 96px; font: inherit; line-height: 1.6; color: var(--text); background: var(--surface); padding: .7rem; border: 1px solid var(--line); border-radius: 8px; }
+.reply-input:focus-visible, .reply-discussion summary:focus-visible, .reply-mine summary:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.reply-composer-footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: .5rem; margin-top: .5rem; }
+.reply-composer-footer > span { margin-right: auto; }
+.reply-composer-footer > [hidden] { display: none; }
+.reply-focused { outline: 2px solid var(--gold); outline-offset: 2px; }
+.reply-item, .reply-composer, .reply-discussion summary, .reply-mine summary { scroll-margin-top: 90px; scroll-margin-bottom: 100px; }
+.discussion-page { min-width: 0; padding-bottom: 1rem; }
+.discussion-page h2 { font-size: 1.3rem; }
+.discussion-root { margin: 1rem 0; padding: .8rem 0; border-bottom: 1px solid var(--line); min-width: 0; }
+.discussion-game { display: inline-flex; align-items: center; min-height: 44px; }

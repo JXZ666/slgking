@@ -1,0 +1,9 @@
+.announcement-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}.announcement-heading h2{margin:0}
+.announcement-status{min-height:24px;overflow-wrap:anywhere}.announcement-item{padding:18px 0;border-bottom:1px solid var(--line)}
+.announcement-item h3{font-size:17px;overflow-wrap:anywhere}.announcement-label{font-size:12px;margin:0 0 6px}
+.announcement-body{white-space:pre-wrap;overflow-wrap:anywhere;margin:12px 0;font-size:15px}
+.announcement-reward{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding-top:8px}.announcement-reward p{flex-basis:100%;margin:0;overflow-wrap:anywhere}
+.announcement-reward a{min-height:44px;display:flex;align-items:center}.announcement-reward button{border-radius:8px}
+.announcement-pages{display:flex;justify-content:center;align-items:center;gap:12px;margin:20px 0}.announcement-pages span{white-space:nowrap}
+.announcement-summary{display:flex;align-items:center;gap:10px;padding:12px 0;min-height:44px;border-bottom:1px solid var(--line);color:var(--text)}
+.announcement-summary strong{flex:1;min-width:0;overflow-wrap:anywhere}.announcement-summary>span{flex-shrink:0}

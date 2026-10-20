@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>论坛审核管理</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, "Microsoft YaHei", sans-serif; background: #100c13; color: #f3eaf2; }
+    * { box-sizing: border-box; }
+    body { max-width: 1100px; margin: 0 auto; padding: 1rem; }
+    a { color: #efb08d; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; margin: .5rem 0 1rem; }
+    h1 { margin: 0; font-size: 1.5rem; }
+    .muted { color: #b7aab8; }
+    .toolbar, .actions, .pager { display: flex; align-items: center; gap: .55rem; flex-wrap: wrap; }
+    .toolbar { margin: 1rem 0; }
+    .queue { display: grid; gap: .8rem; }
+    .card { padding: 1rem; border: 1px solid #443547; border-radius: .85rem; background: #1b1420; }
+    .card h2 { margin: 0 0 .6rem; font-size: 1.1rem; overflow-wrap: anywhere; }
+    .meta { display: flex; flex-wrap: wrap; gap: .45rem .8rem; color: #b7aab8; font-size: .84rem; overflow-wrap: anywhere; }
+    .history summary { min-height: 44px; padding: .6rem 0; cursor: pointer; }
+    .history p { overflow-wrap: anywhere; }
+    button:focus-visible, summary:focus-visible, select:focus-visible { outline: 3px solid #ecc092; outline-offset: 2px; }
+    .body { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; margin: .8rem 0; }
+    button, select, input { min-height: 44px; padding: .5rem .75rem; border: 1px solid #66546a; border-radius: .55rem; background: #2a1c30; color: #fff; font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { opacity: .55; cursor: wait; }
+    .approve { border-color: #4c8767; background: #244b39; }
+    .reject, .hide { border-color: #9b5750; background: #5b2d32; }
+    .resolve { border-color: #9a7547; background: #59452b; }
+    .status { min-height: 1.6rem; margin: .5rem 0; color: #cbbdcb; }
+    .error { color: #ffb4aa; }
+    .good { color: #a9e8bd; }
+    .pager { justify-content: center; margin: 1rem 0; }
+    .empty { padding: 1.5rem; border: 1px dashed #55465a; border-radius: .7rem; color: #b7aab8; text-align: center; }
+    .item-type { color: #ecc092; font-size: .82rem; }
+    @media (max-width: 600px) { body { padding: .7rem; } .card { padding: .8rem; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <p class="muted">网页专属论坛</p>
+      <h1>论坛内容审核</h1>
+    </div>
+    <nav><a href="/admin">返回管理后台</a> · <a href="/m/#/forum">打开网页论坛</a></nav>
+  </header>
+  <div id="status" class="status" role="status" aria-live="polite"></div>
+  <div class="toolbar">
+    <label for="queue-type">内容类型</label>
+    <select id="queue-type">
+      <option value="all">帖子与回复</option>
+      <option value="thread">帖子</option>
+      <option value="reply">回复</option>
+    </select>
+    <label for="queue-status">状态</label>
+    <select id="queue-status">
+      <option value="pending">待审核</option>
+      <option value="approved">已公开</option>
+      <option value="rejected">未通过</option>
+      <option value="hidden">已隐藏</option>
+      <option value="deleted">已删除</option>
+    </select>
+    <button id="refresh-queue" type="button">刷新内容</button>
+    <button id="refresh-reports" type="button">刷新举报</button>
+  </div>
+  <section>
+    <h2>论坛内容</h2>
+    <div id="queue" class="queue"></div>
+    <div id="queue-pager" class="pager"></div>
+  </section>
+  <section>
+    <h2>待处理举报</h2>
+    <div id="reports" class="queue"></div>
+    <div id="reports-pager" class="pager"></div>
+  </section>
+  <script>
+    (() => {
+      const status = document.getElementById("status");
+      const queue = document.getElementById("queue");
+      const reports = document.getElementById("reports");
+      const typeSelect = document.getElementById("queue-type");
+      const statusSelect = document.getElementById("queue-status");
+      const stateNames = { pending: "待审核", approved: "已公开", rejected: "未通过", hidden: "已隐藏", deleted: "已删除" };
+      const pageSize = 30;
+      let queuePage = 1;
+      let reportPage = 1;
+      let queueRequest = 0;
+      const text = (value, fallback) => value === undefined || value === null || value === "" ? (fallback || "") : String(value);
+      const node = (tag, className, value) => {
+        const element = document.createElement(tag);
+        if (className) element.className = className;
+        if (value !== undefined) element.textContent = value;
+        return element;
+      };
+      const setStatus = (message, kind) => {
+        status.textContent = message;
+        status.className = "status" + (kind ? " " + kind : "");
+      };
+      async function request(path, body) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), body ? 30000 : 20000);
+        let response;
+        let data = null;
+        try {
+          response = await fetch(path, {
+          method: body ? "POST" : "GET",
+          credentials: "same-origin",
+          headers: body ? { "Content-Type": "application/json" } : undefined,
+          body: body ? JSON.stringify(body) : undefined,
+          signal: controller.signal,
+        });
+        try { data = await response.json(); } catch (error) {
+          if (controller.signal.aborted) throw error;
+          data = null;
+        }
+        } catch {
+          throw new Error(body ? "操作结果暂时无法确认，请先刷新内容或历史，避免重复操作。" : "读取超时或网络不可用，请重试。");
+        } finally { clearTimeout(timer); }
+        if (response.status === 401) {
+          setStatus("管理员会话未建立或已过期。请先在管理后台登录，再返回本页。", "error");
+          throw new Error("unauthorized");
+        }
+        if (body && !data) throw new Error("操作结果暂时无法确认，请先刷新内容或历史，避免重复操作。");
+        if (!response.ok || !data || data.ok === false) throw new Error(text(data && data.error, "请求失败（HTTP " + response.status + "）"));
+        return data;
+      }
+      const date = (value) => {
+        if (!value) return "时间未知";
+        const number = Number(value);
+        const result = Number.isFinite(number) && number > 0 ? new Date(number < 1e12 ? number * 1000 : number) : new Date(value);
+        return Number.isNaN(result.getTime()) ? String(value) : result.toLocaleString();
+      };
+      async function decide(path, decision, reason) {
+        await request(path, { decision, ...(reason ? { reason } : {}) });
+      }
+      function actionButton(label, cls, action) {
+        const button = node("button", cls, label);
+        button.type = "button";
+        button.addEventListener("click", action);
+        return button;
+      }
+      async function withAction(button, operation, successText) {
+        button.disabled = true;
+        try {
+          await operation();
+          setStatus(successText, "good");
+          await Promise.all([loadQueue(queuePage), loadReports(reportPage)]);
+        } catch (error) {
+          if (error.message !== "unauthorized") setStatus(error.message || "操作失败，请重试。", "error");
+          button.disabled = false;
+        }
+      }
+      function contentCard(item, kind) {
+        const card = node("article", "card");
+        card.append(node("div", "item-type", kind === "thread" ? "帖子" : "回复"));
+        card.append(node("h2", "", text(item.title, kind === "reply" ? "讨论回复" : "无标题帖子")));
+        const meta = node("div", "meta");
+        meta.append(node("span", "", "作者：" + text(item.author_name || item.nickname || item.account_id, "未知")));
+        meta.append(node("span", "", "提交：" + date(item.created)));
+        meta.append(node("span", "", "状态：" + (stateNames[item.status || statusSelect.value] || "未知")));
+        if (item.game_slug) meta.append(node("span", "", "游戏：" + text(item.game_slug)));
+        card.append(meta);
+        card.append(node("p", "body", text(item.content)));
+        if (kind === "reply" && item.thread_title) card.append(node("p", "muted", "所属讨论：" + text(item.thread_title)));
+        const actions = node("div", "actions");
+        const id = encodeURIComponent(item.id);
+        const base = "/admin/forum/" + kind + "/" + id + "/decision";
+        const itemStatus = item.status || statusSelect.value;
+        if (itemStatus !== "deleted" && itemStatus !== "approved") actions.append(actionButton(itemStatus === "pending" ? "批准公开" : "重新批准", "approve", function () {
+          withAction(this, () => decide(base, "approve"), "已批准，内容已公开。");
+        }));
+        if (itemStatus === "pending") actions.append(actionButton("驳回", "reject", function () {
+          const reason = window.prompt("请填写驳回原因：");
+          if (reason === null) return;
+          if (!reason.trim()) { setStatus("驳回时需要填写原因。", "error"); return; }
+          withAction(this, () => decide(base, "reject", reason), "已驳回。");
+        }));
+        if (itemStatus === "approved") actions.append(actionButton("隐藏", "hide", function () {
+          const reason = window.prompt("请填写隐藏原因：");
+          if (reason === null) return;
+          if (!reason.trim()) { setStatus("隐藏内容时需要填写原因。", "error"); return; }
+          withAction(this, () => decide(base, "hide", reason), "内容已隐藏。");
+        }));
+        card.append(actions, historyControl(kind, item.id));
+        return card;
+      }
+      function historyControl(kind, id) {
+        const details = node("details", "history");
+        details.append(node("summary", "", "审核历史"));
+        const entries = node("div", "");
+        details.append(entries);
+        let loaded = false;
+        async function load(page = 1) {
+          entries.replaceChildren(node("p", "muted", "正在读取历史…"));
+          try {
+            const query = new URLSearchParams({ type: kind, target_id: String(id), page: String(page), limit: String(pageSize) });
+            const data = await request("/admin/forum/decisions?" + query);
+            const items = Array.isArray(data.items) ? data.items : [];
+            entries.replaceChildren();
+            for (const item of items) {
+              const action = { approve: "批准", reject: "拒绝", hide: "隐藏", report_actioned: "处理举报", report_dismissed: "驳回举报" }[item.action] || text(item.action);
+              const actor = item.source === "automatic" || String(item.actor_id || "").startsWith("auto") ? "自动规则" : "管理员";
+              entries.append(node("p", "muted", date(item.created) + " · " + actor + " · " + action + (item.reason ? " · " + text(item.reason) : "") + (item.rule_version ? " · " + text(item.rule_version) : "")));
+            }
+            if (!items.length) entries.append(node("p", "muted", "暂无历史记录。"));
+            const size = Number(data.page_size) || pageSize;
+            const last = Math.max(1, Math.ceil((Number(data.total) || 0) / size));
+            if (last > 1) {
+              const controls = node("div", "pager");
+              const prev = actionButton("上一页历史", "", () => load(page - 1));
+              const next = actionButton("下一页历史", "", () => load(page + 1));
+              prev.disabled = page <= 1;
+              next.disabled = page >= last;
+              controls.append(prev, node("span", "muted", page + " / " + last), next);
+              entries.append(controls);
+            }
+            loaded = true;
+          } catch (error) {
+            entries.replaceChildren(node("p", "error", error.message === "unauthorized" ? "请先登录管理后台。" : "历史暂时无法读取。"), actionButton("重试历史", "", () => load(page)));
+          }
+        }
+        details.addEventListener("toggle", () => { if (details.open && !loaded) void load(); });
+        return details;
+      }
+      async function loadQueue(page) {
+        const currentRequest = ++queueRequest;
+        queuePage = page;
+        queue.replaceChildren(node("p", "muted", "正在载入待审内容…"));
+        document.getElementById("queue-pager").replaceChildren();
+        try {
+          const query = new URLSearchParams({ type: typeSelect.value, status: statusSelect.value, page: String(page), limit: String(pageSize) });
+          const data = await request("/admin/forum/queue?" + query.toString());
+          if (currentRequest !== queueRequest) return;
+          const items = Array.isArray(data.items) ? data.items : [];
+          queue.replaceChildren();
+          if (!items.length) queue.append(node("div", "empty", "当前没有此状态的内容。"));
+          else for (const item of items) {
+            const itemType = item.target_type || item.type || item.kind;
+            queue.append(contentCard(item, itemType === "reply" ? "reply" : typeSelect.value === "reply" ? "reply" : "thread"));
+          }
+          pager("queue-pager", data, page, loadQueue);
+          setStatus("审核队列已载入。", "good");
+        } catch (error) {
+          if (currentRequest !== queueRequest) return;
+          queue.replaceChildren();
+          if (error.message !== "unauthorized") setStatus(error.message || "审核队列载入失败。", "error");
+        }
+      }
+      function reportCard(item) {
+        const card = node("article", "card");
+        const targetType = item.target_type === "reply" ? "回复" : "帖子";
+        card.append(node("div", "item-type", "举报 · " + targetType));
+        card.append(node("h2", "", text(item.content_title || item.target_title || item.thread_title || (targetType + " #" + text(item.target_id, "?")))));
+        const meta = node("div", "meta");
+        meta.append(node("span", "", "举报人：" + text(item.reporter_name || item.reporter_id || item.account_id, "未知")));
+        meta.append(node("span", "", "原因：" + reportReason(item.reason)));
+        meta.append(node("span", "", "提交：" + date(item.created)));
+        card.append(meta);
+        if (item.details) card.append(node("p", "body", text(item.details)));
+        const reportedContent = item.content_body || item.target_content;
+        if (reportedContent) card.append(node("p", "body", "被举报内容：" + text(reportedContent)));
+        const actions = node("div", "actions");
+        const path = "/admin/forum/reports/" + encodeURIComponent(item.id) + "/decision";
+        if (item.content_status === "approved" && ["thread", "reply"].includes(item.target_type) && item.target_id) {
+          const targetPath = "/admin/forum/" + item.target_type + "/" + encodeURIComponent(item.target_id) + "/decision";
+          actions.append(actionButton("隐藏被举报内容", "hide", function () {
+            const reason = window.prompt("请填写隐藏原因：");
+            if (reason === null) return;
+            if (!reason.trim()) { setStatus("隐藏内容时需要填写原因。", "error"); return; }
+            withAction(this, () => decide(targetPath, "hide", reason), "被举报内容已隐藏，举报仍待处理。");
+          }));
+        }
+        card.append(node("p", "muted", "标记处理或驳回举报只会关闭这条举报，不会修改被举报内容。"));
+        actions.append(actionButton("标记举报已处理", "resolve", function () {
+          withAction(this, () => decide(path, "actioned"), "举报已关闭，未修改被举报内容。");
+        }));
+        actions.append(actionButton("驳回举报", "", function () {
+          const reason = window.prompt("可填写处理说明（选填）：") || "";
+          withAction(this, () => decide(path, "dismissed", reason), "举报已驳回。");
+        }));
+        card.append(actions);
+        return card;
+      }
+      async function loadReports(page) {
+        reportPage = page;
+        reports.replaceChildren(node("p", "muted", "正在载入举报…"));
+        document.getElementById("reports-pager").replaceChildren();
+        try {
+          const query = new URLSearchParams({ status: "pending", page: String(page), limit: String(pageSize) });
+          const data = await request("/admin/forum/reports?" + query.toString());
+          const items = Array.isArray(data.items) ? data.items : [];
+          reports.replaceChildren();
+          if (!items.length) reports.append(node("div", "empty", "当前没有待处理举报。"));
+          else for (const item of items) reports.append(reportCard(item));
+          pager("reports-pager", data, page, loadReports);
+        } catch (error) {
+          reports.replaceChildren();
+          if (error.message !== "unauthorized") setStatus(error.message || "举报列表载入失败。", "error");
+        }
+      }
+      function pager(id, data, page, reload) {
+        const host = document.getElementById(id);
+        const total = Number(data.total);
+        const size = Number(data.page_size || data.limit) || pageSize;
+        if (!Number.isFinite(total) || total <= size) return;
+        const last = Math.max(1, Math.ceil(total / size));
+        const prev = node("button", "", "上一页");
+        prev.type = "button";
+        prev.disabled = page <= 1;
+        prev.addEventListener("click", () => reload(page - 1));
+        const next = node("button", "", "下一页");
+        next.type = "button";
+        next.disabled = page >= last;
+        next.addEventListener("click", () => reload(page + 1));
+        host.append(prev, node("span", "muted", page + " / " + last), next);
+      }
+      function reportReason(reason) {
+        return ({ spam: "垃圾内容", abuse: "骚扰或辱骂", illegal: "违法或不适内容", other: "其他" })[reason] || text(reason, "未说明");
+      }
+      document.getElementById("refresh-queue").addEventListener("click", () => loadQueue(1));
+      document.getElementById("refresh-reports").addEventListener("click", () => loadReports(1));
+      typeSelect.addEventListener("change", () => loadQueue(1));
+      statusSelect.addEventListener("change", () => loadQueue(1));
+      const params = new URLSearchParams(location.search);
+      if (params.get("session") === "required") setStatus("请先在管理后台建立管理员会话，再返回审核页面。", "error");
+      Promise.all([loadQueue(1), loadReports(1)]);
+    })();
+  </script>
+</body>
+</html>

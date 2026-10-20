@@ -1,0 +1,414 @@
+{
+  "product": "黄油之王",
+  "platform": "web",
+  "version": "0.28.0",
+  "published_date": "2026-10-20",
+  "public_url": "https://slg-king.com/m/#/",
+  "production_source_manifest_sha256": "411ed99238194364933fae19b5915075597c20725ffc50ccab770aeb4de7e415",
+  "production_source_files": 67,
+  "production_source_byte_preserved": true,
+  "files": {
+    "LICENSE": {
+      "sha256": "e57f1c320b8cf8798a7d2ff83a6f9e06a33a03585f6e065fea97f1d86db84052",
+      "bytes": 35150,
+      "origin": "repository GPL-3.0 license text"
+    },
+    "account_apply.html": {
+      "sha256": "61016cd406e5d29addfe3a12ad3453e228f8d3bbf2ec1debc97287cf69236d62",
+      "bytes": 12203,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "admin-manifest.json": {
+      "sha256": "7afb2518d164fb6245b09c20317359a98bc441790cdee474e9d8f07601b8f67b",
+      "bytes": 588,
+      "origin": "2026-10-19 production administrator static source readback"
+    },
+    "admin-sw.js": {
+      "sha256": "10d75ef4fc0e3dfe556807a4d77a8c438026b8dcad19068d585e42b77613a04f",
+      "bytes": 2890,
+      "origin": "2026-10-19 production administrator static source readback"
+    },
+    "admin_page.html": {
+      "sha256": "275632ee5a915468a26f32e24abb67b86faf67eab2b1b4ef8e1d98275c8b2887",
+      "bytes": 243056,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "assets/admin/admin-icon-192.svg": {
+      "sha256": "8fa9ebee503dff5fa0aeddb3acaa4d2bf59473bf6d054a7b9f9f38f7163d2962",
+      "bytes": 456,
+      "origin": "2026-10-13 public production SVG export; previously included in public web source"
+    },
+    "assets/admin/admin-icon-512.svg": {
+      "sha256": "01bdfa58dc773959d19ceb32dd077c4ccb84c93ea7bde9a9e3f875cc427aa0eb",
+      "bytes": 465,
+      "origin": "2026-10-13 public production SVG export; previously included in public web source"
+    },
+    "assets/tag_zh.json": {
+      "sha256": "169899790e823c698cd32bf2f94d6f0d8ab86f363311056021a007535e6a55d7",
+      "bytes": 3913,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "cloud_backup.py": {
+      "sha256": "4bbceb9b7a61dfb1cee1cceb193c261856839a0bac055ce959b5d65a703274b6",
+      "bytes": 4331,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "forum_admin.html": {
+      "sha256": "074d5abf9b9c745018d07a9990f131e23e24566ae5ea24fe3a82fb28e8e026d0",
+      "bytes": 18660,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "requirements-server.txt": {
+      "sha256": "bb5669b6a210f0b3554e7118c183f640ea20c7ae5cc2df8f9a67fc04624fcc8d",
+      "bytes": 173,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "robots.txt": {
+      "sha256": "657e81d099385ce8efbb98b176e7a18ba907db4f5596c467bb8b45dc366915ca",
+      "bytes": 286,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "serve_catalog.py": {
+      "sha256": "594e312af50980f84f92864bace4ca6dba4270c4a16cc9b8f80290ddaa35bda1",
+      "bytes": 306568,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "site-assets/comments.webp": {
+      "sha256": "9c613aee9e16339a04085d18337c52e4ffcdaf196a6ccb6f55d457ecfae55967",
+      "bytes": 192662,
+      "origin": "2026-10-19 verified production homepage assets; unchanged by web 0.28 publication"
+    },
+    "site-assets/home.css": {
+      "sha256": "e7734aa7829a8bb62576bbdec72e5feea41a4d29c52bff47bbe6d48c0cf97888",
+      "bytes": 15290,
+      "origin": "2026-10-19 verified production homepage assets; unchanged by web 0.28 publication"
+    },
+    "site-assets/home.js": {
+      "sha256": "ca7d57e23d863bfb0d02ffbd2b88462b67f114aac75b5a5fc59893bfd8b3bb83",
+      "bytes": 2475,
+      "origin": "2026-10-19 verified production homepage assets; unchanged by web 0.28 publication"
+    },
+    "site-assets/library.webp": {
+      "sha256": "10085d84dae956390ea99adb0398bf2905e75c6c553d7e15d89808ccb56de08f",
+      "bytes": 93478,
+      "origin": "2026-10-19 verified production homepage assets; unchanged by web 0.28 publication"
+    },
+    "site-assets/overview.webp": {
+      "sha256": "1d70007519ccea90d24fd345494173ca721bb2bbb9941f671e55de7d2d49cd93",
+      "bytes": 113806,
+      "origin": "2026-10-19 verified production homepage assets; unchanged by web 0.28 publication"
+    },
+    "site_home.html": {
+      "sha256": "2cd9a66b43dcd564bad6d2f3899a576e90520eecd1c6094fa754d9cd58ea7a69",
+      "bytes": 20951,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_admin_metrics.py": {
+      "sha256": "7f9dd6804071b0bc2a7031683113d0e7a761a3f06a050af3993b59c73d7e29c7",
+      "bytes": 6690,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_catalogue_publish.py": {
+      "sha256": "c4c90c3cd0989271a3cae93d52fc13991ec62acb9ea260a286db6f49f66becad",
+      "bytes": 9202,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_cloud_store.py": {
+      "sha256": "1cab6a622f124a2086e59bb3fdea0823e700fe6b6dc01a737fb49a422c1bccfa",
+      "bytes": 246753,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_collection_jobs.py": {
+      "sha256": "440081da1b8023cb2a84e5184f2b13e15bf3023adc876f9ec5990b1ec9454812",
+      "bytes": 22023,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_collection_worker.py": {
+      "sha256": "6c510b236fa752bee71992ff7c1a86b4d5263a0e56e9340ab866ea516fddd432",
+      "bytes": 56188,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_collector_bridge.py": {
+      "sha256": "e929e79cac8ac9840652939ba52fd9bb5947be92183a98feae22f5694190a720",
+      "bytes": 49593,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_collector_bridge_adapters.py": {
+      "sha256": "351dd22c8f91681bf6823e9d888cbd251dd2f1204770b27203b0b073343b7ea9",
+      "bytes": 14329,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_collector_bridge_runtime.py": {
+      "sha256": "e612f7df437d8e0cf31d5ae1db1030de6b78b13755bfe4bd4fe7439c844019ca",
+      "bytes": 12083,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_collector_policy.py": {
+      "sha256": "9d498bb0e9816a11b48aaee148d456b02746e71f8b987f309bf162e240360f5f",
+      "bytes": 1039,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_db.py": {
+      "sha256": "9accbac5ed797b69b495d9d2fd93210c484474d06d1a37debd20fcc7902282e1",
+      "bytes": 115690,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_forum.py": {
+      "sha256": "73dfc13883cd1e3b3c44fb6f5508b330b4a409cd43a402bca590f4ecf50edec2",
+      "bytes": 36458,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_moderation.py": {
+      "sha256": "11946f5d76ce1afd4882b526defc31fbf6782fcd60087d786ca50f0a5b9cb90c",
+      "bytes": 8739,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_release_info.py": {
+      "sha256": "edf21c1ab4dc218ae897d871722ee215c8428fa47f7fc0866088801efbe55e59",
+      "bytes": 5373,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_scrape.py": {
+      "sha256": "62d645df58af5b481df60762df12c695f106fdabf718286bdac3e30935d1f624",
+      "bytes": 49343,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_source_covers.py": {
+      "sha256": "e4faa5d03630616fb1397061062017263ea114a41ccbd101d1d82250834a6666",
+      "bytes": 9047,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_source_review_ai.py": {
+      "sha256": "070560fac6b1fbb46309a4f13043a0e6595a1568a2c31304a77b9055f5a1bec6",
+      "bytes": 16765,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_source_status.py": {
+      "sha256": "fc33cfac84cd247fda91026af257ea905857482d668219c643d2b389ba4929a2",
+      "bytes": 2752,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_sources.py": {
+      "sha256": "df3c07fdf527acdebd44b69924acbea3f467ed84ff5e5c6f8f8c890417ef19d4",
+      "bytes": 65019,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_titles.py": {
+      "sha256": "17a7efb2d453243947c77c0fd14aa26393a51b15b1aab4e51dd9b7b5c44a187c",
+      "bytes": 37573,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_update.py": {
+      "sha256": "665bc501cee22029bcdac4c90023b1448345a919ce4f973ab3fd9a69271a115e",
+      "bytes": 5461,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_usage_metrics.py": {
+      "sha256": "6fc192868b7fa6aaa20083f11d3ce655e6d489b0a467bb212c78f755afa02468",
+      "bytes": 14506,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_util.py": {
+      "sha256": "6b93ef0dab90a631704ca5e95b7d8c55d8ff1cfe57e8f951f4b18bc9e72ebfdf",
+      "bytes": 1765,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_vndb_access.py": {
+      "sha256": "dd948d07b560f135a20c9af8a8f1bd2e5c2e5cbafdb709a240dcfc047da4c6fa",
+      "bytes": 2985,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_web028.py": {
+      "sha256": "34bee7ae9ff4fa5d71f0cb398cf1c9ee2c6b00c2a8bc22ff41bbdb290644e9d9",
+      "bytes": 3177,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "slg_web_catalogue.py": {
+      "sha256": "9d12e5628bf9d0e64ba60ef3c62e62afc3fa5481fb0602733b81f5f4848c6d35",
+      "bytes": 25692,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/account.css": {
+      "sha256": "409b9f2d12aed81203f1020c68a4c370d17e9d7422cf45638fbfd343a995a536",
+      "bytes": 1742,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/announcements.css": {
+      "sha256": "6736b1b9d43b8e03cfb56db73005ee61826f894421bf53c6314cfe35a1fde5c3",
+      "bytes": 1150,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/announcements.js": {
+      "sha256": "7fbc6ac15779abe5755908d7129ca37b72c0551c0bbcf976257ca9f3192242f4",
+      "bytes": 6489,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/app.js": {
+      "sha256": "dbe2242b1e66189d29c8add433fa454b675b5a08176c331ecf28e68591dc9c73",
+      "bytes": 26241,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/author.css": {
+      "sha256": "c361c5a73c6f9a83be37eed46a4fba9a24d36056b7991e6a33ca40efb33f29d2",
+      "bytes": 3284,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/author.js": {
+      "sha256": "9fe7446e073c5f10aea6da388376229a84c78587c7debdfe130b896f1dfe3210",
+      "bytes": 12487,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/bell.svg": {
+      "sha256": "394889e9631fe3a9a63be9a479a95b451b708e432d895978d21d9130b5ee5dbe",
+      "bytes": 393,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/brand-logo-e8a90c20.png": {
+      "sha256": "e8a90c20f8d6d9bc5734abe427adc365ff1d01be8d39a94c6607cdfe67603ec3",
+      "bytes": 37446,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/catalogue.css": {
+      "sha256": "3831fe3940e01e033f05eb16b52de8db8da073c81abe221d52b4f141bf665edd",
+      "bytes": 1054,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/catalogue.js": {
+      "sha256": "e615d7916c609f053d861740bcbe7736d9017dbe3e1072f10fa06d43a0480f2c",
+      "bytes": 7417,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/comments.css": {
+      "sha256": "9e24c2985eff8ebb41e66abc545e72fef7af15d197bfc534acef96035d53476e",
+      "bytes": 896,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/comments.js": {
+      "sha256": "3ea0391f16a7bb70cd21476a78456172d2138eae0343ea8096d85c2bd3b64155",
+      "bytes": 22061,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/favicon-c0b9947d.ico": {
+      "sha256": "c0b9947d00e0671942a019b9c7686fa3f0f320665539cea04835850b29e6cb96",
+      "bytes": 24311,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/forum.css": {
+      "sha256": "245c9c654e023a71503417033c53ef74bf7c73b2c993f8d1e3d34fa52f24afcb",
+      "bytes": 7105,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/forum.js": {
+      "sha256": "9955f56d4f15ca6289b54342dd1d69f7f301866b9312741ce35d31ea14644b56",
+      "bytes": 30789,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/game.js": {
+      "sha256": "029a7052f707ea6e315fae6e7e4300a0ad40f30b1c946b90c391771eea2d3090",
+      "bytes": 6037,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/index.html": {
+      "sha256": "b5b6004b6687271a93a27c8e69efee73e8f5e050367c6d856802ce6b76efeb70",
+      "bytes": 2900,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/leaderboard.css": {
+      "sha256": "9822a6afea9c1ba45b6a1da19bb3b795eeb3e8c6408b91ca654ac7ceb249cd2d",
+      "bytes": 2162,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/leaderboard.js": {
+      "sha256": "eb99e3d155e9ee8f2aa429322072cd9e888f21e0bc5fe81f8b97e4c2f467759b",
+      "bytes": 5566,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/login.js": {
+      "sha256": "a41af443e6b940cc5ada331c1da58c4b170129b8891b79f2723b38951ca54768",
+      "bytes": 39092,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/lucide-LICENSE.txt": {
+      "sha256": "b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57",
+      "bytes": 3208,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/messages.css": {
+      "sha256": "faa3364dcb252fe32ada2e1f1c23357c1fb281d391099ee60d819560a39639bb",
+      "bytes": 2544,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/messages.js": {
+      "sha256": "85bd832572043c70b6fe822d04de4479dfa23c096f4f13576f25add89d925762",
+      "bytes": 17555,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/public-profile.css": {
+      "sha256": "5a9689ed5a936bd83d7241ffe51904462bb5bece7d135e2f593fdf3ff74e53f4",
+      "bytes": 1086,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/public-profile.js": {
+      "sha256": "81caf02d4cf0ea16d008fa518654516ac0301ab0f0ab4b41c95738be80610a5d",
+      "bytes": 3761,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/replies.css": {
+      "sha256": "e603d66be39b5918f34ba8592f1a89546e64505fa37b94a2bb90ead1a69ca1d4",
+      "bytes": 2877,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/replies.js": {
+      "sha256": "e4f3856a67c77446d68289fd419613a63100210340c315c197edc06001b0525d",
+      "bytes": 21741,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/search.js": {
+      "sha256": "c6815a880465986a832a0a058eb4846ec60f78b307d1cee504bd586b4d28071b",
+      "bytes": 6898,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/shop.css": {
+      "sha256": "7d10b442c510d50a41ea0dd365785fb03102e6939f220d347dd25dafbbc056c5",
+      "bytes": 1311,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/shop.js": {
+      "sha256": "1f4eeb16906d026d8e1966f263dbefaeac1f8946e8fbca08bc81e323f4479e23",
+      "bytes": 8074,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/style.css": {
+      "sha256": "c3946ceb050296aee8eb36d447a0b3fbf066260abf179bacbd5c1ac9339081a8",
+      "bytes": 9741,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/usage.js": {
+      "sha256": "61596402abafd5d436fd2b436e81cfecc621f5c5a205f5e08fa8ab8fddb3513d",
+      "bytes": 1902,
+      "origin": "2026-10-20 verified production web source readback"
+    },
+    "web/version.js": {
+      "sha256": "20a79dd31be4aa4f8ac821f7024410a98335dc16d9620e9e6b11b9c41d25eef0",
+      "bytes": 37,
+      "origin": "2026-10-20 verified production web source readback"
+    }
+  },
+  "not_included": [
+    "user and account databases",
+    "tokens and signing credentials",
+    "production configuration",
+    "source collection executors",
+    "catalogue data and cached covers",
+    "deployment tools and private operation reports"
+  ],
+  "optional_modules_absent_in_production": [
+    "slg_dlsite_vendor.py",
+    "slg_collector_reviewed.py",
+    "slg_maintenance.py"
+  ],
+  "limits": [
+    "Real VJ catalogue and first official-cover-index publication are pending.",
+    "This source package does not prove external image reachability or production capacity."
+  ]
+}

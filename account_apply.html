@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#120c15">
+<title>黄油之王 账号申请</title>
+<style>
+:root{color-scheme:dark;--bg:#120c15;--surface:#1b1320;--line:#38283b;--text:#f5edf4;--muted:#b9a8b8;--rose:#f176a4;--gold:#e7c47c;--green:#83d8b1;--red:#ff889c}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 82% -12%,#5b244044,transparent 38%),var(--bg);color:var(--text);font:15px/1.6 Inter,"Segoe UI","Microsoft YaHei",sans-serif}
+button,input,textarea{font:inherit}
+.shell{width:min(100% - 32px,760px);margin:0 auto;padding:34px 0 52px}
+.brand{display:flex;align-items:center;gap:11px;color:var(--text);text-decoration:none;font-weight:750;font-size:17px;margin-bottom:22px}
+.mark{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;color:#210f20;font-weight:900;background:linear-gradient(145deg,var(--rose),#7c315f)}
+.card{padding:clamp(18px,4vw,30px);border:1px solid var(--line);border-radius:17px;background:linear-gradient(145deg,#211725ee,#19121e);box-shadow:0 18px 55px #09060b88}
+.eyebrow{color:var(--gold);font-size:11px;letter-spacing:.14em;text-transform:uppercase}
+h1{font-size:clamp(23px,5vw,30px);line-height:1.25;margin:5px 0 7px}
+.intro{margin:0 0 20px;color:var(--muted);font-size:13px}
+.privacy{padding:13px 15px;border:1px solid #674b45;border-radius:12px;background:linear-gradient(145deg,#321d2a,#211520);color:#e7d5df;font-size:13px;margin:0 0 20px}
+.privacy strong{color:#ffc1a6}
+.field{margin-top:16px}
+label{display:flex;justify-content:space-between;gap:10px;margin-bottom:6px;font-size:13px;font-weight:700}
+.optional,.count{color:var(--muted);font-size:11px;font-weight:400;white-space:nowrap}
+input,textarea{display:block;width:100%;border:1px solid #49364c;border-radius:10px;background:#130e17;color:var(--text);padding:11px 12px;outline:none}
+input:focus,textarea:focus{border-color:var(--rose);box-shadow:0 0 0 3px #f176a422}
+textarea{min-height:122px;resize:vertical}
+.hint{font-size:11px;color:var(--muted);margin:5px 1px 0}
+.actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:22px}
+button{border:1px solid transparent;border-radius:10px;padding:10px 17px;color:#27121e;font-weight:750;background:linear-gradient(120deg,var(--rose),#e694ad);cursor:pointer;min-height:44px}
+button:hover:not(:disabled){filter:brightness(1.07)}
+button:focus-visible{outline:3px solid var(--gold);outline-offset:2px}
+button:disabled{cursor:wait;opacity:.68}
+.status{min-height:24px;margin-top:14px;color:var(--muted);font-size:13px;overflow-wrap:anywhere}
+.status.error{color:var(--red)}.status.good{color:var(--green)}
+.foot{margin:16px 3px 0;color:#998b9a;font-size:11px}
+@media(max-width:520px){.shell{width:min(100% - 22px,760px);padding-top:20px}.brand{margin-bottom:14px}.card{border-radius:14px}.actions button{width:100%}input,textarea{font-size:16px}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+</style>
+</head>
+<body>
+<main class="shell">
+  <a class="brand" href="/" aria-label="黄油之王 首页"><span class="mark" aria-hidden="true">S</span><span>黄油之王</span></a>
+  <section class="card" aria-labelledby="page-title">
+    <div class="eyebrow">账号服务</div>
+    <h1 id="page-title">申请账号</h1>
+    <p class="intro">请留下方便后续联系的标识。管理员处理申请后，会通过你填写的联系标识告知结果。</p>
+    <p class="privacy"><strong>请勿填写密码、登录密钥、恢复码或其他秘密信息。</strong>联系标识不要求是真实姓名或手机号，请使用你能接收后续信息的方式。</p>
+    <form id="application-form" novalidate>
+      <div class="field">
+        <label for="display-name">称呼 <span class="optional">选填，最多 40 字</span></label>
+        <input id="display-name" name="display_name" type="text" maxlength="40" autocomplete="nickname" aria-describedby="display-name-hint">
+        <div class="hint" id="display-name-hint">可以填写便于管理员识别的称呼，不要填写敏感信息。</div>
+      </div>
+      <div class="field">
+        <label for="contact">联系标识 <span class="count">必填，最多 120 字</span></label>
+        <input id="contact" name="contact" type="text" maxlength="120" autocomplete="off" required aria-describedby="contact-hint">
+        <div class="hint" id="contact-hint">例如你常用的社区昵称或可回访的联系方式。</div>
+      </div>
+      <div class="field">
+        <label for="reason">申请说明 <span class="optional">选填，最多 500 字</span></label>
+        <textarea id="reason" name="reason" maxlength="500" aria-describedby="reason-hint"></textarea>
+        <div class="hint" id="reason-hint">简要说明申请原因即可，请勿粘贴账号凭据。</div>
+      </div>
+      <div class="actions"><button id="submit-button" type="submit">提交申请</button></div>
+      <div id="form-status" class="status" role="status" aria-live="polite"></div>
+      <div id="form-result" class="status" role="status" aria-live="polite"></div>
+    </form>
+  </section>
+  <p class="foot">此申请页需要能够访问 黄油之王 网站及其服务器；如果整个 slg-king.com 都无法访问，请通过其他可用渠道联系管理员。</p>
+</main>
+<script>
+(function () {
+  "use strict";
+  var STORAGE_KEY = "slgking.account-application.pending.v1";
+  var MAX_LENGTHS = { display_name: 40, contact: 120, reason: 500 };
+
+  function validateFields(fields) {
+    if (!fields.contact.trim()) return "请填写联系标识。";
+    if (fields.display_name.length > MAX_LENGTHS.display_name) return "称呼不能超过 40 字。";
+    if (fields.contact.length > MAX_LENGTHS.contact) return "联系标识不能超过 120 字。";
+    if (fields.reason.length > MAX_LENGTHS.reason) return "申请说明不能超过 500 字。";
+    return "";
+  }
+
+  function isCredentialResponse(data) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) return true;
+    return Object.keys(data).some(function (key) {
+      return /^(login_key|recovery_code|device_token|device_id|credential|credentials|secret)$/i.test(key);
+    });
+  }
+
+  function createController(env) {
+    var doc = env.document;
+    var form = doc.getElementById("application-form");
+    var displayName = doc.getElementById("display-name");
+    var contact = doc.getElementById("contact");
+    var reason = doc.getElementById("reason");
+    var button = doc.getElementById("submit-button");
+    var status = doc.getElementById("form-status");
+    var result = doc.getElementById("form-result");
+    var store = env.storage;
+    var cryptoObject = env.crypto;
+    var fetchFn = env.fetch;
+    var pending = null;
+
+    function announce(node, message, kind) {
+      node.textContent = message;
+      node.className = "status" + (kind ? " " + kind : "");
+    }
+
+    function readPending() {
+      try {
+        var raw = store.getItem(STORAGE_KEY);
+        if (!raw) return null;
+        var value = JSON.parse(raw);
+        if (value && typeof value.submission_key === "string" && /^[a-f0-9]{64}$/.test(value.submission_key) &&
+            typeof value.fields_digest === "string" && /^[a-f0-9]{64}$/.test(value.fields_digest)) return value;
+      } catch (_) {}
+      try { store.removeItem(STORAGE_KEY); } catch (_) {}
+      return null;
+    }
+
+    function makeKey() {
+      var bytes = new Uint8Array(32);
+      cryptoObject.getRandomValues(bytes);
+      return Array.prototype.map.call(bytes, function (byte) {
+        return byte.toString(16).padStart(2, "0");
+      }).join("");
+    }
+
+    function digestFields(fields) {
+      var serialized = JSON.stringify(fields);
+      return cryptoObject.subtle.digest("SHA-256", new TextEncoder().encode(serialized)).then(function (buffer) {
+        return Array.prototype.map.call(new Uint8Array(buffer), function (byte) {
+          return byte.toString(16).padStart(2, "0");
+        }).join("");
+      });
+    }
+
+    function savePending(record) {
+      pending = record;
+      try { store.setItem(STORAGE_KEY, JSON.stringify(record)); } catch (_) {}
+    }
+
+    function clearPending() {
+      pending = null;
+      try { store.removeItem(STORAGE_KEY); } catch (_) {}
+    }
+
+    function submissionKeyFor(fields, digest) {
+      var previous = pending || readPending();
+      if (previous && previous.fields_digest === digest) {
+        pending = previous;
+        return previous.submission_key;
+      }
+      var record = { submission_key: makeKey(), fields_digest: digest };
+      savePending(record);
+      return record.submission_key;
+    }
+
+    async function submit(event) {
+      if (event && typeof event.preventDefault === "function") event.preventDefault();
+      var fields = {
+        display_name: displayName.value.trim(),
+        contact: contact.value.trim(),
+        reason: reason.value.trim()
+      };
+      var validationError = validateFields(fields);
+      announce(result, "", "");
+      if (validationError) {
+        announce(status, validationError, "error");
+        return;
+      }
+      button.disabled = true;
+      announce(status, "正在提交申请……", "");
+      try {
+        var digest = await digestFields(fields);
+        var submissionKey = submissionKeyFor(fields, digest);
+        var response = await fetchFn("/account/applications", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ submission_key: submissionKey, display_name: fields.display_name,
+            contact: fields.contact, reason: fields.reason })
+        });
+        var data;
+        try { data = await response.json(); } catch (_) { throw new Error("response"); }
+        if (!response.ok) throw new Error("http");
+        if (isCredentialResponse(data)) throw new Error("response");
+        var applicationId = data.application_id || data.id;
+        if (typeof applicationId !== "string" || !applicationId || applicationId.length > 120 ||
+            typeof data.status !== "string") throw new Error("response");
+        clearPending();
+        announce(status, "", "");
+        announce(result, "申请已提交，编号：" + applicationId + "。请通过你填写的联系标识留意后续信息。", "good");
+      } catch (error) {
+        var retryHint = "在本页直接重试时，填写内容会保留，字段不变就会沿用原申请键。刷新后表单不会恢复；请重新填写与上次提交完全相同的称呼、联系标识和申请说明，才会沿用原申请键。";
+        var message = error && error.message === "http"
+          ? "提交未成功（服务器返回错误）。请检查网络后重试。" + retryHint
+          : "暂时无法确认申请是否提交。请检查网络后重试。" + retryHint;
+        announce(status, message, "error");
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    form.addEventListener("submit", submit);
+    pending = readPending();
+    if (pending) {
+      announce(status, "检测到上次未确认的申请。刷新后表单不会恢复；请重新填写与上次提交完全相同的称呼、联系标识和申请说明，重试才会沿用原申请键。", "");
+    }
+    return { submit: submit, validateFields: validateFields, digestFields: digestFields,
+      submissionKeyFor: submissionKeyFor, readPending: readPending, clearPending: clearPending };
+  }
+
+  window.AccountApplicationPage = { createController: createController,
+    validateFields: validateFields, isCredentialResponse: isCredentialResponse,
+    storageKey: STORAGE_KEY, maxLengths: MAX_LENGTHS };
+
+  try {
+    var storage = window.localStorage;
+    var fetchFn = window.fetch.bind(window);
+    createController({ document: document, storage: storage, crypto: window.crypto, fetch: fetchFn });
+  } catch (_) {
+    var status = document.getElementById("form-status");
+    if (status) status.textContent = "当前浏览器无法安全提交申请，请更新浏览器后重试。";
+  }
+}());
+</script>
+</body>
+</html>

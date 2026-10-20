@@ -1,0 +1,25 @@
+{
+  "id": "/admin/",
+  "name": "黄油之王 运营控制台",
+  "short_name": "运营控制台",
+  "description": "黄油之王 管理员控制台",
+  "start_url": "/admin/",
+  "scope": "/admin/",
+  "display": "standalone",
+  "background_color": "#120c15",
+  "theme_color": "#160d18",
+  "icons": [
+    {
+      "src": "/assets/admin/admin-icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/admin/admin-icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+.messages-page{max-width:920px;margin:0 auto;min-width:0;letter-spacing:0}
+.messages-page h2{margin:0 0 14px;font-size:19px}
+.messages-page h3{font-size:16px;overflow-wrap:anywhere}
+.messages-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border-bottom:1px solid var(--line);margin-bottom:18px}
+.messages-tabs a{display:flex;min-height:48px;align-items:center;justify-content:center;padding:10px 8px;color:var(--muted);border-bottom:3px solid transparent}
+.messages-tabs a[aria-current=page]{color:var(--text);border-bottom-color:var(--rose);font-weight:700}
+.messages-tabs a:focus-visible{outline-offset:-4px}
+.messages-pane{min-height:160px;min-width:0}
+.messages-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.messages-heading h3{margin:0}
+.messages-tools{display:flex;gap:8px;flex-wrap:wrap}
+.messages-page button{border-radius:8px;min-height:44px;max-width:100%;overflow-wrap:anywhere}
+.messages-page button:disabled{opacity:.5;cursor:default;filter:none}
+.messages-feedback{min-height:24px;margin:12px 0;color:var(--muted);overflow-wrap:anywhere}
+.messages-feedback.error{color:var(--red)}
+.messages-feedback.good{color:var(--green)}
+.messages-login{min-height:44px;display:inline-flex;align-items:center}
+.messages-activity{padding:8px 0 20px;min-width:0}
+.messages-activity-body{white-space:pre-wrap;overflow-wrap:anywhere;margin:12px 0 20px}
+.messages-claim{min-width:136px}
+.messages-count{font-size:13px;margin:10px 0 0;overflow-wrap:anywhere}
+.messages-notification{padding:16px 0;border-bottom:1px solid var(--line);min-width:0}
+.messages-notification-main{display:flex;align-items:flex-start;gap:12px;justify-content:space-between;min-width:0}
+.messages-target{display:inline-flex;align-items:center;min-height:44px;overflow-wrap:anywhere;min-width:0;font-weight:600;flex:1}
+.messages-read-state{flex:0 0 auto;font-size:12px;padding-top:12px}
+.messages-game{font-size:13px;margin:3px 0 7px;overflow-wrap:anywhere}
+.messages-date{font-size:12px;overflow-wrap:anywhere}
+.messages-empty{padding:16px 0}
+.messages-pages{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:20px 0}
+.messages-pages span{font-size:13px;text-align:center;overflow-wrap:anywhere}
+.message-reward-dot{position:absolute;top:5px;right:5px;width:8px;height:8px;border-radius:50%;background:var(--red);box-shadow:0 0 0 2px var(--bg);pointer-events:none}
+@media(max-width:390px){.messages-tools{gap:6px}.messages-tools button{padding:8px 10px}.messages-heading{gap:8px}}

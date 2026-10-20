@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+local-state/
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+dev_secret.txt
+.env
