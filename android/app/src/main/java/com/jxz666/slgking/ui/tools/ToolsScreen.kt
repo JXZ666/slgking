@@ -66,7 +66,9 @@ import java.io.File
 
 /** 工具 Tab：目录同步 + 翻译 + 诊断 + 公告 + 帮助/关于 + 主题 + 备份导入 + 应用内更新。 */
 @Composable
-fun ToolsScreen(openTranslationSettings: Boolean = false, onTranslationSettingsConsumed: () -> Unit = {}) {
+fun ToolsScreen(openTranslationSettings: Boolean = false, onTranslationSettingsConsumed: () -> Unit = {}, scrollResetEpoch: Int = 0) {
+    val listScroll = androidx.compose.foundation.lazy.rememberLazyListState()
+    com.jxz666.slgking.ui.common.ConsumeScrollReset(scrollResetEpoch) { listScroll.scrollToItem(0) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -337,6 +339,7 @@ fun ToolsScreen(openTranslationSettings: Boolean = false, onTranslationSettingsC
 
     LazyColumn(
         Modifier.fillMaxSize(),
+        state = listScroll,
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {

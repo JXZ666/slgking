@@ -84,6 +84,7 @@ fun CatalogScreen(
     pendingTag: String? = null,
     onConsumePendingTag: () -> Unit = {},
     vm: CatalogViewModel = viewModel(),
+    scrollResetEpoch: Int = 0,
 ) {
     val context = LocalContext.current
     val shellPreferences = remember(context) { context.getSharedPreferences("slgking_shell", 0) }
@@ -94,6 +95,9 @@ fun CatalogScreen(
     }
     DisposableEffect(catalogId) {
         onDispose { vm.scrollPositions[catalogId] = gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset }
+    }
+    com.jxz666.slgking.ui.common.ConsumeScrollReset(scrollResetEpoch) {
+        gridState.scrollToItem(0)
     }
     var previousQuery by remember { mutableStateOf(vm.query) }
     var searchOpen by remember { mutableStateOf(false) }

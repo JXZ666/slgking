@@ -26,23 +26,28 @@ fun MessageCenter(onClose: () -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MessageCenterContent(onClose: () -> Unit) {
-    var group by remember { mutableStateOf<String?>(null) }
-    var page by remember { mutableStateOf(1) }
+    var group by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
+    var page by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(1) }
     var refresh by remember { mutableStateOf(0) }
     var payload by remember { mutableStateOf<JSONObject?>(null) }
+    var payloadIdentity by remember { mutableStateOf<String?>(null) }
     var activitySession by remember { mutableStateOf(JSONObject()) }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
-    var notice by remember { mutableStateOf<JSONObject?>(null) }
+    var noticeJson by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
+    val notice = noticeJson?.let { JSONObject(it) }
+    val scrollStates = androidx.compose.runtime.saveable.rememberSaveableStateHolder()
     val revision = AccountChanges.revision
     var generation by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
     fun current() = revision == AccountChanges.revision
     LaunchedEffect(group, page, refresh) {
         val request = ++generation
-        payload = null; error = null
+        error = null
         val requested = group ?: return@LaunchedEffect
+        val requestedIdentity = "$requested:$page"
+        if (payloadIdentity != requestedIdentity) { payload = null; payloadIdentity = requestedIdentity }
         loading = true
         if (requested == "活动") { ActivityBadgeState.clear(); activitySession = JSONObject() }
         try {
@@ -72,17 +77,30 @@ private fun MessageCenterContent(onClose: () -> Unit) {
         catch (e: Exception) { if (current() && generation == request) error = e.message ?: "读取失败，请重试" }
         finally { if (current() && generation == request) loading = false }
     }
-    BackHandler { if (notice != null) notice = null else if (group != null) group = null else onClose() }
+    BackHandler { if (notice != null) noticeJson = null else if (group != null) group = null else onClose() }
     Scaffold(topBar = { TopAppBar(title = { Text(if (notice != null) "评论讨论" else group ?: "消息") }, navigationIcon = {
-        TextButton(onClick = { if (notice != null) notice = null else if (group != null) group = null else onClose() }) { Text("返回") }
+        TextButton(onClick = { if (notice != null) noticeJson = null else if (group != null) group = null else onClose() }) { Text("返回") }
     }) }) { padding ->
+        val scrollIdentity = if (notice != null) "discussion:${opaqueId(notice, "reply_id")}" else "group:${group ?: "home"}:$page"
+        val groupPending = notice == null && group != null && (payload == null || payloadIdentity != "$group:$page")
+        if (notice != null) {
+            key(scrollIdentity) {
+                scrollStates.SaveableStateProvider(scrollIdentity) {
+                    NotificationDiscussion(notice, Modifier.padding(padding)) { refresh++ }
+                }
+            }
+        } else if (groupPending) {
+            Column(Modifier.padding(padding).padding(16.dp)) {
+                if (loading) CircularProgressIndicator()
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                TextButton(enabled = !loading, onClick = { refresh++ }) { Text("刷新／重试") }
+            }
+        } else key(scrollIdentity) {
+         scrollStates.SaveableStateProvider(scrollIdentity) {
         Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            val selected = notice
-            if (selected != null) {
-                NotificationDiscussion(selected) { refresh++ }
-            } else if (group == null) {
+            if (group == null) {
                 Text("按需查看公告、活动和回复；不在后台轮询。")
-                listOf("公告", "活动", "回复").forEach { name -> OutlinedButton(onClick = { group = name; page = 1 }, modifier = Modifier.fillMaxWidth()) { Text(name) } }
+                listOf("公告", "活动", "回复").forEach { name -> OutlinedButton(onClick = { scrollStates.removeState("group:$name:1"); group = name; page = 1 }, modifier = Modifier.fillMaxWidth()) { Text(name) } }
             } else {
                 if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
@@ -119,7 +137,7 @@ private fun MessageCenterContent(onClose: () -> Unit) {
                         Text("未读 ${data.optInt("unread_count")} 条")
                         val notices = objects(data.optJSONArray("notifications"))
                         notices.forEach { item ->
-                            if (opaqueId(item) != null && opaqueId(item, "reply_id") != null) OutlinedButton(onClick = { notice = item }, modifier = Modifier.fillMaxWidth()) {
+                            if (opaqueId(item) != null && opaqueId(item, "reply_id") != null) OutlinedButton(onClick = { noticeJson = item.toString() }, modifier = Modifier.fillMaxWidth()) {
                                 Text((if (item.optBoolean("read")) "" else "未读 · ") + item.optString("nickname", "用户") + " 回复了你")
                             }
                         }
@@ -135,19 +153,22 @@ private fun MessageCenterContent(onClose: () -> Unit) {
                         }) { Text("全部标为已读") }
                         val actual = data.optInt("page", page)
                         Row {
-                            TextButton(enabled = !loading && actual > 1, onClick = { page = actual - 1 }) { Text("上一页") }
+                            TextButton(enabled = !loading && actual > 1, onClick = { scrollStates.removeState("group:$group:${actual - 1}"); page = actual - 1 }) { Text("上一页") }
                             Text("第 $actual 页", Modifier.padding(top = 12.dp))
-                            TextButton(enabled = !loading && actual < data.optInt("total_pages"), onClick = { page = actual + 1 }) { Text("下一页") }
+                            TextButton(enabled = !loading && actual < data.optInt("total_pages"), onClick = { scrollStates.removeState("group:$group:${actual + 1}"); page = actual + 1 }) { Text("下一页") }
                         }
                     }
                 }
             }
         }
+         }
+        }
     }
 }
 
 @Composable
-private fun NotificationDiscussion(notice: JSONObject, onRead: () -> Unit) {
+private fun NotificationDiscussion(notice: JSONObject, modifier: Modifier = Modifier, onRead: () -> Unit) {
+    val discussionScroll = rememberScrollState()
     val id = opaqueId(notice, "reply_id") ?: return
     val revision = AccountChanges.revision
     var context by remember(id, revision) { mutableStateOf<JSONObject?>(null) }
@@ -165,9 +186,9 @@ private fun NotificationDiscussion(notice: JSONObject, onRead: () -> Unit) {
         catch (e: Exception) { if (revision == AccountChanges.revision) error = e.message ?: "讨论读取失败" }
     }
     when {
-        error != null -> { Text("${error!!}；未显示旧正文，也未标记已读", color = MaterialTheme.colorScheme.error); TextButton(onClick = { reload++ }) { Text("重试") } }
-        context == null -> CircularProgressIndicator()
-        else -> {
+        error != null -> Column(modifier.padding(16.dp)) { Text("${error!!}；未显示旧正文，也未标记已读", color = MaterialTheme.colorScheme.error); TextButton(onClick = { reload++ }) { Text("重试") } }
+        context == null -> Column(modifier.padding(16.dp)) { CircularProgressIndicator() }
+        else -> Column(modifier.fillMaxSize().verticalScroll(discussionScroll).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             val root = context!!.getJSONObject("root")
             val rootId = opaqueId(root) ?: opaqueId(root, "cloud_id")
             Text(context!!.optString("game"), style = MaterialTheme.typography.titleMedium)

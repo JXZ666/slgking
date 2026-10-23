@@ -57,9 +57,10 @@ import org.json.JSONObject
 
 /** 个人 Tab：登录态 / 账号 / 游戏化入口。 */
 @Composable
-fun ProfileScreen(onOpenMessages: () -> Unit = {}) {
+fun ProfileScreen(onOpenMessages: () -> Unit = {}, scrollResetEpoch: Int = 0) {
     val vm: ProfileViewModel = androidx.lifecycle.viewmodel.compose.viewModel(
         viewModelStoreOwner = androidx.compose.ui.platform.LocalContext.current.findProfileActivity())
+    com.jxz666.slgking.ui.common.ConsumeScrollReset(scrollResetEpoch) { vm.listState.scrollToItem(0) }
     val scope = rememberCoroutineScope()
     var loading by vm.loading
     var loggedIn by vm.loggedIn

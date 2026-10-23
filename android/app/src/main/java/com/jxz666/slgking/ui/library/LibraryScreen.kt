@@ -70,7 +70,7 @@ import com.jxz666.slgking.ui.catalog.categorySummary
 /** 手机追踪：版本更新、想玩与收藏；自建游戏保留在次级个人记录。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LibraryScreen(openDetail: (Int) -> Unit) {
+fun LibraryScreen(openDetail: (Int) -> Unit, scrollResetEpoch: Int = 0) {
     val tracking: TrackingViewModel = viewModel(key = "library-tracking")
     val userVm: CatalogViewModel = viewModel(key = "library-user-games")
     val userGames = userVm.items
@@ -81,6 +81,12 @@ fun LibraryScreen(openDetail: (Int) -> Unit) {
     val wantsScroll = androidx.compose.foundation.lazy.rememberLazyListState()
     val collectionsScroll = androidx.compose.foundation.lazy.rememberLazyListState()
     val recordsScroll = androidx.compose.foundation.lazy.rememberLazyListState()
+    com.jxz666.slgking.ui.common.ConsumeScrollReset(scrollResetEpoch) {
+        updatesScroll.scrollToItem(0)
+        wantsScroll.scrollToItem(0)
+        collectionsScroll.scrollToItem(0)
+        recordsScroll.scrollToItem(0)
+    }
     var deleting by remember { mutableStateOf(setOf<Int>()) }
     var deleteTarget by remember { mutableStateOf<GameItem?>(null) }
     var recordActionError by remember { mutableStateOf<String?>(null) }
@@ -123,6 +129,7 @@ fun LibraryScreen(openDetail: (Int) -> Unit) {
             onBack = { openCollectionId = null; tracking.refreshCollections() },
             openDetail = openDetail,
             onMembersChanged = { tracking.refreshCollections() },
+            scrollResetEpoch = scrollResetEpoch,
         )
         else -> Scaffold(
             topBar = {
@@ -413,9 +420,11 @@ private fun CollectionGamesScreen(
     onBack: () -> Unit,
     openDetail: (Int) -> Unit,
     onMembersChanged: () -> Unit,
+    scrollResetEpoch: Int = 0,
 ) {
     val vm: CatalogViewModel = viewModel(key = "collection-games-${collection.id}")
     val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
+    com.jxz666.slgking.ui.common.ConsumeScrollReset(scrollResetEpoch) { gridState.scrollToItem(0) }
     val scope = rememberCoroutineScope()
     var name by androidx.compose.runtime.saveable.rememberSaveable(collection.id) { mutableStateOf(vm.query.q) }
     var tagsText by androidx.compose.runtime.saveable.rememberSaveable(collection.id) { mutableStateOf(vm.query.tags.joinToString("，")) }

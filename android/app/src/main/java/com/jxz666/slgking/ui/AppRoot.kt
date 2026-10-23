@@ -38,6 +38,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.toMutableStateList
+import androidx.compose.runtime.snapshots.SnapshotStateList
+import java.util.UUID
+import org.json.JSONObject
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,6 +64,29 @@ sealed interface Overlay {
     data class Detail(val gameId: Int) : Overlay
     data class Comments(val slug: String, val title: String) : Overlay
 }
+
+internal data class OverlayEntry(val overlay: Overlay, val id: String = UUID.randomUUID().toString())
+
+internal val OverlayStackSaver = listSaver<SnapshotStateList<OverlayEntry>, String>(
+    save = { stack -> stack.map { entry ->
+        JSONObject().put("id", entry.id).apply {
+            when (val value = entry.overlay) {
+                is Overlay.Detail -> put("kind", "detail").put("game", value.gameId)
+                is Overlay.Comments -> put("kind", "comments").put("slug", value.slug).put("title", value.title)
+                Overlay.Messages -> put("kind", "messages")
+            }
+        }.toString()
+    } },
+    restore = { rows -> rows.map { row ->
+        val value = JSONObject(row)
+        val overlay = when (value.getString("kind")) {
+            "detail" -> Overlay.Detail(value.getInt("game"))
+            "comments" -> Overlay.Comments(value.getString("slug"), value.getString("title"))
+            else -> Overlay.Messages
+        }
+        OverlayEntry(overlay, value.getString("id"))
+    }.toMutableStateList() },
+)
 
 private enum class Tab(val label: String) {
     Catalog("目录"), Library("追踪"), Profile("个人"), Tools("工具")
@@ -164,14 +192,33 @@ private fun MainScreen() {
     val secretState = profileVm.secretState.value
     val navigationLocked = secretState.locked
     var tab by rememberSaveable { mutableStateOf(Tab.Catalog) }
-    val overlays = remember { androidx.compose.runtime.mutableStateListOf<Overlay>() }
+    val overlays = rememberSaveable(saver = OverlayStackSaver) { androidx.compose.runtime.mutableStateListOf<OverlayEntry>() }
+    var catalogEpoch by rememberSaveable { mutableStateOf(0) }
+    var libraryEpoch by rememberSaveable { mutableStateOf(0) }
+    var profileEpoch by rememberSaveable { mutableStateOf(0) }
+    var toolsEpoch by rememberSaveable { mutableStateOf(0) }
     var lastBack by remember { mutableStateOf(0L) }
     val stateHolder = rememberSaveableStateHolder()
+    val overlayStateHolder = rememberSaveableStateHolder()
+    fun push(overlay: Overlay) { overlays.add(OverlayEntry(overlay)) }
+    fun pop() { if (overlays.isNotEmpty()) overlayStateHolder.removeState(overlays.removeAt(overlays.lastIndex).id) }
+    fun clearOverlays() { overlays.forEach { overlayStateHolder.removeState(it.id) }; overlays.clear() }
+    fun selectTab(target: Tab) {
+        if (tab == target) return
+        when (target) {
+            Tab.Catalog -> catalogEpoch++
+            Tab.Library -> libraryEpoch++
+            Tab.Profile -> profileEpoch++
+            Tab.Tools -> toolsEpoch++
+        }
+        clearOverlays()
+        tab = target
+    }
     // 详情页标签点选 → 返回目录并应用该标签为筛选
     var pendingTag by remember { mutableStateOf<String?>(null) }
     var openTranslationSettings by remember { mutableStateOf(false) }
 
-    BackHandler(enabled = !navigationLocked && overlays.isNotEmpty()) { overlays.removeAt(overlays.lastIndex) }
+    BackHandler(enabled = !navigationLocked && overlays.isNotEmpty()) { pop() }
     BackHandler(enabled = !navigationLocked && overlays.isEmpty()) {
         val now = System.currentTimeMillis()
         if (now - lastBack < 2000) {
@@ -183,7 +230,7 @@ private fun MainScreen() {
     }
 
     LaunchedEffect(navigationLocked) {
-        if (navigationLocked) { tab = Tab.Profile; overlays.clear() }
+        if (navigationLocked) { tab = Tab.Profile; clearOverlays() }
     }
     BackHandler(enabled = navigationLocked) {
         Toast.makeText(context, "请等待密钥操作完成并保存密钥", Toast.LENGTH_SHORT).show()
@@ -213,7 +260,7 @@ private fun MainScreen() {
                     NavigationBarItem(
                         selected = tab == t,
                         enabled = !navigationLocked,
-                        onClick = { tab = t },
+                        onClick = { selectTab(t) },
                         icon = {
                             Icon(
                                 when (t) {
@@ -232,46 +279,51 @@ private fun MainScreen() {
         },
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
-            // 各 Tab 状态独立保存：切换不丢列表与滚动位置
+            // 保留筛选/输入状态；主动切换主Tab只消费一次滚动重置。
             stateHolder.SaveableStateProvider(tab.name) {
                 when (tab) {
                     Tab.Catalog -> CatalogScreen(
-                        openDetail = { overlays.add(Overlay.Detail(it)) },
+                        openDetail = { push(Overlay.Detail(it)) },
                         pendingTag = pendingTag,
+                        scrollResetEpoch = catalogEpoch,
                         onConsumePendingTag = { pendingTag = null },
                     )
-                    Tab.Library -> LibraryScreen(openDetail = { overlays.add(Overlay.Detail(it)) })
-                    Tab.Profile -> ProfileScreen(onOpenMessages = { overlays.add(Overlay.Messages) })
-                    Tab.Tools -> ToolsScreen(openTranslationSettings = openTranslationSettings,
+                    Tab.Library -> LibraryScreen(openDetail = { push(Overlay.Detail(it)) }, scrollResetEpoch = libraryEpoch)
+                    Tab.Profile -> ProfileScreen(onOpenMessages = { push(Overlay.Messages) }, scrollResetEpoch = profileEpoch)
+                    Tab.Tools -> ToolsScreen(openTranslationSettings = openTranslationSettings, scrollResetEpoch = toolsEpoch,
                         onTranslationSettingsConsumed = { openTranslationSettings = false })
                 }
             }
-            overlays.lastOrNull()?.let { overlay ->
-                when (overlay) {
+            overlays.lastOrNull()?.let { entry ->
+                androidx.compose.runtime.key(entry.id) {
+                    overlayStateHolder.SaveableStateProvider(entry.id) {
+                when (val overlay = entry.overlay) {
                     is Overlay.Detail -> com.jxz666.slgking.ui.game.GameDetailScreen(
                         gameId = overlay.gameId,
-                        onBack = { overlays.removeAt(overlays.lastIndex) },
+                        onBack = { pop() },
                         openComments = { slug, title ->
-                            overlays.add(Overlay.Comments(slug, title))
+                            push(Overlay.Comments(slug, title))
                         },
                         onTagPicked = { tag ->
                             pendingTag = tag
-                            tab = Tab.Catalog
-                            overlays.clear()
+                            selectTab(Tab.Catalog)
+                            clearOverlays()
                         },
                         onOpenTranslationSettings = {
-                            overlays.clear()
-                            tab = Tab.Tools
+                            clearOverlays()
+                            selectTab(Tab.Tools)
                             openTranslationSettings = true
                         },
                     )
                     is Overlay.Comments -> com.jxz666.slgking.ui.comments.CommentsScreen(
                         slug = overlay.slug,
                         title = overlay.title,
-                        onBack = { overlays.removeAt(overlays.lastIndex) },
+                        onBack = { pop() },
                     )
                     Overlay.Messages -> com.jxz666.slgking.ui.community.MessageCenter(
-                        onClose = { overlays.removeAt(overlays.lastIndex) })
+                        onClose = { pop() })
+                }
+                    }
                 }
             }
         }

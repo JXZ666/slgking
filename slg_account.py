@@ -1051,6 +1051,30 @@ def request_legacy(points, titles):
         **clean, "source_digest": digest})
 
 
+def normalize_campaign_code(code):
+    """ASCII campaign codes only. Never accept unicode lookalike characters."""
+    import re
+    value = str(code or "").strip()
+    if not value.isascii():
+        return None
+    value = value.upper()
+    return value if re.fullmatch(r"ECHOES-(?:[0-9A-F]{8}-){3}[0-9A-F]{8}", value) else None
+
+
+def redeem_campaign(code):
+    value = normalize_campaign_code(code)
+    if not value:
+        raise AccountError("联动兑换码格式不正确，请检查后重试")
+    result = authenticated("/account/rewards/campaign/redeem", method="POST", payload={"code": value})
+    if (not isinstance(result, dict) or result.get("ok") is not True
+            or result.get("campaign_id") != "echoes-launch"
+            or result.get("title_id") != "echoes_of_abyss"
+            or not isinstance(result.get("already_claimed"), bool)
+            or result.get("gained") != (0 if result.get("already_claimed") else 100)):
+        raise AccountError("兑换结果未确认，请重新提交同一兑换码核对；不会重复发奖")
+    return result
+
+
 def redeem_group(code):
     return authenticated("/rewards/group", method="POST", payload={"code": code.strip()})
 

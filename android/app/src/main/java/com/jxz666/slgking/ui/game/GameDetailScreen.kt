@@ -80,6 +80,7 @@ fun GameDetailScreen(
     onTagPicked: (tag: String) -> Unit = { },
     onOpenTranslationSettings: () -> Unit = {},
 ) {
+    val detailScroll = rememberScrollState()
     var detail by remember(gameId) { mutableStateOf<GameDetail?>(null) }
     var error by remember(gameId) { mutableStateOf<String?>(null) }
     var reloading by remember(gameId) { mutableStateOf(false) }
@@ -132,7 +133,7 @@ fun GameDetailScreen(
                         Text("刷新失败：$message", color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp))
                         TextButton(onClick = { reload() }) { Text("重试刷新") }
                       }
-                      Box(Modifier.weight(1f)) { DetailBody(detail = detail!!, onMutation = { reload() },
+                      Box(Modifier.weight(1f)) { DetailBody(detail = detail!!, detailScroll = detailScroll, onMutation = { reload() },
                         openComments = openComments, onTagPicked = onTagPicked,
                         onBack = onBack, onOpenTranslationSettings = onOpenTranslationSettings) }
                     }
@@ -149,6 +150,7 @@ fun GameDetailScreen(
 @Composable
 private fun DetailBody(
     detail: GameDetail,
+    detailScroll: androidx.compose.foundation.ScrollState,
     onMutation: () -> Unit,
     openComments: (slug: String, title: String) -> Unit,
     onTagPicked: (tag: String) -> Unit,
@@ -185,7 +187,7 @@ private fun DetailBody(
     Column(
         Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(detailScroll)
             .padding(horizontal = 16.dp),
     ) {
         // 大封面

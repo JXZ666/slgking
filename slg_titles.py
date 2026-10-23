@@ -48,6 +48,8 @@ CONNOISSEUR_NEED = 10
 # desc 是给「查看头衔」里那颗「获得方式」按钮用的一句话简介；获取路径由
 # obtain_title_text() 从 obtain/cost/limited_until 推出来，不另写一份。
 TITLES = [
+    {"id": "echoes_of_abyss", "name": "深渊回响", "rarity": "史诗", "obtain": "campaign",
+     "desc": "《深渊回响》联动纪念，凭游戏内联动兑换码解锁，同时获得100云积分；每个账号限领一次。"},
     {"id": "referral_1", "name": "呼朋引伴", "rarity": "稀有", "obtain": "referral",
      "desc": "成功邀请一位新用户注册并绑定邀请码后获得。"},
     {"id": "referral_3", "name": "引路人", "rarity": "史诗", "obtain": "referral",
@@ -86,6 +88,7 @@ TITLES = [
 
 # 每条头衔的获取路径，一句话。obtain_hint() 是同一个来源的短标签版本。
 _OBTAIN_TEXT = {
+    "campaign": "在《深渊回响》游戏中获得联动兑换码，登录云账号后兑换；每账号一次，赠送100云积分。",
     "referral": "成功邀请并绑定新户后自动获得。",
     "default": "默认头衔，人人都有，无需获取。",
     "code": "加入交流群，用群公告里每天更新的当日兑换码兑换。",

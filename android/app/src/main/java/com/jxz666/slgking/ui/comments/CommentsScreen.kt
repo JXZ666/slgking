@@ -64,7 +64,8 @@ import org.json.JSONObject
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CommentsScreen(slug: String, title: String, onBack: () -> Unit) {
-    var sort by remember { mutableStateOf("latest") }
+    val commentsScroll = androidx.compose.foundation.lazy.rememberLazyListState()
+    var sort by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("latest") }
     var page by remember { mutableStateOf(1) }
     var rows by remember { mutableStateOf(listOf<JSONObject>()) }
     var local by remember { mutableStateOf(listOf<JSONObject>()) }
@@ -171,6 +172,7 @@ fun CommentsScreen(slug: String, title: String, onBack: () -> Unit) {
                 }
                 else -> LazyColumn(
                     Modifier.fillMaxSize(),
+                    state = commentsScroll,
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(
                         start = 12.dp, end = 12.dp, top = 6.dp, bottom = 88.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),

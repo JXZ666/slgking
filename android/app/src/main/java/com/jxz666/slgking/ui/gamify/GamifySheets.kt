@@ -113,6 +113,7 @@ fun ShopSheet(me: JSONObject?, onChanged: () -> Unit, onDismiss: () -> Unit) {
     var tab by remember { mutableStateOf("shop") }
     val scope = rememberCoroutineScope()
     val points = me?.optInt("balance") ?: 0
+    val shopScroll = androidx.compose.foundation.lazy.rememberLazyListState()
 
     LaunchedEffect(Unit) {
         try {
@@ -148,7 +149,7 @@ fun ShopSheet(me: JSONObject?, onChanged: () -> Unit, onDismiss: () -> Unit) {
             } else when {
                 error != null -> Text("加载失败：$error", color = MaterialTheme.colorScheme.error)
                 items == null -> CircularProgressIndicator()
-                else -> LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                else -> LazyColumn(state = shopScroll, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(items!!) { item ->
                         val id = item.optString("id")
                         val cost = item.optInt("cost")
@@ -499,18 +500,21 @@ private fun UUID.hex32(): String = toString().replace("-", "")
 /** 兑换码。 */
 @Composable
 fun RedeemDialog(onDone: () -> Unit, onDismiss: () -> Unit) {
+    val revision = com.jxz666.slgking.bridge.AccountChanges.revision
+    var changed by remember { mutableStateOf(false) }
+    fun close() { if (changed) onDone() else onDismiss() }
     var code by remember { mutableStateOf("") }
     var message by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!busy) close() },
         title = { Text("兑换码") },
         text = {
             Column {
                 OutlinedTextField(value = code, onValueChange = { code = it },
-                    label = { Text("群兑换码") }, singleLine = true)
+                    label = { Text("群兑换码／游戏联动码") }, singleLine = true, enabled = !busy)
                 message?.let {
                     Spacer(Modifier.height(6.dp))
                     Text(it, style = MaterialTheme.typography.labelMedium)
@@ -523,16 +527,21 @@ fun RedeemDialog(onDone: () -> Unit, onDismiss: () -> Unit) {
                 busy = true
                 scope.launch {
                     try {
-                        SlgApi.raw("redeem.code", JSONObject().put("code", code.trim()))
-                        message = "兑换成功"
-                        onDone()
+                        val result = SlgApi.raw("redeem.code", JSONObject().put("code", code.trim()))
+                        currentCoroutineContext().ensureActive()
+                        if (revision != com.jxz666.slgking.bridge.AccountChanges.revision) return@launch
+                        val reward = result.optJSONObject("redeem") ?: JSONObject()
+                        message = campaignRedemptionMessage(reward)
+                        changed = true
+                        code = ""
                     } catch (e: CancellationException) { throw e }
-                    catch (e: Exception) { message = e.message }
-                    busy = false
+                    catch (e: Exception) {
+                        if (revision == com.jxz666.slgking.bridge.AccountChanges.revision) message = e.message
+                    } finally { busy = false }
                 }
             }, enabled = code.isNotBlank() && !busy) { Text("兑换") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        dismissButton = { TextButton(enabled = !busy, onClick = { close() }) { Text("关闭") } },
     )
 }
 

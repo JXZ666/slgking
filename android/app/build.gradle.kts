@@ -15,7 +15,7 @@ android {
         applicationId = "com.jxz666.slgking"
         minSdk = 24
         targetSdk = 35
-        versionCode = 13
+        versionCode = 15
         versionName = "0.28.0"
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")

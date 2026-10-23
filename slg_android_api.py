@@ -860,6 +860,10 @@ def _h_redeem(req):
     code = str(req.get("code") or "").strip()
     if not code:
         return _err("请输入兑换码")
+    if code.upper().startswith("ECHOES-"):
+        if not slg_account.normalize_campaign_code(code):
+            return _err("联动兑换码格式不正确，请检查后重试")
+        return {"redeem": slg_account.redeem_campaign(code)}
     return {"redeem": slg_account.redeem_group(code)}
 
 
