@@ -1,3 +1,18 @@
+# Android 0.28.0/code15 联动与导航补丁验收
+
+本次在0.28正式源码上定向修改，构建提交 `e7fb4edb0c3496e54a46b0bc4727297d2dc44400`。APK SHA-256为 `60620beb6aed58cc43bfab1fc1cf8f18a617f28675a75374367c60e29cff675f`，同官方证书 `4730b97d4fb06a16aa89dd5aeed1a3cfd916d8e28e4c5a238d27e707b77cb9cc`；包名、Android7.0+、arm64-v8a/x86_64保持。
+
+- 清洁release构建、release JVM92项、lintVitalRelease、R8及签名验证通过；联动桥8项模拟测试通过。
+- 联动领取与重复反馈、旧群码兼容、非法码拒绝、账号迟到响应及异常结果处理已覆盖；测试只用虚构码，不连接正式奖励接口。
+- 主Tab消费独立滚动重置，当前Tab、返回与旋转不重复重置；覆盖栈序列化保持entryId。消息分区/分页、讨论、详情与商城不共用滚动位置。
+- 35个同步Python输入逐字节匹配构建来源；未导入Windows GUI/扫描器/collector。新头衔obtain=campaign，不加入商城或抽奖，云端领取账本负责跨设备幂等。
+- 本次未在现用设备降级安装code15，0.28安装升级路径未新增设备证据；code14至code16覆盖由联合发行主代理另行验证。真实账号发奖、正式兑换码、付费翻译和arm64真机未测试。
+- 构建沿用既有Chaquopy生成proguard文件缺失提示及部分so不能strip的警告；签名、R8、lint未关闭。
+
+以下是原code13的历史验收记录，不作为本次code15的新覆盖次数。
+
+---
+
 # Android 0.28.0 正式版验收
 
 本版 versionName `0.28.0`、versionCode `13`，包名 `com.jxz666.slgking`，应用名黄油之王，Android 7.0+，arm64-v8a / x86_64。由 0.28.0-a2 的既有功能正式化，仅修改版本与正式版可见标识，不扩展业务范围。

@@ -1,6 +1,6 @@
 # 黄油之王 Android 0.28.0
 
-Android 正式版独立源码。应用名黄油之王，包名 `com.jxz666.slgking`，versionName `0.28.0`，versionCode `13`，Android 7.0+，ABI `arm64-v8a` / `x86_64`。Android 移植由 vegetable dog（工程署名 zeratulzhou）贡献。
+Android 正式版独立源码。应用名黄油之王，包名 `com.jxz666.slgking`，versionName `0.28.0`，versionCode `15`，Android 7.0+，ABI `arm64-v8a` / `x86_64`。Android 移植由 vegetable dog（工程署名 zeratulzhou）贡献。
 
 ## 构建
 
@@ -35,3 +35,9 @@ Android 正式版独立源码。应用名黄油之王，包名 `com.jxz666.slgki
 离线桥：`python tools/smoke_android_api.py`；Android 契约：`python -m unittest discover -s tests -p "test_android*.py"`；JVM：`:app:testReleaseUnitTest`。测试使用隔离数据库和网络 mock，不使用真实账号或付费 Key。具体本次结果及设备未覆盖项见 `QA-0.28.0.md`。
 
 Python 核心 GPL-3.0（根 `LICENSE`）；Android 移植 MIT（`android/LICENSE` 与 `android/NOTICE`）。`SOURCE_MANIFEST.json` 记录实际公开源码输入，GitHub 标签自动源码不替代该独立 Android 源码。
+
+## 2026-10-23 联动与导航修复
+
+- 深渊回响史诗头衔及100云积分由联动兑换码领取，每个云端账号一次；兑换码不包含在应用或源码。
+- 主动切换其他主Tab回顶部；详情返回、同页刷新与旋转保留位置。消息分区、分页和新游戏详情使用独立滚动状态。
+- 构建从本Android版本来源独立进行，不混入另一版本的业务功能。定向验收及设备覆盖范围随交付清单提供。
