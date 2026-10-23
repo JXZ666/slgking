@@ -1,5 +1,6 @@
 {
-  "origin_commit": "c6f6bfd3d4f020d09819c776873d06540817eef4",
+  "origin_commit": "dd5dc891810d275baadaf5828b59316e686e79bd",
+  "scope": "Exact runtime, assets, build configuration, licence and regression inputs for the released EXE; release documentation is excluded to avoid self-references.",
   "files": [
     {
       "path": "LICENSE",
@@ -1603,8 +1604,8 @@
     },
     {
       "path": "slg_account.py",
-      "bytes": 52235,
-      "sha256": "864e34976cfee7cc032877fa8317445bbde42a2f74230f6335036a7f36784a4a"
+      "bytes": 52678,
+      "sha256": "e90f192f5974fe3d9ae62fc474400feb0232d6e4d2d07c503c01b5e3806d3ad1"
     },
     {
       "path": "slg_account_chip.py",
@@ -1630,6 +1631,11 @@
       "path": "slg_avatar_ui.py",
       "bytes": 7066,
       "sha256": "d3251968d8112bdca707a24ff3ace933bcd1b41e70c6a71272e9a5f094efff79"
+    },
+    {
+      "path": "slg_campaign_ui.py",
+      "bytes": 4056,
+      "sha256": "589503adc746cab4944fff81e49616b45672bc591474f1414b938ac397483994"
     },
     {
       "path": "slg_catalogue_query.py",
@@ -1733,8 +1739,8 @@
     },
     {
       "path": "slg_gui.py",
-      "bytes": 800210,
-      "sha256": "5557706fc2835a4d6d70b47d0f1fac12fb1112282970bc42dbdc0f0ba1f53607"
+      "bytes": 801142,
+      "sha256": "10f020016ee0144793eba8f24122ad302ceaed30de82995a7537181dec667f18"
     },
     {
       "path": "slg_header0273.py",
@@ -1845,6 +1851,11 @@
       "path": "slg_notification_ui.py",
       "bytes": 14332,
       "sha256": "62395141878919e6534def3bd4ce9afadd475aca1056c905bc8ad76c82b05f75"
+    },
+    {
+      "path": "slg_page_scroll.py",
+      "bytes": 1614,
+      "sha256": "bb7ecab53b3992f26c09cb1db29c82db9ce8879affa7b53fff6c45d36f288da4"
     },
     {
       "path": "slg_public_cover_cache.py",
@@ -1968,8 +1979,8 @@
     },
     {
       "path": "slg_titles.py",
-      "bytes": 37902,
-      "sha256": "bbef754be0518107620a022b69fca27676355914c81ef448c985612530d73135"
+      "bytes": 38234,
+      "sha256": "58616ab129cc2fab1bcc044911072b0df22e8bc632fc50cefd981f67110eb035"
     },
     {
       "path": "slg_translate.py",
@@ -2025,6 +2036,11 @@
       "path": "tests/test_dlsite_online.py",
       "bytes": 10122,
       "sha256": "96d20ed8353934db6f94b4cd3fd17312d1d68aa74646d1f062366aeeeee1334d"
+    },
+    {
+      "path": "tests/test_echoes_campaign_navigation.py",
+      "bytes": 8556,
+      "sha256": "e75ef6cf8004a3d46ff7dcf20213a015567e979d1d85b411c5452116c0a36cca"
     },
     {
       "path": "tests/test_engines.py",

@@ -3,17 +3,17 @@
   "platform": "Windows",
   "version": "0.28.0",
   "channel": "stable",
-  "original_build_commit": "c6f6bfd3d4f020d09819c776873d06540817eef4",
-  "source_snapshot": "Reviewed client-only snapshot without parent history",
+  "original_build_commit": "dd5dc891810d275baadaf5828b59316e686e79bd",
+  "source_snapshot": "Reviewed client-only snapshot with campaign redemption and page-owned scrolling.",
   "artifact": {
     "name": "slgking.exe",
-    "bytes": 28278386,
-    "sha256": "b13431f1f004983f52a2b107819836058ebfb665c207ff0f03aed4f8edd299d0",
-    "built_at": "2026-10-20T13:28:43+08:00"
+    "bytes": 28282180,
+    "sha256": "404a084f37a0639edcf952797e9dca767ce019dab7c0eb7011e317dc1b33c7ea",
+    "built_at": "2026-10-23T22:44:03+08:00"
   },
-  "preservation": "All original build inputs listed in SOURCE_MANIFEST.json are byte-for-byte unchanged.",
-  "original_file_count": 417,
-  "python_modules": 78,
+  "preservation": "Runtime and build inputs in SOURCE_MANIFEST.json match the frozen build commit byte-for-byte; only release documentation was updated afterward.",
+  "original_file_count": 420,
+  "python_modules": 80,
   "seeds": [
     {
       "path": "assets/seed/slgking.db",
@@ -55,5 +55,13 @@
         "sync_log": 0
       }
     }
-  ]
+  ],
+  "build_commit": "dd5dc891810d275baadaf5828b59316e686e79bd",
+  "build_input_manifest": "SOURCE_MANIFEST.json",
+  "build_input_manifest_sha256": "5d156dc960505a75c2aff42614aae9db9c2357a745a41352778e7c0de4a5111b",
+  "checks": {
+    "targeted_tests": 6,
+    "isolated_exe_smoke_exit": 0,
+    "campaign_secrets_in_client": false
+  }
 }
