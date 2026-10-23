@@ -10,6 +10,8 @@ that was the one thing about the previous tools the user actively disliked.
 """
 
 import calendar
+import slg_campaign_ui
+import slg_page_scroll
 import copy
 import json
 import math
@@ -3777,6 +3779,8 @@ class App(SafeFocusMixin, SyncProgressUI, PublicProfileUI, NavigationUI, ReplyUI
         a side effect, which is now done deliberately in _fill_detail.
         """
         game = self.selected
+        slg_page_scroll.begin(self, ("game", getattr(self, "catalogue_id", None), game["id"] if game else None))
+        slg_page_scroll.finish(self)
         if game is None:
             self._destroy_detail()
             ResourceLabel(self.detail, text="左边选一款游戏", text_color=MUTED,
@@ -7123,6 +7127,8 @@ class App(SafeFocusMixin, SyncProgressUI, PublicProfileUI, NavigationUI, ReplyUI
         # 修改昵称/个性装扮/兑换码 - still open dialogs. The content is grouped
         # into labelled sections so the flat pile of numbers reads as a dashboard.
         self._leave_collections_view()
+        slg_page_scroll.begin(self, "profile")
+        slg_page_scroll.finish(self)
         self._panel_mode = "profile"
         if self._is_admin_mode():
             self._ensure_developer_cloud_identity()
@@ -7910,6 +7916,7 @@ class App(SafeFocusMixin, SyncProgressUI, PublicProfileUI, NavigationUI, ReplyUI
         self._library_query_generation += 1
         self._collection_view_states = {}
         self._identity_generation += 1
+        self._campaign_pending = None
         self._shop_wallet_pending = None
         # Only this identity's UI lock is discarded. Its persisted request id
         # remains available for reconciliation when switching back.
@@ -8723,6 +8730,8 @@ class App(SafeFocusMixin, SyncProgressUI, PublicProfileUI, NavigationUI, ReplyUI
             except tk.TclError:
                 pass
             return
+        if kind.startswith("campaign:"):
+            return slg_campaign_ui.complete(self, kind, result, error)
         if kind == "group":
             if not error:
                 gained = int(result.get("gained") or 0)
@@ -10414,6 +10423,7 @@ class App(SafeFocusMixin, SyncProgressUI, PublicProfileUI, NavigationUI, ReplyUI
         if self._is_admin_mode():
             if not self._require_personal_access("\u7ba1\u7406\u5458\u62bd\u5956\u5de5\u5177"):
                 return
+            slg_page_scroll.begin(self, "shop")
             self._panel_mode = "shop"
             self._set_shop_wide_layout(True)
             self._destroy_detail()
@@ -10445,6 +10455,7 @@ class App(SafeFocusMixin, SyncProgressUI, PublicProfileUI, NavigationUI, ReplyUI
         # 积分商城 shares the detail panel exactly like 个人中心: the first click
         # swaps the panel over (temporarily covering any game shown), and buying
         # or drawing re-renders it in place.
+        slg_page_scroll.begin(self, "shop")
         self._panel_mode = "shop"
         self._set_shop_wide_layout(True)
         self._destroy_detail()
@@ -10848,7 +10859,7 @@ class App(SafeFocusMixin, SyncProgressUI, PublicProfileUI, NavigationUI, ReplyUI
         layout_changed = previous is not None and previous[0] != cols
         self._shop_cols = (cols, tile_w)
         canvas = getattr(self.detail, "_parent_canvas", None)
-        scroll = canvas.yview()[0] if canvas is not None else None
+        scroll = slg_page_scroll.snapshot(self, canvas) if canvas is not None else None
         focused = self.focus_get()
         focus_key = None
         for item_id, card in getattr(self, "_shop_cards", {}).items():
@@ -10902,8 +10913,8 @@ class App(SafeFocusMixin, SyncProgressUI, PublicProfileUI, NavigationUI, ReplyUI
         def restore():
             if not valid():
                 return
-            if canvas is not None and scroll is not None and abs(canvas.yview()[0] - scroll) > 1e-6:
-                canvas.yview_moveto(scroll)
+            if canvas is not None and scroll is not None:
+                slg_page_scroll.restore(self, canvas, scroll)
             if focused is not None and focused.winfo_exists():
                 if self.focus_get() != focused:
                     focused.focus_set()
@@ -12345,7 +12356,7 @@ class App(SafeFocusMixin, SyncProgressUI, PublicProfileUI, NavigationUI, ReplyUI
             self._invite_dialog_account_id = None
 
         ResourceLabel(
-            redeem_page, text="新版群内每日码可在云端领取 10 积分及群友头衔。",
+            redeem_page, text="支持群内每日码和游戏联动兑换码。联动奖励每个云端账号仅可领取一次。",
             text_color=MUTED, font=ui_font(size=11), wraplength=360,
             justify="left").pack(anchor="w", fill="x", padx=4, pady=(5, 10))
         entry = ctk.CTkEntry(
@@ -12363,9 +12374,15 @@ class App(SafeFocusMixin, SyncProgressUI, PublicProfileUI, NavigationUI, ReplyUI
         def do_redeem():
             if not self._require_regular_user_mode("\u5151\u6362\u7801\u4e0e\u9080\u8bf7\u7801"):
                 return
-            code = entry.get().strip()
+            if getattr(self, "_campaign_pending", None):
+                feedback.configure(text="正在领取联动奖励，请稍候。", text_color=MUTED)
+                return
+            code = entry.get().strip(" \t\r\n\v\f")
             if not code:
                 feedback.configure(text="请输入兑换码。", text_color=DANGER_TEXT)
+                return
+            if slg_campaign_ui.handles(code):
+                slg_campaign_ui.submit(self, code)
                 return
             if slg_titles.is_cloud_group_code_format(code):
                 try:
@@ -12394,11 +12411,12 @@ class App(SafeFocusMixin, SyncProgressUI, PublicProfileUI, NavigationUI, ReplyUI
                     text="旧版群码仅解锁本机头衔；每日 +10 积分请使用新版群码。",
                     text_color=MUTED)
 
-        ResourceButton(
+        self._redeem_submit = ResourceButton(
             redeem_page, text="兑换", height=34, corner_radius=8,
             fg_color=ACCENT, text_color_disabled=ON_ACCENT, text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER, font=ui_font(size=13),
-            command=do_redeem).pack(fill="x", padx=4, pady=(12, 0))
+            command=do_redeem)
+        self._redeem_submit.pack(fill="x", padx=4, pady=(12, 0))
 
         def switch_tab(value):
             if value not in ("兑换码", "邀请码"):

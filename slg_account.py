@@ -28,6 +28,7 @@ import urllib.parse
 import urllib.request
 
 import slg_db
+import slg_titles
 import slg_server_transport
 from slg_sync_server import SERVER_BASE
 
@@ -907,7 +908,8 @@ def migrate_legacy():
         if slg_db.tamper_report(conn) is not None:
             raise AccountError("本机存档完整性校验未通过，旧资产暂不自动迁移；请联系管理员核对")
         points = max(0, int(slg_db.points_balance(conn)))
-        titles = sorted(slg_db.owned_title_ids(conn))
+        titles = sorted(title_id for title_id in slg_db.owned_title_ids(conn)
+                        if (slg_titles.title_by_id(title_id) or {}).get("obtain") != "campaign")
         if points == 0 and not titles:
             result = {"ok": True, "status": "nothing_to_migrate",
                       "points_added": 0, "titles_added": 0}
@@ -1049,6 +1051,13 @@ def request_legacy(points, titles):
                                       sort_keys=True).encode("utf-8")).hexdigest()
     return authenticated("/account/legacy-request", method="POST", payload={
         **clean, "source_digest": digest})
+
+
+def redeem_campaign(code):
+    """Redeem a cloud-only activity code for the captured account session."""
+    from slg_campaign_ui import normalize_code
+    return authenticated("/account/rewards/campaign/redeem", method="POST",
+                         payload={"code": normalize_code(code)})
 
 
 def redeem_group(code):
